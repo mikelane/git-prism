@@ -1,0 +1,5 @@
+# Default reviewer for all files
+* @mikelane
+
+# Workflow files
+/.github/workflows/** @mikelane
