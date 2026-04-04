@@ -3,11 +3,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GitError {
-    #[error("failed to open repository at '{0}': {1}")]
-    OpenRepo(String, String),
+    #[error(
+        "Not a git repository at '{0}'. Run git-prism from inside a git repo, or use --repo to specify one."
+    )]
+    OpenRepo(String),
 
-    #[error("failed to resolve ref '{0}': {1}")]
-    ResolveRef(String, String),
+    #[error("Could not find ref '{0}'. Check that the branch, tag, or SHA exists.")]
+    ResolveRef(String),
 
     #[error("failed to read object: {0}")]
     ReadObject(String),
@@ -19,14 +21,16 @@ pub struct CommitInfo {
     pub message: String,
 }
 
+#[derive(Debug)]
 pub struct RepoReader {
     repo: gix::Repository,
 }
 
 impl RepoReader {
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
-        let repo = gix::open(path)
-            .map_err(|e| GitError::OpenRepo(path.display().to_string(), e.to_string()))?;
+        // Raw gix error omitted from user-facing message — it contains internal
+        // paths and format that aren't actionable for the caller.
+        let repo = gix::open(path).map_err(|_| GitError::OpenRepo(path.display().to_string()))?;
         Ok(Self { repo })
     }
 
@@ -74,7 +78,8 @@ impl RepoReader {
         let rev = self
             .repo
             .rev_parse_single(refspec)
-            .map_err(|e| GitError::ResolveRef(refspec.to_string(), e.to_string()))?;
+            // Raw gix error omitted — see OpenRepo for rationale.
+            .map_err(|_| GitError::ResolveRef(refspec.to_string()))?;
 
         let object = rev
             .object()
@@ -143,6 +148,54 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let reader = RepoReader::open(dir.path());
         assert!(reader.is_err());
+    }
+
+    // Each OpenRepo error test creates its own TempDir — intentionally not extracted
+    // because the setup is a one-liner and each test asserts a distinct facet.
+    #[test]
+    fn open_repo_error_message_says_not_a_git_repository() {
+        let dir = TempDir::new().unwrap();
+        let err = RepoReader::open(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Not a git repository"),
+            "expected 'Not a git repository' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn open_repo_error_message_includes_path() {
+        let dir = TempDir::new().unwrap();
+        let err = RepoReader::open(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        let expected_path = dir.path().display().to_string();
+        assert!(
+            msg.contains(&expected_path),
+            "expected path '{expected_path}' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn open_repo_error_message_suggests_repo_flag() {
+        let dir = TempDir::new().unwrap();
+        let err = RepoReader::open(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--repo"), "expected '--repo' hint in: {msg}");
+    }
+
+    #[test]
+    fn open_repo_error_for_nonexistent_path_includes_that_path() {
+        let path = std::path::Path::new("/nonexistent/fake/path");
+        let err = RepoReader::open(path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/nonexistent/fake/path"),
+            "expected path in: {msg}"
+        );
+        assert!(
+            msg.contains("Not a git repository"),
+            "expected 'Not a git repository' in: {msg}"
+        );
     }
 
     #[test]
@@ -214,5 +267,41 @@ mod tests {
         let reader = RepoReader::open(&path).unwrap();
         let result = reader.read_file_at_ref("HEAD", "nonexistent.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_ref_error_says_could_not_find_ref() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("nonexistent-branch").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Could not find ref"),
+            "expected 'Could not find ref' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_ref_error_includes_ref_name() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("nonexistent-branch").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nonexistent-branch"),
+            "expected ref name in: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_ref_error_suggests_checking_ref_exists() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("nonexistent-branch").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("branch, tag, or SHA"),
+            "expected suggestion in: {msg}"
+        );
     }
 }
