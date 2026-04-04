@@ -17,3 +17,7 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# A GitHub repo to push Homebrew formulas to
+tap = "mikelane/homebrew-tap"
+# Publish Homebrew formula to the tap on release
+publish-jobs = ["homebrew"]
