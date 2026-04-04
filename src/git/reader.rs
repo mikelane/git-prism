@@ -3,8 +3,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GitError {
-    #[error("failed to open repository at '{0}': {1}")]
-    OpenRepo(String, String),
+    #[error(
+        "Not a git repository at '{0}'. Run git-prism from inside a git repo, or use --repo to specify one."
+    )]
+    OpenRepo(String),
 
     #[error("failed to resolve ref '{0}': {1}")]
     ResolveRef(String, String),
@@ -19,14 +21,14 @@ pub struct CommitInfo {
     pub message: String,
 }
 
+#[derive(Debug)]
 pub struct RepoReader {
     repo: gix::Repository,
 }
 
 impl RepoReader {
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
-        let repo = gix::open(path)
-            .map_err(|e| GitError::OpenRepo(path.display().to_string(), e.to_string()))?;
+        let repo = gix::open(path).map_err(|_| GitError::OpenRepo(path.display().to_string()))?;
         Ok(Self { repo })
     }
 
@@ -143,6 +145,52 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let reader = RepoReader::open(dir.path());
         assert!(reader.is_err());
+    }
+
+    #[test]
+    fn open_repo_error_message_says_not_a_git_repository() {
+        let dir = TempDir::new().unwrap();
+        let err = RepoReader::open(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Not a git repository"),
+            "expected 'Not a git repository' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn open_repo_error_message_includes_path() {
+        let dir = TempDir::new().unwrap();
+        let err = RepoReader::open(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        let expected_path = dir.path().display().to_string();
+        assert!(
+            msg.contains(&expected_path),
+            "expected path '{expected_path}' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn open_repo_error_message_suggests_repo_flag() {
+        let dir = TempDir::new().unwrap();
+        let err = RepoReader::open(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--repo"), "expected '--repo' hint in: {msg}");
+    }
+
+    #[test]
+    fn open_repo_error_for_nonexistent_path_includes_that_path() {
+        let path = std::path::Path::new("/nonexistent/fake/path");
+        let err = RepoReader::open(path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/nonexistent/fake/path"),
+            "expected path in: {msg}"
+        );
+        assert!(
+            msg.contains("Not a git repository"),
+            "expected 'Not a git repository' in: {msg}"
+        );
     }
 
     #[test]
