@@ -70,7 +70,8 @@ fn parse_cargo_toml_deps(content: &str) -> std::collections::HashMap<String, Str
         if trimmed.starts_with('[') {
             in_deps_section = trimmed == "[dependencies]"
                 || trimmed == "[dev-dependencies]"
-                || trimmed == "[build-dependencies]";
+                || trimmed == "[build-dependencies]"
+                || trimmed == "[workspace.dependencies]";
             continue;
         }
 
@@ -83,17 +84,8 @@ fn parse_cargo_toml_deps(content: &str) -> std::collections::HashMap<String, Str
             let rest = rest.trim();
             let version = if rest.starts_with('"') {
                 rest.trim_matches('"').to_string()
-            } else if rest.contains("version") {
-                rest.split("version")
-                    .nth(1)
-                    .and_then(|s| {
-                        let s = s.trim().trim_start_matches('=').trim();
-                        s.split('"').nth(1)
-                    })
-                    .unwrap_or("")
-                    .to_string()
             } else {
-                String::new()
+                extract_version_key(rest)
             };
             if !name.is_empty() {
                 deps.insert(name, version);
@@ -101,6 +93,21 @@ fn parse_cargo_toml_deps(content: &str) -> std::collections::HashMap<String, Str
         }
     }
     deps
+}
+
+fn extract_version_key(inline_table: &str) -> String {
+    // Look for `version = "..."` as a key-value pattern within a TOML inline table.
+    // Splits on commas to isolate key-value pairs, then finds the one starting with "version".
+    for part in inline_table.split(',') {
+        let part = part.trim().trim_start_matches('{').trim_end_matches('}').trim();
+        if let Some((key, val)) = part.split_once('=') {
+            if key.trim() == "version" {
+                let val = val.trim().trim_matches('"');
+                return val.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn diff_cargo_toml(path: &str, before: &str, after: &str) -> DependencyDiff {
@@ -309,6 +316,42 @@ mod tests {
         assert_eq!(result.added.len(), 1);
         assert_eq!(result.added[0].name, "toml");
         assert_eq!(result.added[0].new_version.as_deref(), Some("0.8"));
+    }
+
+    #[test]
+    fn it_parses_workspace_dependencies_section() {
+        let before = "";
+        let after = "[workspace.dependencies]\nserde = \"1.0\"\ntokio = { version = \"1.0\", features = [\"full\"] }\n";
+        let result = diff_dependencies("Cargo.toml", before, after).unwrap();
+        assert_eq!(result.added.len(), 2);
+        let names: Vec<&str> = result.added.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"serde"), "should find serde in workspace.dependencies");
+        assert!(names.contains(&"tokio"), "should find tokio in workspace.dependencies");
+    }
+
+    #[test]
+    fn it_does_not_match_version_inside_url() {
+        // A git dependency with a URL containing "version" should not extract garbage
+        let before = "";
+        let after = "[dependencies]\nmy-crate = { git = \"https://github.com/org/version-manager.git\", branch = \"main\" }\n";
+        let result = diff_dependencies("Cargo.toml", before, after).unwrap();
+        assert_eq!(result.added.len(), 1);
+        // Should be empty string (no version specified), not some substring of the URL
+        assert_eq!(
+            result.added[0].new_version.as_deref(),
+            Some(""),
+            "git dep with no version key should have empty version, not URL fragment"
+        );
+    }
+
+    #[test]
+    fn it_extracts_version_after_features() {
+        let before = "";
+        let after = "[dependencies]\ntokio = { features = [\"full\"], version = \"1.0\" }\n";
+        let result = diff_dependencies("Cargo.toml", before, after).unwrap();
+        assert_eq!(result.added.len(), 1);
+        assert_eq!(result.added[0].name, "tokio");
+        assert_eq!(result.added[0].new_version.as_deref(), Some("1.0"));
     }
 
     #[test]
