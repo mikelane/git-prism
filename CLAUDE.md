@@ -46,6 +46,14 @@ cargo build --release          # release build
 3. Register extension in `src/treesitter/mod.rs` registry
 4. Add table-driven tests with known source snippets
 
+## Git Hooks (lefthook)
+
+A pre-push hook runs `fmt --check`, `clippy`, and `test` before every push. Managed by [lefthook](https://github.com/evilmartians/lefthook) via `lefthook.yml`. After cloning:
+```bash
+lefthook install
+```
+Never use `--no-verify` to skip hooks.
+
 ## Design Doc
 
 Full JSON schemas for both MCP tools: `@/Users/mikelane/dev/git-prism-architecture.md`
