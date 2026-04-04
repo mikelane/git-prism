@@ -19,12 +19,11 @@ fn extract_receiver_type(source: &[u8], node: &tree_sitter::Node) -> String {
     // The receiver is a parameter_list; find the type inside it
     let mut cursor = receiver.walk();
     for child in receiver.children(&mut cursor) {
-        if child.kind() == "parameter_declaration" {
-            if let Some(type_node) = child.child_by_field_name("type") {
-                // Handle pointer receivers like *Server
-                let type_text = type_node.utf8_text(source).unwrap_or("");
-                return type_text.trim_start_matches('*').to_string();
-            }
+        if child.kind() == "parameter_declaration"
+            && let Some(type_node) = child.child_by_field_name("type")
+        {
+            let type_text = type_node.utf8_text(source).unwrap_or("");
+            return type_text.trim_start_matches('*').to_string();
         }
     }
     String::new()
@@ -48,10 +47,10 @@ fn collect_import_paths(source: &[u8], node: &tree_sitter::Node, imports: &mut V
             "import_spec_list" => {
                 let mut inner = child.walk();
                 for spec in child.children(&mut inner) {
-                    if spec.kind() == "import_spec" {
-                        if let Some(path) = import_path_from_spec(source, &spec) {
-                            imports.push(path);
-                        }
+                    if spec.kind() == "import_spec"
+                        && let Some(path) = import_path_from_spec(source, &spec)
+                    {
+                        imports.push(path);
                     }
                 }
             }
