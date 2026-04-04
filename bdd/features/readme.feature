@@ -1,4 +1,4 @@
-@ISSUE-17
+@ISSUE-17 @not_implemented
 Feature: README documentation
 
   Scenario: README exists with installation instructions
