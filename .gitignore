@@ -3,3 +3,6 @@
 .DS_Store
 CLAUDE.local.md
 mutants.out*
+bdd/.venv/
+__pycache__/
+*.pyc
