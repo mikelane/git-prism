@@ -31,9 +31,12 @@ Once published to crates.io, `cargo install git-prism` will also work.
 Grab a prebuilt binary from the
 [GitHub Releases](https://github.com/mikelane/git-prism/releases) page.
 
-### Homebrew
+### Homebrew (macOS and Linux)
 
-Not yet available. A Homebrew tap is planned for a future release.
+```bash
+brew tap mikelane/tap
+brew install git-prism
+```
 
 ## MCP Registration
 
