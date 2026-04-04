@@ -6,7 +6,11 @@ mod treesitter;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "git-prism", version, about = "Agent-optimized git data MCP server")]
+#[command(
+    name = "git-prism",
+    version,
+    about = "Agent-optimized git data MCP server"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

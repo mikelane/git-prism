@@ -1,10 +1,14 @@
+// Analyzers and helpers are pub(crate) but not yet consumed outside tests;
+// the dead_code warnings will resolve when the manifest tool integrates this module.
+#![allow(dead_code)]
+
 pub mod go;
 pub mod python;
 pub mod rust_lang;
 pub mod typescript;
 
 /// A function extracted from source code by tree-sitter analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Function {
     pub name: String,
     pub signature: String,
@@ -23,9 +27,50 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
     match ext {
         "go" => Some(Box::new(go::GoAnalyzer)),
         "py" => Some(Box::new(python::PythonAnalyzer)),
-        "ts" | "tsx" => Some(Box::new(typescript::TypeScriptAnalyzer)),
-        "js" | "jsx" => Some(Box::new(typescript::TypeScriptAnalyzer)),
+        "ts" => Some(Box::new(typescript::TypeScriptAnalyzer::typescript())),
+        "tsx" => Some(Box::new(typescript::TypeScriptAnalyzer::tsx())),
+        "js" | "jsx" => Some(Box::new(typescript::TypeScriptAnalyzer::javascript())),
         "rs" => Some(Box::new(rust_lang::RustAnalyzer)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_returns_some_for_supported_extensions() {
+        for ext in &["go", "py", "ts", "tsx", "js", "jsx", "rs"] {
+            assert!(
+                analyzer_for_extension(ext).is_some(),
+                "expected Some for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_returns_none_for_unsupported_extensions() {
+        for ext in &["rb", "java", "c", "cpp", "txt", ""] {
+            assert!(
+                analyzer_for_extension(ext).is_none(),
+                "expected None for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn function_serializes_to_json() {
+        let f = Function {
+            name: "main".into(),
+            signature: "fn main()".into(),
+            start_line: 1,
+            end_line: 3,
+        };
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["name"], "main");
+        assert_eq!(json["signature"], "fn main()");
+        assert_eq!(json["start_line"], 1);
+        assert_eq!(json["end_line"], 3);
     }
 }
