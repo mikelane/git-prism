@@ -9,7 +9,7 @@ pub enum GitError {
     OpenRepo(String),
 
     #[error("Could not find ref '{0}'. Check that the branch, tag, or SHA exists.")]
-    ResolveRef(String, String),
+    ResolveRef(String),
 
     #[error("failed to read object: {0}")]
     ReadObject(String),
@@ -28,6 +28,8 @@ pub struct RepoReader {
 
 impl RepoReader {
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
+        // Raw gix error omitted from user-facing message — it contains internal
+        // paths and format that aren't actionable for the caller.
         let repo = gix::open(path).map_err(|_| GitError::OpenRepo(path.display().to_string()))?;
         Ok(Self { repo })
     }
@@ -76,7 +78,8 @@ impl RepoReader {
         let rev = self
             .repo
             .rev_parse_single(refspec)
-            .map_err(|e| GitError::ResolveRef(refspec.to_string(), e.to_string()))?;
+            // Raw gix error omitted — see OpenRepo for rationale.
+            .map_err(|_| GitError::ResolveRef(refspec.to_string()))?;
 
         let object = rev
             .object()
@@ -147,6 +150,8 @@ mod tests {
         assert!(reader.is_err());
     }
 
+    // Each OpenRepo error test creates its own TempDir — intentionally not extracted
+    // because the setup is a one-liner and each test asserts a distinct facet.
     #[test]
     fn open_repo_error_message_says_not_a_git_repository() {
         let dir = TempDir::new().unwrap();
