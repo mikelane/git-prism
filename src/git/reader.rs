@@ -67,7 +67,7 @@ impl RepoReader {
             .map_err(|e| GitError::ReadObject(e.to_string()))
     }
 
-    fn peel_to_commit(&self, refspec: &str) -> Result<gix::Commit<'_>, GitError> {
+    pub(crate) fn peel_to_commit(&self, refspec: &str) -> Result<gix::Commit<'_>, GitError> {
         let rev = self
             .repo
             .rev_parse_single(refspec)
