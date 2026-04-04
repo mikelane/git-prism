@@ -4,7 +4,7 @@ pub mod rust_lang;
 pub mod typescript;
 
 /// A function extracted from source code by tree-sitter analysis.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Function {
     pub name: String,
     pub signature: String,
