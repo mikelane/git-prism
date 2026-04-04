@@ -70,7 +70,9 @@ fn signature_text(source: &[u8], node: &tree_sitter::Node) -> String {
 impl LanguageAnalyzer for GoAnalyzer {
     fn extract_functions(&self, source: &[u8]) -> anyhow::Result<Vec<Function>> {
         let mut parser = create_parser();
-        let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("Failed to parse Go source"))?;
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse Go source"))?;
         let root = tree.root_node();
         let mut functions = Vec::new();
 

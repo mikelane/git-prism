@@ -176,7 +176,10 @@ from typing import List, Optional
         let imports = analyzer.extract_imports(source).unwrap();
         assert_eq!(
             imports,
-            vec!["from os.path import join", "from typing import List, Optional"]
+            vec![
+                "from os.path import join",
+                "from typing import List, Optional"
+            ]
         );
     }
 

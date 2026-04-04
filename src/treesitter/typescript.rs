@@ -108,9 +108,7 @@ fn extract_functions_from_node(
                 for decl_child in child.children(&mut decl_cursor) {
                     if decl_child.kind() == "variable_declarator" {
                         let value = decl_child.child_by_field_name("value");
-                        let is_arrow = value
-                            .map(|v| v.kind() == "arrow_function")
-                            .unwrap_or(false);
+                        let is_arrow = value.map(|v| v.kind() == "arrow_function").unwrap_or(false);
                         if is_arrow {
                             let fn_name = decl_child
                                 .child_by_field_name("name")
