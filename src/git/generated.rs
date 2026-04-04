@@ -14,7 +14,10 @@ impl GeneratedFileDetector {
     }
 
     fn matches_path_pattern(path: &str) -> bool {
-        const DIR_PREFIXES: &[&str] = &["vendor/", "node_modules/"];
+        const DIR_PATTERNS: &[(&str, &str)] = &[
+            ("vendor/", "/vendor/"),
+            ("node_modules/", "/node_modules/"),
+        ];
 
         const EXACT_NAMES: &[&str] = &[
             "Cargo.lock",
@@ -31,7 +34,10 @@ impl GeneratedFileDetector {
 
         let filename = path.rsplit('/').next().unwrap_or(path);
 
-        if DIR_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+        if DIR_PATTERNS
+            .iter()
+            .any(|(prefix, nested)| path.starts_with(prefix) || path.contains(nested))
+        {
             return true;
         }
 
@@ -135,6 +141,39 @@ mod tests {
     fn it_does_not_flag_normal_content() {
         let content = "fn main() {\n    println!(\"hello\");\n}\n";
         assert!(!GeneratedFileDetector::is_generated("src/main.rs", Some(content)));
+    }
+
+    #[test]
+    fn it_detects_nested_node_modules_as_generated() {
+        assert!(GeneratedFileDetector::is_generated(
+            "packages/ui/node_modules/react/index.js",
+            None,
+        ));
+    }
+
+    #[test]
+    fn it_detects_nested_vendor_directory_as_generated() {
+        assert!(GeneratedFileDetector::is_generated(
+            "apps/backend/vendor/github.com/foo/bar.go",
+            None,
+        ));
+    }
+
+    #[test]
+    fn it_does_not_flag_vendor_as_substring_in_filename() {
+        // "vendor_utils.rs" contains "vendor" but it's not a vendor directory
+        assert!(!GeneratedFileDetector::is_generated(
+            "src/vendor_utils.rs",
+            None,
+        ));
+    }
+
+    #[test]
+    fn it_does_not_flag_node_modules_as_substring_in_filename() {
+        assert!(!GeneratedFileDetector::is_generated(
+            "docs/node_modules_guide.md",
+            None,
+        ));
     }
 
     #[test]
