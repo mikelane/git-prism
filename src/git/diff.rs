@@ -54,7 +54,7 @@ impl RepoReader {
                         entry_mode: _,
                         relation: _,
                     } => {
-                        let (size_after, is_binary, lines_added) = blob_stats(&id);
+                        let (size_after, is_binary, lines_added) = blob_stats(&id)?;
                         FileChange {
                             path: location.to_string(),
                             old_path: None,
@@ -72,7 +72,7 @@ impl RepoReader {
                         entry_mode: _,
                         relation: _,
                     } => {
-                        let (size_before, is_binary, lines_removed) = blob_stats(&id);
+                        let (size_before, is_binary, lines_removed) = blob_stats(&id)?;
                         FileChange {
                             path: location.to_string(),
                             old_path: None,
@@ -91,25 +91,25 @@ impl RepoReader {
                         previous_entry_mode: _,
                         entry_mode: _,
                     } => {
-                        let old_obj = previous_id.object().ok();
-                        let new_obj = id.object().ok();
+                        let old_obj = previous_id
+                            .object()
+                            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                        let new_obj = id
+                            .object()
+                            .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
-                        let size_before = old_obj.as_ref().map_or(0, |o| o.data.len());
-                        let size_after = new_obj.as_ref().map_or(0, |o| o.data.len());
+                        let size_before = old_obj.data.len();
+                        let size_after = new_obj.data.len();
 
-                        let is_binary = old_obj
-                            .as_ref()
-                            .is_some_and(|o| o.data.contains(&0))
-                            || new_obj
-                                .as_ref()
-                                .is_some_and(|o| o.data.contains(&0));
+                        let is_binary =
+                            old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
                         let (lines_added, lines_removed) = if is_binary {
                             (0, 0)
                         } else {
                             count_line_changes(
-                                old_obj.as_ref().map(|o| o.data.as_ref()),
-                                new_obj.as_ref().map(|o| o.data.as_ref()),
+                                Some(old_obj.data.as_ref()),
+                                Some(new_obj.data.as_ref()),
                             )
                         };
 
@@ -136,18 +136,18 @@ impl RepoReader {
                         entry_mode: _,
                         relation: _,
                     } => {
-                        let old_obj = source_id.object().ok();
-                        let new_obj = id.object().ok();
+                        let old_obj = source_id
+                            .object()
+                            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                        let new_obj = id
+                            .object()
+                            .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
-                        let size_before = old_obj.as_ref().map_or(0, |o| o.data.len());
-                        let size_after = new_obj.as_ref().map_or(0, |o| o.data.len());
+                        let size_before = old_obj.data.len();
+                        let size_after = new_obj.data.len();
 
-                        let is_binary = old_obj
-                            .as_ref()
-                            .is_some_and(|o| o.data.contains(&0))
-                            || new_obj
-                                .as_ref()
-                                .is_some_and(|o| o.data.contains(&0));
+                        let is_binary =
+                            old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
                         let (lines_added, lines_removed) = match diff {
                             Some(stats) => (stats.insertions as usize, stats.removals as usize),
@@ -168,7 +168,7 @@ impl RepoReader {
                 };
 
                 files.push(file_change);
-                Ok::<gix::object::tree::diff::Action, std::convert::Infallible>(
+                Ok::<gix::object::tree::diff::Action, GitError>(
                     gix::object::tree::diff::Action::Continue,
                 )
             })
@@ -182,21 +182,19 @@ fn obj_err(e: impl std::fmt::Display) -> GitError {
     GitError::ReadObject(e.to_string())
 }
 
-fn blob_stats(id: &gix::Id<'_>) -> (usize, bool, usize) {
-    match id.object() {
-        Ok(obj) => {
-            let is_binary = obj.data.contains(&0);
-            let lines = if is_binary || obj.data.is_empty() {
-                0
-            } else {
-                let newline_count = obj.data.iter().filter(|&&b| b == b'\n').count();
-                let last_byte = obj.data[obj.data.len() - 1];
-                newline_count + if last_byte != b'\n' { 1 } else { 0 }
-            };
-            (obj.data.len(), is_binary, lines)
-        }
-        Err(_) => (0, false, 0),
-    }
+fn blob_stats(id: &gix::Id<'_>) -> Result<(usize, bool, usize), GitError> {
+    let obj = id
+        .object()
+        .map_err(|e| GitError::ReadObject(e.to_string()))?;
+    let is_binary = obj.data.contains(&0);
+    let lines = if is_binary || obj.data.is_empty() {
+        0
+    } else {
+        let newline_count = obj.data.iter().filter(|&&b| b == b'\n').count();
+        let last_byte = obj.data[obj.data.len() - 1];
+        newline_count + if last_byte != b'\n' { 1 } else { 0 }
+    };
+    Ok((obj.data.len(), is_binary, lines))
 }
 
 fn count_line_changes(old_data: Option<&[u8]>, new_data: Option<&[u8]>) -> (usize, usize) {
@@ -492,6 +490,23 @@ mod tests {
             .find(|f| f.path == "twolines.txt")
             .unwrap();
         assert_eq!(file.lines_added, 2, "'one\\ntwo\\n' is 2 lines, not 3");
+    }
+
+    #[test]
+    fn it_propagates_blob_errors_through_diff_commits() {
+        // Verify that diff_commits returns Result and that successful blob fetches
+        // produce correct data (not silent zeros from swallowed errors).
+        let (_dir, path) = create_repo_with_two_commits();
+        let reader = RepoReader::open(&path).unwrap();
+        let result = reader.diff_commits("HEAD~1", "HEAD");
+        assert!(result.is_ok(), "diff_commits with valid refs should succeed");
+
+        let diff = result.unwrap();
+        let file = &diff.files[0];
+        // "new file\n" = 9 bytes, 1 line. If blob_stats silently returned zeros,
+        // these would be 0 — catching the regression.
+        assert_eq!(file.size_after, 9);
+        assert_eq!(file.lines_added, 1);
     }
 
     #[test]
