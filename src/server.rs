@@ -42,10 +42,9 @@ impl GitPrismServer {
         Parameters(args): Parameters<ManifestArgs>,
     ) -> Result<Json<ManifestResponse>, String> {
         tokio::task::spawn_blocking(move || {
-            let repo_path = args
-                .repo_path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let repo_path = args.repo_path.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine working directory")
+            });
             let head_ref = args.head_ref.as_deref().unwrap_or("HEAD");
             let options = ManifestOptions {
                 include_patterns: args.include_patterns,
@@ -71,10 +70,9 @@ impl GitPrismServer {
         Parameters(args): Parameters<SnapshotArgs>,
     ) -> Result<Json<SnapshotResponse>, String> {
         tokio::task::spawn_blocking(move || {
-            let repo_path = args
-                .repo_path
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let repo_path = args.repo_path.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine working directory")
+            });
             let head_ref = args.head_ref.as_deref().unwrap_or("HEAD");
             let options = SnapshotOptions {
                 include_before: args.include_before,

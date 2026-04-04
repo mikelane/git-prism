@@ -115,7 +115,8 @@ fn build_file_content(content: String, options: &SnapshotOptions) -> Option<File
     let truncated = size_bytes > options.max_file_size_bytes;
 
     let mut final_content = if truncated {
-        content[..options.max_file_size_bytes].to_string()
+        let safe_len = content.floor_char_boundary(options.max_file_size_bytes);
+        content[..safe_len].to_string()
     } else {
         content
     };

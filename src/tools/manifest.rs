@@ -102,7 +102,16 @@ fn extension_from_path(path: &str) -> &str {
 
 fn matches_glob_pattern(path: &str, pattern: &str) -> bool {
     glob::Pattern::new(pattern)
-        .map(|p| p.matches(path))
+        .map(|p| {
+            p.matches_with(
+                path,
+                glob::MatchOptions {
+                    require_literal_separator: false,
+                    require_literal_leading_dot: false,
+                    case_sensitive: true,
+                },
+            )
+        })
         .unwrap_or(false)
 }
 

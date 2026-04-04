@@ -48,8 +48,11 @@ enum Commands {
 }
 
 fn parse_range(range: &str) -> (&str, &str) {
-    if let Some((base, head)) = range.split_once("..") {
-        (base, head)
+    if let Some((base, head)) = range.split_once("...") {
+        // Three-dot notation: treat as two-dot (merge-base semantics not supported)
+        (base, if head.is_empty() { "HEAD" } else { head })
+    } else if let Some((base, head)) = range.split_once("..") {
+        (base, if head.is_empty() { "HEAD" } else { head })
     } else {
         (range, "HEAD")
     }
