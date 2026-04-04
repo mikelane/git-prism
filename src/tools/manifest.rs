@@ -16,8 +16,10 @@ use crate::treesitter::{Function, analyzer_for_extension};
 const MAX_FILES: usize = 200;
 
 pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<FunctionChange> {
-    let base_map: HashMap<&str, &Function> = base_fns.iter().map(|f| (f.name.as_str(), f)).collect();
-    let head_map: HashMap<&str, &Function> = head_fns.iter().map(|f| (f.name.as_str(), f)).collect();
+    let base_map: HashMap<&str, &Function> =
+        base_fns.iter().map(|f| (f.name.as_str(), f)).collect();
+    let head_map: HashMap<&str, &Function> =
+        head_fns.iter().map(|f| (f.name.as_str(), f)).collect();
 
     let mut changes = Vec::new();
 

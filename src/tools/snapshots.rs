@@ -168,8 +168,11 @@ mod tests {
             .output()
             .unwrap();
 
-        std::fs::write(path.join("hello.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
-            .unwrap();
+        std::fs::write(
+            path.join("hello.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
 
         Command::new("git")
             .args(["add", "hello.rs"])

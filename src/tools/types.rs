@@ -186,8 +186,6 @@ pub struct SnapshotOptions {
 pub enum ToolError {
     #[error("git error: {0}")]
     Git(#[from] crate::git::reader::GitError),
-    #[error("analysis error: {0}")]
-    Analysis(String),
 }
 
 // --- Helper ---
