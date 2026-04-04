@@ -164,7 +164,10 @@ fn parse_pyproject_deps(content: &str) -> std::collections::HashMap<String, Stri
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if trimmed.starts_with("dependencies") && trimmed.contains('[') {
+        if trimmed.starts_with("dependencies") && matches!(
+            (trimmed.find('='), trimmed.find('[')),
+            (Some(eq), Some(br)) if eq < br
+        ) {
             in_deps = true;
             continue;
         }
@@ -362,6 +365,41 @@ mod tests {
         assert_eq!(result.added.len(), 1);
         assert_eq!(result.added[0].name, "github.com/stretchr/testify");
         assert_eq!(result.added[0].new_version.as_deref(), Some("v1.8.0"));
+    }
+
+    #[test]
+    fn it_does_not_parse_dependencies_without_equals_before_bracket() {
+        // A malformed or unusual line like `dependencies[extras]` starts with
+        // "dependencies" and contains "[", but has no "=" before "[".
+        // The parser must require the PEP 621 pattern: `dependencies = [`
+        let before = "";
+        let after = "[project]\nname = \"test\"\ndependencies[extras]\n\"requests>=2.28\",\n]\n";
+        let result = diff_dependencies("pyproject.toml", before, after).unwrap();
+        assert_eq!(
+            result.added.len(),
+            0,
+            "line without '=' before '[' should not trigger dependency parsing"
+        );
+    }
+
+    #[test]
+    fn it_produces_empty_results_for_poetry_style_pyproject() {
+        let before = "";
+        let after = r#"[tool.poetry]
+name = "my-project"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.28"
+click = "^8.0"
+"#;
+        let result = diff_dependencies("pyproject.toml", before, after).unwrap();
+        assert_eq!(
+            result.added.len(),
+            0,
+            "Poetry key-value deps under [tool.poetry.dependencies] are not PEP 621"
+        );
     }
 
     #[test]
