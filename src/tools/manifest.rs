@@ -179,51 +179,52 @@ pub fn build_manifest(
         }
 
         // Function and import analysis
-        let (functions_changed, imports_changed) =
-            if options.include_function_analysis && analyzer_for_extension(ext).is_some() {
-                let analyzer = analyzer_for_extension(ext).unwrap();
-
-                let base_content = match file_change.change_type {
-                    ChangeType::Added => None,
-                    _ => reader.read_file_at_ref(base_ref, &file_change.path).ok(),
-                };
-
-                let head_content = match file_change.change_type {
-                    ChangeType::Deleted => None,
-                    _ => reader.read_file_at_ref(head_ref, &file_change.path).ok(),
-                };
-
-                let base_fns = base_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                    .unwrap_or_default();
-
-                let head_fns = head_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                    .unwrap_or_default();
-
-                let fn_changes = diff_functions(&base_fns, &head_fns);
-
-                let count = fn_changes.len();
-                *total_functions_changed.get_or_insert(0) += count;
-
-                let base_imports = base_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                    .unwrap_or_default();
-
-                let head_imports = head_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                    .unwrap_or_default();
-
-                let import_change = diff_imports(&base_imports, &head_imports);
-
-                (Some(fn_changes), Some(import_change))
-            } else {
-                (None, None)
+        let (functions_changed, imports_changed) = if let Some(analyzer) = options
+            .include_function_analysis
+            .then(|| analyzer_for_extension(ext))
+            .flatten()
+        {
+            let base_content = match file_change.change_type {
+                ChangeType::Added => None,
+                _ => reader.read_file_at_ref(base_ref, &file_change.path).ok(),
             };
+
+            let head_content = match file_change.change_type {
+                ChangeType::Deleted => None,
+                _ => reader.read_file_at_ref(head_ref, &file_change.path).ok(),
+            };
+
+            let base_fns = base_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let head_fns = head_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let fn_changes = diff_functions(&base_fns, &head_fns);
+
+            let count = fn_changes.len();
+            *total_functions_changed.get_or_insert(0) += count;
+
+            let base_imports = base_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let head_imports = head_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let import_change = diff_imports(&base_imports, &head_imports);
+
+            (Some(fn_changes), Some(import_change))
+        } else {
+            (None, None)
+        };
 
         // Dependency analysis
         if is_dependency_file(&file_change.path) {
@@ -627,5 +628,88 @@ mod tests {
         let changes = diff_functions(&base, &head);
         assert_eq!(changes[0].name, "alpha");
         assert_eq!(changes[1].name, "zebra");
+    }
+
+    // --- extension_from_path tests ---
+
+    #[test]
+    fn it_extracts_extension_from_normal_path() {
+        assert_eq!(extension_from_path("src/main.rs"), "rs");
+    }
+
+    #[test]
+    fn it_returns_empty_for_dotfile() {
+        assert_eq!(extension_from_path(".gitignore"), "");
+    }
+
+    #[test]
+    fn it_returns_empty_for_no_extension() {
+        assert_eq!(extension_from_path("Makefile"), "");
+    }
+
+    #[test]
+    fn it_extracts_last_extension_from_multiple_dots() {
+        assert_eq!(extension_from_path("archive.tar.gz"), "gz");
+    }
+
+    #[test]
+    fn it_returns_empty_for_empty_string() {
+        assert_eq!(extension_from_path(""), "");
+    }
+
+    // --- matches_glob_pattern tests ---
+
+    #[test]
+    fn it_matches_glob_across_directory_separators() {
+        assert!(matches_glob_pattern("src/lib.rs", "*.rs"));
+    }
+
+    #[test]
+    fn it_matches_glob_at_root_level() {
+        assert!(matches_glob_pattern("main.rs", "*.rs"));
+    }
+
+    #[test]
+    fn it_matches_exact_filename_pattern() {
+        assert!(matches_glob_pattern("Cargo.toml", "Cargo.toml"));
+    }
+
+    #[test]
+    fn it_returns_false_for_invalid_glob() {
+        assert!(!matches_glob_pattern("main.rs", "[invalid"));
+    }
+
+    #[test]
+    fn it_is_case_sensitive() {
+        assert!(!matches_glob_pattern("main.rs", "*.RS"));
+    }
+
+    // --- diff_imports edge cases ---
+
+    #[test]
+    fn it_returns_empty_diff_when_both_import_lists_are_empty() {
+        let base: Vec<String> = vec![];
+        let head: Vec<String> = vec![];
+        let change = diff_imports(&base, &head);
+        assert!(change.added.is_empty());
+        assert!(change.removed.is_empty());
+    }
+
+    #[test]
+    fn it_reports_all_added_when_base_imports_are_empty() {
+        let base: Vec<String> = vec![];
+        let head = vec!["fmt".to_string(), "os".to_string()];
+        let change = diff_imports(&base, &head);
+        assert_eq!(change.added, vec!["fmt", "os"]);
+        assert!(change.removed.is_empty());
+    }
+
+    #[test]
+    fn it_reports_all_removed_when_head_imports_are_empty() {
+        let base = vec!["fmt".to_string(), "os".to_string()];
+        let head: Vec<String> = vec![];
+        let change = diff_imports(&base, &head);
+        assert!(change.added.is_empty());
+        assert_eq!(change.removed, vec!["fmt", "os"]);
     }
 }

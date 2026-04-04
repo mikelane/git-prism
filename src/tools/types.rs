@@ -167,12 +167,14 @@ fn default_max_file_size() -> usize {
 
 // --- Tool options (for internal use) ---
 
+#[derive(Debug, Clone)]
 pub struct ManifestOptions {
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub include_function_analysis: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct SnapshotOptions {
     pub include_before: bool,
     pub include_after: bool,
