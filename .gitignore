@@ -1,3 +1,5 @@
 /target
 .worktrees/
 .DS_Store
+CLAUDE.local.md
+mutants.out*

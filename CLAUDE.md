@@ -1,38 +1,59 @@
-# git-prism
+# CLAUDE.md
 
-Agent-optimized git data MCP server. Provides structured change manifests and full file snapshots instead of human-oriented diffs.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Architecture
+## What This Is
 
-- **`src/main.rs`** — CLI entry point (clap). Subcommands: `serve`, `manifest`, `snapshot`, `languages`, `version`.
-- **`src/server.rs`** — MCP server setup (rmcp, stdio transport).
-- **`src/tools/`** — MCP tool implementations. `manifest.rs` (get_change_manifest), `snapshots.rs` (get_file_snapshots), `types.rs` (shared response structs).
-- **`src/git/`** — Git data access layer (gix). `reader.rs` (open repo, resolve refs), `diff.rs` (structured file-level diffs), `depfiles.rs` (parse Cargo.toml/package.json/go.mod/pyproject.toml), `generated.rs` (heuristic detection of generated files).
-- **`src/treesitter/`** — Function-level analysis. `mod.rs` (LanguageAnalyzer trait + registry), per-language analyzers (go.rs, python.rs, typescript.rs, rust_lang.rs).
-
-## Conventions
-
-- TDD is mandatory. Red-green-refactor cycle.
-- Use `thiserror` for library errors, `anyhow` for application errors in main.
-- Snapshot tests via `insta` for tool output schemas.
-- Integration tests build real git repos with `gix` in temp dirs — no mocking git.
-- Tree-sitter `functions_changed` is `null` (not empty array) when no grammar exists for a language.
+Agent-optimized git data MCP server. Two tools: `get_change_manifest` (structured metadata about what changed) and `get_file_snapshots` (complete before/after file content). Replaces human-oriented diffs with structured JSON for LLM agents.
 
 ## Build & Test
 
 ```bash
-cargo clippy -- -D warnings
-cargo fmt --check
-cargo test
-cargo build --release
+cargo clippy -- -D warnings   # lint — warnings are errors
+cargo fmt --check              # format check
+cargo test                     # unit + integration tests
+cargo build --release          # release build
 ```
 
-## MCP Registration
+## Conventions
 
+- **TDD is mandatory.** Red-green-refactor. Write a failing test before writing production code.
+- **Error handling:** `thiserror` for library error types in modules, `anyhow` for application-level errors in `main.rs`.
+- **Snapshot tests:** Use `insta` crate. Snapshot files live next to the source in `snapshots/` directories. Update with `cargo insta review`.
+- **Integration tests:** Build real git repos in temp dirs. Test helpers may use `git` CLI for repo setup (gix's write API is impractical for test fixtures). Production code must use `gix` only — never shell out to `git` CLI in non-test code.
+- **Tree-sitter nullability:** `functions_changed` is `null` (not empty array) when no grammar exists for a language. `None` in Rust → `null` in JSON. The distinction matters.
+- **All public types** derive `Serialize` and relevant `schemars::JsonSchema` for MCP tool schemas.
+
+## Key Dependencies
+
+- **`rmcp` 1.3** — MCP SDK. Tools defined with `#[tool_router]` and `#[tool]` proc macros. Stdio transport.
+- **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`). Do not use `git2` or shell out to `git`.
+- **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
+- **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `languages`.
+
+## Module Responsibilities
+
+- `src/git/` — Git data access. Wraps `gix`. Returns structured Rust types, never strings.
+- `src/treesitter/` — Function/import extraction. Each language is a self-contained file implementing `LanguageAnalyzer` trait.
+- `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses.
+- `src/server.rs` — MCP server lifecycle (rmcp, stdio).
+- `src/main.rs` — CLI wiring only (clap).
+
+## Adding a New Language Analyzer
+
+1. Add grammar crate to `Cargo.toml`
+2. Create `src/treesitter/<lang>.rs` implementing `LanguageAnalyzer`
+3. Register extension in `src/treesitter/mod.rs` registry
+4. Add table-driven tests with known source snippets
+
+## Git Hooks (lefthook)
+
+A pre-push hook runs `fmt --check`, `clippy`, and `test` before every push. Managed by [lefthook](https://github.com/evilmartians/lefthook) via `lefthook.yml`. After cloning:
 ```bash
-claude mcp add git-prism -- git-prism serve
+lefthook install
 ```
+Never use `--no-verify` to skip hooks.
 
 ## Design Doc
 
-Full JSON schemas for both tools: `/Users/mikelane/dev/git-prism-architecture.md`
+Full JSON schemas for both MCP tools: `@/Users/mikelane/dev/git-prism-architecture.md`

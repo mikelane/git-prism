@@ -1,6 +1,10 @@
+#[allow(dead_code)]
 mod git;
+#[allow(dead_code)]
 mod server;
+#[allow(dead_code)]
 mod tools;
+#[allow(dead_code)]
 mod treesitter;
 
 use clap::{Parser, Subcommand};

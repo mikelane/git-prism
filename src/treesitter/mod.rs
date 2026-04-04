@@ -1,7 +1,3 @@
-// Analyzers and helpers are pub(crate) but not yet consumed outside tests;
-// the dead_code warnings will resolve when the manifest tool integrates this module.
-#![allow(dead_code)]
-
 pub mod go;
 pub mod python;
 pub mod rust_lang;

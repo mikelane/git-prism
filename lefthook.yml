@@ -1,0 +1,9 @@
+pre-push:
+  parallel: false
+  commands:
+    fmt:
+      run: cargo fmt --check
+    clippy:
+      run: cargo clippy -- -D warnings
+    test:
+      run: env -u GIT_DIR -u GIT_WORK_TREE cargo test
