@@ -8,7 +8,7 @@ pub enum GitError {
     )]
     OpenRepo(String),
 
-    #[error("failed to resolve ref '{0}': {1}")]
+    #[error("Could not find ref '{0}'. Check that the branch, tag, or SHA exists.")]
     ResolveRef(String, String),
 
     #[error("failed to read object: {0}")]
@@ -262,5 +262,41 @@ mod tests {
         let reader = RepoReader::open(&path).unwrap();
         let result = reader.read_file_at_ref("HEAD", "nonexistent.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_ref_error_says_could_not_find_ref() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("nonexistent-branch").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Could not find ref"),
+            "expected 'Could not find ref' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_ref_error_includes_ref_name() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("nonexistent-branch").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nonexistent-branch"),
+            "expected ref name in: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_ref_error_suggests_checking_ref_exists() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("nonexistent-branch").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("branch, tag, or SHA"),
+            "expected suggestion in: {msg}"
+        );
     }
 }
