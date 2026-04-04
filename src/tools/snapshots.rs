@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn it_computes_token_estimate() {
+    fn it_computes_token_estimate_from_content_length() {
         let (_dir, path) = create_snapshot_test_repo();
         let options = SnapshotOptions {
             include_before: true,
@@ -291,7 +291,92 @@ mod tests {
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
 
-        assert!(result.token_estimate > 0);
+        // before: "fn main() {\n    println!(\"hello\");\n}\n" = 38 chars
+        // after:  "fn main() {\n    println!(\"goodbye\");\n}\n" = 40 chars
+        // total = 78, estimate = 78 / 4 = 19
+        assert_eq!(result.token_estimate, 19);
+    }
+
+    #[test]
+    fn it_detects_binary_file_with_null_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Write a text file first
+        std::fs::write(path.join("data.bin"), "placeholder\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Replace with binary content containing null bytes
+        std::fs::write(path.join("data.bin"), b"hello\x00world").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "make binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["data.bin".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.is_binary);
+        let after = file.after.as_ref().unwrap();
+        assert!(after.content.is_empty());
+        assert!(after.size_bytes > 0);
+    }
+
+    #[test]
+    fn it_applies_line_range_option() {
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: Some((2, 2)),
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let after = result.files[0].after.as_ref().unwrap();
+        // Line 2 of "fn main() {\n    println!(\"goodbye\");\n}\n" is '    println!("goodbye");'
+        assert!(after.content.contains("println!"));
+        assert!(!after.content.contains("fn main"));
+        assert_eq!(after.line_count, 1);
     }
 
     #[test]

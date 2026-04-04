@@ -82,6 +82,20 @@ mod tests {
         assert_eq!(base, "HEAD~3");
         assert_eq!(head, "HEAD");
     }
+
+    #[test]
+    fn it_parses_three_dot_range() {
+        let (base, head) = parse_range("main...HEAD");
+        assert_eq!(base, "main");
+        assert_eq!(head, "HEAD");
+    }
+
+    #[test]
+    fn it_parses_three_dot_range_with_empty_head_as_head() {
+        let (base, head) = parse_range("main...");
+        assert_eq!(base, "main");
+        assert_eq!(head, "HEAD");
+    }
 }
 
 #[tokio::main]
