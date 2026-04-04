@@ -1,13 +1,14 @@
+use schemars::JsonSchema;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DependencyChange {
     pub name: String,
     pub old_version: Option<String>,
     pub new_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DependencyDiff {
     pub file: String,
     pub added: Vec<DependencyChange>,
