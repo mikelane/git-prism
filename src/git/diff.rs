@@ -186,10 +186,12 @@ fn blob_stats(id: &gix::Id<'_>) -> (usize, bool, usize) {
     match id.object() {
         Ok(obj) => {
             let is_binary = obj.data.contains(&0);
-            let lines = if is_binary {
+            let lines = if is_binary || obj.data.is_empty() {
                 0
             } else {
-                obj.data.iter().filter(|&&b| b == b'\n').count()
+                let newline_count = obj.data.iter().filter(|&&b| b == b'\n').count();
+                let last_byte = obj.data[obj.data.len() - 1];
+                newline_count + if last_byte != b'\n' { 1 } else { 0 }
             };
             (obj.data.len(), is_binary, lines)
         }
@@ -392,6 +394,104 @@ mod tests {
             .unwrap();
         assert_eq!(renamed.change_type, ChangeType::Renamed);
         assert_eq!(renamed.old_path.as_deref(), Some("existing.txt"));
+    }
+
+    #[test]
+    fn it_counts_lines_for_file_without_trailing_newline() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // Write a file with no trailing newline: "hello" is 1 line, not 0
+        std::fs::write(path.join("no_newline.txt"), "hello").unwrap();
+        Command::new("git")
+            .args(["add", "no_newline.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add file without trailing newline"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+
+        let file = diff
+            .files
+            .iter()
+            .find(|f| f.path == "no_newline.txt")
+            .unwrap();
+        assert_eq!(file.lines_added, 1, "non-empty file without trailing newline should count as 1 line");
+        assert_eq!(file.size_after, 5);
+    }
+
+    #[test]
+    fn it_counts_lines_for_deleted_file_without_trailing_newline() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // Write and commit a file without trailing newline, then delete it
+        std::fs::write(path.join("ephemeral.txt"), "one\ntwo\nthree").unwrap();
+        Command::new("git")
+            .args(["add", "ephemeral.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add ephemeral file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::remove_file(path.join("ephemeral.txt")).unwrap();
+        Command::new("git")
+            .args(["add", "ephemeral.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete ephemeral file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+
+        let file = diff
+            .files
+            .iter()
+            .find(|f| f.path == "ephemeral.txt")
+            .unwrap();
+        assert_eq!(file.lines_removed, 3, "three lines without trailing newline: 'one\\ntwo\\nthree'");
+        assert_eq!(file.change_type, ChangeType::Deleted);
+    }
+
+    #[test]
+    fn it_counts_lines_for_multiline_file_with_trailing_newline() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // "one\ntwo\n" has trailing newline -> 2 lines (not 3)
+        std::fs::write(path.join("twolines.txt"), "one\ntwo\n").unwrap();
+        Command::new("git")
+            .args(["add", "twolines.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add two-line file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+
+        let file = diff
+            .files
+            .iter()
+            .find(|f| f.path == "twolines.txt")
+            .unwrap();
+        assert_eq!(file.lines_added, 2, "'one\\ntwo\\n' is 2 lines, not 3");
     }
 
     #[test]
