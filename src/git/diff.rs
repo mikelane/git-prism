@@ -169,7 +169,7 @@ impl RepoReader {
 
                 files.push(file_change);
                 Ok::<gix::object::tree::diff::Action, GitError>(
-                    gix::object::tree::diff::Action::Continue,
+                    gix::object::tree::diff::Action::Continue(()),
                 )
             })
             .map_err(obj_err)?;
