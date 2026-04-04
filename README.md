@@ -21,19 +21,19 @@ deeper inspection is needed.
 ### From source (Rust toolchain required)
 
 ```bash
-cargo install git-prism
+cargo install --path .
 ```
+
+Once published to crates.io, `cargo install git-prism` will also work.
 
 ### Binary download
 
 Grab a prebuilt binary from the
 [GitHub Releases](https://github.com/mikelane/git-prism/releases) page.
 
-### Homebrew (coming soon)
+### Homebrew
 
-```bash
-brew tap mikelane/tap && brew install git-prism
-```
+Not yet available. A Homebrew tap is planned for a future release.
 
 ## MCP Registration
 
@@ -204,7 +204,8 @@ git-prism snapshot HEAD~3..HEAD --paths src/main.rs src/lib.rs
 git-prism languages
 ```
 
-All CLI commands output JSON to stdout.
+The `manifest` and `snapshot` commands output JSON to stdout. The `languages`
+command outputs plain text.
 
 ## Agent Workflow
 
