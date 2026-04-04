@@ -1,14 +1,48 @@
 use super::{Function, LanguageAnalyzer};
 use tree_sitter::Parser;
 
-pub struct TypeScriptAnalyzer;
+#[derive(Debug, Clone, Copy)]
+pub enum JsDialect {
+    TypeScript,
+    Tsx,
+    JavaScript,
+}
 
-fn create_parser() -> Parser {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .expect("Error loading TypeScript grammar");
-    parser
+pub struct TypeScriptAnalyzer {
+    dialect: JsDialect,
+}
+
+impl TypeScriptAnalyzer {
+    pub fn typescript() -> Self {
+        Self {
+            dialect: JsDialect::TypeScript,
+        }
+    }
+
+    pub fn tsx() -> Self {
+        Self {
+            dialect: JsDialect::Tsx,
+        }
+    }
+
+    pub fn javascript() -> Self {
+        Self {
+            dialect: JsDialect::JavaScript,
+        }
+    }
+
+    fn create_parser(&self) -> Parser {
+        let mut parser = Parser::new();
+        let language = match self.dialect {
+            JsDialect::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            JsDialect::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            JsDialect::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        };
+        parser
+            .set_language(&language)
+            .expect("Error loading grammar");
+        parser
+    }
 }
 
 fn signature_text(source: &[u8], node: &tree_sitter::Node) -> String {
@@ -101,10 +135,10 @@ fn extract_functions_from_node(
 
 impl LanguageAnalyzer for TypeScriptAnalyzer {
     fn extract_functions(&self, source: &[u8]) -> anyhow::Result<Vec<Function>> {
-        let mut parser = create_parser();
+        let mut parser = self.create_parser();
         let tree = parser
             .parse(source, None)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse TypeScript source"))?;
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse source"))?;
         let root = tree.root_node();
         let mut functions = Vec::new();
         extract_functions_from_node(source, &root, None, &mut functions);
@@ -112,10 +146,10 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
-        let mut parser = create_parser();
+        let mut parser = self.create_parser();
         let tree = parser
             .parse(source, None)
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse TypeScript source"))?;
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse source"))?;
         let root = tree.root_node();
         let mut imports = Vec::new();
 
@@ -141,7 +175,7 @@ mod tests {
     console.log(name);
 }
 "#;
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::typescript();
         let functions = analyzer.extract_functions(source).unwrap();
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "greet");
@@ -162,7 +196,7 @@ mod tests {
     }
 }
 "#;
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::typescript();
         let functions = analyzer.extract_functions(source).unwrap();
         assert_eq!(functions.len(), 2);
         assert_eq!(functions[0].name, "Greeter.greet");
@@ -176,7 +210,7 @@ mod tests {
     return a + b;
 };
 "#;
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::typescript();
         let functions = analyzer.extract_functions(source).unwrap();
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "add");
@@ -187,7 +221,7 @@ mod tests {
     #[test]
     fn empty_file_returns_no_functions() {
         let source = b"";
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::typescript();
         let functions = analyzer.extract_functions(source).unwrap();
         assert!(functions.is_empty());
     }
@@ -197,7 +231,7 @@ mod tests {
         let source = br#"import { foo, bar } from './utils';
 import * as path from 'path';
 "#;
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::typescript();
         let imports = analyzer.extract_imports(source).unwrap();
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0], "import { foo, bar } from './utils';");
@@ -210,7 +244,7 @@ import * as path from 'path';
     return 1;
 }
 "#;
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::typescript();
         let imports = analyzer.extract_imports(source).unwrap();
         assert!(imports.is_empty());
     }
@@ -221,10 +255,80 @@ import * as path from 'path';
     console.log(name);
 }
 "#;
-        let analyzer = TypeScriptAnalyzer;
+        let analyzer = TypeScriptAnalyzer::javascript();
         let functions = analyzer.extract_functions(source).unwrap();
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "greet");
         assert_eq!(functions[0].signature, "function greet(name)");
+    }
+
+    #[test]
+    fn javascript_dialect_parses_commonjs_require() {
+        let source = br#"const fs = require('fs');
+const path = require('path');
+
+function readFile(name) {
+    return fs.readFileSync(name);
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::javascript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "readFile");
+    }
+
+    #[test]
+    fn tsx_dialect_parses_jsx_component() {
+        let source = br#"import React from 'react';
+
+function App(): JSX.Element {
+    return <div>Hello</div>;
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::tsx();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "App");
+    }
+
+    #[test]
+    fn javascript_dialect_extracts_function_expression() {
+        let source = br#"var greet = function(name) {
+    console.log(name);
+};
+"#;
+        let analyzer = TypeScriptAnalyzer::javascript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        // var declarations with function expressions are not named arrow functions,
+        // so they won't be extracted (consistent with current behavior)
+        assert!(functions.is_empty());
+    }
+
+    #[test]
+    fn tsx_dialect_extracts_imports() {
+        let source = br#"import React from 'react';
+import { useState } from 'react';
+"#;
+        let analyzer = TypeScriptAnalyzer::tsx();
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0], "import React from 'react';");
+        assert_eq!(imports[1], "import { useState } from 'react';");
+    }
+
+    #[test]
+    fn typescript_dialect_parses_typed_code() {
+        let source = br#"function add(a: number, b: number): number {
+    return a + b;
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "add");
+        assert_eq!(
+            functions[0].signature,
+            "function add(a: number, b: number): number"
+        );
     }
 }

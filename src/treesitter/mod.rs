@@ -27,8 +27,9 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
     match ext {
         "go" => Some(Box::new(go::GoAnalyzer)),
         "py" => Some(Box::new(python::PythonAnalyzer)),
-        "ts" | "tsx" => Some(Box::new(typescript::TypeScriptAnalyzer)),
-        "js" | "jsx" => Some(Box::new(typescript::TypeScriptAnalyzer)),
+        "ts" => Some(Box::new(typescript::TypeScriptAnalyzer::typescript())),
+        "tsx" => Some(Box::new(typescript::TypeScriptAnalyzer::tsx())),
+        "js" | "jsx" => Some(Box::new(typescript::TypeScriptAnalyzer::javascript())),
         "rs" => Some(Box::new(rust_lang::RustAnalyzer)),
         _ => None,
     }
