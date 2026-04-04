@@ -30,11 +30,7 @@ pub struct DiffResult {
 }
 
 impl RepoReader {
-    pub fn diff_commits(
-        &self,
-        base_ref: &str,
-        head_ref: &str,
-    ) -> Result<DiffResult, GitError> {
+    pub fn diff_commits(&self, base_ref: &str, head_ref: &str) -> Result<DiffResult, GitError> {
         let base_commit = self.peel_to_commit(base_ref)?;
         let head_commit = self.peel_to_commit(head_ref)?;
 
@@ -43,7 +39,9 @@ impl RepoReader {
 
         let mut files: Vec<FileChange> = Vec::new();
 
-        base_tree.changes().map_err(obj_err)?
+        base_tree
+            .changes()
+            .map_err(obj_err)?
             .for_each_to_obtain_tree(&head_tree, |change| {
                 use gix::object::tree::diff::Change as C;
 
@@ -101,8 +99,7 @@ impl RepoReader {
                         let size_before = old_obj.data.len();
                         let size_after = new_obj.data.len();
 
-                        let is_binary =
-                            old_obj.data.contains(&0) || new_obj.data.contains(&0);
+                        let is_binary = old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
                         let (lines_added, lines_removed) = if is_binary {
                             (0, 0)
@@ -146,8 +143,7 @@ impl RepoReader {
                         let size_before = old_obj.data.len();
                         let size_after = new_obj.data.len();
 
-                        let is_binary =
-                            old_obj.data.contains(&0) || new_obj.data.contains(&0);
+                        let is_binary = old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
                         let (lines_added, lines_removed) = match diff {
                             Some(stats) => (stats.insertions as usize, stats.removals as usize),
@@ -157,7 +153,11 @@ impl RepoReader {
                         FileChange {
                             path: location.to_string(),
                             old_path: Some(source_location.to_string()),
-                            change_type: if copy { ChangeType::Copied } else { ChangeType::Renamed },
+                            change_type: if copy {
+                                ChangeType::Copied
+                            } else {
+                                ChangeType::Renamed
+                            },
                             is_binary,
                             lines_added,
                             lines_removed,
@@ -201,10 +201,7 @@ fn count_line_changes(old_data: Option<&[u8]>, new_data: Option<&[u8]>) -> (usiz
     let old_text = old_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
     let new_text = new_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
 
-    let input = gix::diff::blob::intern::InternedInput::new(
-        old_text.as_str(),
-        new_text.as_str(),
-    );
+    let input = gix::diff::blob::intern::InternedInput::new(old_text.as_str(), new_text.as_str());
 
     let counter = gix::diff::blob::diff(
         gix::diff::blob::Algorithm::Myers,
@@ -385,11 +382,7 @@ mod tests {
         let reader = RepoReader::open(&path).unwrap();
         let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
 
-        let renamed = diff
-            .files
-            .iter()
-            .find(|f| f.path == "renamed.txt")
-            .unwrap();
+        let renamed = diff.files.iter().find(|f| f.path == "renamed.txt").unwrap();
         assert_eq!(renamed.change_type, ChangeType::Renamed);
         assert_eq!(renamed.old_path.as_deref(), Some("existing.txt"));
     }
@@ -419,7 +412,10 @@ mod tests {
             .iter()
             .find(|f| f.path == "no_newline.txt")
             .unwrap();
-        assert_eq!(file.lines_added, 1, "non-empty file without trailing newline should count as 1 line");
+        assert_eq!(
+            file.lines_added, 1,
+            "non-empty file without trailing newline should count as 1 line"
+        );
         assert_eq!(file.size_after, 5);
     }
 
@@ -460,7 +456,10 @@ mod tests {
             .iter()
             .find(|f| f.path == "ephemeral.txt")
             .unwrap();
-        assert_eq!(file.lines_removed, 3, "three lines without trailing newline: 'one\\ntwo\\nthree'");
+        assert_eq!(
+            file.lines_removed, 3,
+            "three lines without trailing newline: 'one\\ntwo\\nthree'"
+        );
         assert_eq!(file.change_type, ChangeType::Deleted);
     }
 
@@ -499,7 +498,10 @@ mod tests {
         let (_dir, path) = create_repo_with_two_commits();
         let reader = RepoReader::open(&path).unwrap();
         let result = reader.diff_commits("HEAD~1", "HEAD");
-        assert!(result.is_ok(), "diff_commits with valid refs should succeed");
+        assert!(
+            result.is_ok(),
+            "diff_commits with valid refs should succeed"
+        );
 
         let diff = result.unwrap();
         let file = &diff.files[0];
@@ -513,7 +515,7 @@ mod tests {
     fn it_flags_binary_files() {
         let (_dir, path) = create_repo_with_two_commits();
 
-        std::fs::write(path.join("image.png"), &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
+        std::fs::write(path.join("image.png"), [0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
         Command::new("git")
             .args(["add", "image.png"])
             .current_dir(&path)
@@ -528,11 +530,7 @@ mod tests {
         let reader = RepoReader::open(&path).unwrap();
         let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
 
-        let binary = diff
-            .files
-            .iter()
-            .find(|f| f.path == "image.png")
-            .unwrap();
+        let binary = diff.files.iter().find(|f| f.path == "image.png").unwrap();
         assert!(binary.is_binary);
         assert_eq!(binary.lines_added, 0);
     }

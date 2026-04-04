@@ -99,12 +99,16 @@ fn extract_version_key(inline_table: &str) -> String {
     // Look for `version = "..."` as a key-value pattern within a TOML inline table.
     // Splits on commas to isolate key-value pairs, then finds the one starting with "version".
     for part in inline_table.split(',') {
-        let part = part.trim().trim_start_matches('{').trim_end_matches('}').trim();
-        if let Some((key, val)) = part.split_once('=') {
-            if key.trim() == "version" {
-                let val = val.trim().trim_matches('"');
-                return val.to_string();
-            }
+        let part = part
+            .trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim();
+        if let Some((key, val)) = part.split_once('=')
+            && key.trim() == "version"
+        {
+            let val = val.trim().trim_matches('"');
+            return val.to_string();
         }
     }
     String::new()
@@ -134,7 +138,11 @@ fn parse_go_mod_deps(content: &str) -> std::collections::HashMap<String, String>
         }
 
         if trimmed.starts_with("require ") && !trimmed.contains('(') {
-            let parts: Vec<&str> = trimmed.strip_prefix("require ").unwrap().split_whitespace().collect();
+            let parts: Vec<&str> = trimmed
+                .strip_prefix("require ")
+                .unwrap()
+                .split_whitespace()
+                .collect();
             if parts.len() >= 2 {
                 deps.insert(parts[0].to_string(), parts[1].to_string());
             }
@@ -164,10 +172,12 @@ fn parse_pyproject_deps(content: &str) -> std::collections::HashMap<String, Stri
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if trimmed.starts_with("dependencies") && matches!(
-            (trimmed.find('='), trimmed.find('[')),
-            (Some(eq), Some(br)) if eq < br
-        ) {
+        if trimmed.starts_with("dependencies")
+            && matches!(
+                (trimmed.find('='), trimmed.find('[')),
+                (Some(eq), Some(br)) if eq < br
+            )
+        {
             in_deps = true;
             continue;
         }
@@ -328,8 +338,14 @@ mod tests {
         let result = diff_dependencies("Cargo.toml", before, after).unwrap();
         assert_eq!(result.added.len(), 2);
         let names: Vec<&str> = result.added.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"serde"), "should find serde in workspace.dependencies");
-        assert!(names.contains(&"tokio"), "should find tokio in workspace.dependencies");
+        assert!(
+            names.contains(&"serde"),
+            "should find serde in workspace.dependencies"
+        );
+        assert!(
+            names.contains(&"tokio"),
+            "should find tokio in workspace.dependencies"
+        );
     }
 
     #[test]
@@ -359,7 +375,8 @@ mod tests {
 
     #[test]
     fn it_diffs_go_mod_added_dependency() {
-        let before = "module example.com/foo\n\ngo 1.21\n\nrequire (\n\tgithub.com/pkg/errors v0.9.1\n)\n";
+        let before =
+            "module example.com/foo\n\ngo 1.21\n\nrequire (\n\tgithub.com/pkg/errors v0.9.1\n)\n";
         let after = "module example.com/foo\n\ngo 1.21\n\nrequire (\n\tgithub.com/pkg/errors v0.9.1\n\tgithub.com/stretchr/testify v1.8.0\n)\n";
         let result = diff_dependencies("go.mod", before, after).unwrap();
         assert_eq!(result.added.len(), 1);
@@ -405,7 +422,8 @@ click = "^8.0"
     #[test]
     fn it_diffs_pyproject_toml_added_dependency() {
         let before = "[project]\ndependencies = [\n    \"requests>=2.28\",\n]\n";
-        let after = "[project]\ndependencies = [\n    \"requests>=2.28\",\n    \"click>=8.0\",\n]\n";
+        let after =
+            "[project]\ndependencies = [\n    \"requests>=2.28\",\n    \"click>=8.0\",\n]\n";
         let result = diff_dependencies("pyproject.toml", before, after).unwrap();
         assert_eq!(result.added.len(), 1);
         assert_eq!(result.added[0].name, "click");

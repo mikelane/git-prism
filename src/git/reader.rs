@@ -55,7 +55,10 @@ impl RepoReader {
             .lookup_entry_by_path(file_path)
             .map_err(|e| GitError::ReadObject(e.to_string()))?
             .ok_or_else(|| {
-                GitError::ReadObject(format!("file '{}' not found at ref '{}'", file_path, refspec))
+                GitError::ReadObject(format!(
+                    "file '{}' not found at ref '{}'",
+                    file_path, refspec
+                ))
             })?;
 
         let blob = entry
