@@ -27,6 +27,10 @@ pub struct RepoReader {
 }
 
 impl RepoReader {
+    pub(crate) fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
         // Raw gix error omitted from user-facing message — it contains internal
         // paths and format that aren't actionable for the caller.

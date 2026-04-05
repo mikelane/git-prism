@@ -15,7 +15,7 @@ pub enum ChangeType {
 
 /// Indicates whether a file change comes from committed history,
 /// the staging area (index), or the working directory on disk.
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeScope {
     /// Change between two committed trees (the existing behavior).
@@ -216,7 +216,10 @@ fn blob_stats(id: &gix::Id<'_>) -> Result<(usize, bool, usize), GitError> {
     Ok((obj.data.len(), is_binary, lines))
 }
 
-fn count_line_changes(old_data: Option<&[u8]>, new_data: Option<&[u8]>) -> (usize, usize) {
+pub(crate) fn count_line_changes(
+    old_data: Option<&[u8]>,
+    new_data: Option<&[u8]>,
+) -> (usize, usize) {
     let old_text = old_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
     let new_text = new_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
 
