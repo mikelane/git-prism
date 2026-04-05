@@ -1,0 +1,62 @@
+[
+  {
+    "name": "intro",
+    "text": "git prism version 0.2.0 brings broader language coverage, working tree support, and per-commit history. Let me walk you through each one.",
+    "duration": 7.38,
+    "clip": "git-prism-v0.2.0_intro.mp3"
+  },
+  {
+    "name": "languages",
+    "text": "The languages command now shows eight supported languages. We've added Java, C, and C plus plus alongside Go, Python, TypeScript, JavaScript, and Rust.",
+    "duration": 8.78,
+    "clip": "git-prism-v0.2.0_languages.mp3"
+  },
+  {
+    "name": "java_analysis",
+    "text": "Let's see Java analysis in action. I have a repo with a Calculator class that added a multiply method. The manifest shows class-qualified function names \u2014 Calculator dot add, Calculator dot multiply \u2014 and extracted imports.",
+    "duration": 14.91,
+    "clip": "git-prism-v0.2.0_java_analysis.mp3"
+  },
+  {
+    "name": "cpp_analysis",
+    "text": "C plus plus works too. Here the manifest detects namespace-qualified methods. Notice Calculator colon colon add and math colon colon Calculator colon colon multiply. Header files and include directives are also extracted.",
+    "duration": 13.61,
+    "clip": "git-prism-v0.2.0_cpp_analysis.mp3"
+  },
+  {
+    "name": "working_tree",
+    "text": "The biggest feature in 0.2.0: working tree status. Instead of comparing two commits, I run manifest with just HEAD. git prism now compares HEAD against my working tree \u2014 showing both staged and unstaged changes.",
+    "duration": 13.93,
+    "clip": "git-prism-v0.2.0_working_tree.mp3"
+  },
+  {
+    "name": "working_tree_detail",
+    "text": "Each file entry has a change scope field. Staged means the change is in the index. Unstaged means the file is modified on disk but not yet added. The same file can appear twice if it has both staged and unstaged changes.",
+    "duration": 13.61,
+    "clip": "git-prism-v0.2.0_working_tree_detail.mp3"
+  },
+  {
+    "name": "history",
+    "text": "Per-commit history breaks down a range into individual commits. Instead of one collapsed diff, I get a separate manifest for each commit \u2014 with the SHA, author, message, and file changes.",
+    "duration": 11.15,
+    "clip": "git-prism-v0.2.0_history.mp3"
+  },
+  {
+    "name": "error",
+    "text": "Error handling stays clean. If I try to use snapshot in working tree mode, git prism rejects it with a clear message: use a commit range instead.",
+    "duration": 8.41,
+    "clip": "git-prism-v0.2.0_error.mp3"
+  },
+  {
+    "name": "install",
+    "text": "You can now install git prism directly from crates dot I O. One command: cargo install git prism. It's also available via Homebrew and GitHub Releases.",
+    "duration": 9.52,
+    "clip": "git-prism-v0.2.0_install.mp3"
+  },
+  {
+    "name": "closing",
+    "text": "That's git prism 0.2.0. Eight languages, working tree support, per-commit history, and available on crates dot I O. The repo is at github dot com slash mike lane slash git prism.",
+    "duration": 11.7,
+    "clip": "git-prism-v0.2.0_closing.mp3"
+  }
+]
