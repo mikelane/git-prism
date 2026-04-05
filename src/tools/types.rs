@@ -158,6 +158,13 @@ pub struct SnapshotArgs {
     pub line_range: Option<(usize, usize)>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct HistoryArgs {
+    pub base_ref: String,
+    pub head_ref: String,
+    pub repo_path: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
