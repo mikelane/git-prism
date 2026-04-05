@@ -5,8 +5,9 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use crate::tools::{
-    ManifestArgs, ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions,
-    SnapshotResponse, build_manifest, build_snapshots, build_worktree_manifest,
+    HistoryArgs, HistoryResponse, ManifestArgs, ManifestOptions, ManifestResponse, SnapshotArgs,
+    SnapshotOptions, SnapshotResponse, build_history, build_manifest, build_snapshots,
+    build_worktree_manifest,
 };
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,35 @@ impl GitPrismServer {
                 None => build_worktree_manifest(&repo_path, &args.base_ref, &options),
             };
             manifest.map(Json).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Returns one manifest per commit in a range, so agents can see
+    /// what changed in each commit separately.
+    #[tool(
+        name = "get_commit_history",
+        description = "Returns per-commit manifests for a range of commits"
+    )]
+    async fn get_commit_history(
+        &self,
+        Parameters(args): Parameters<HistoryArgs>,
+    ) -> Result<Json<HistoryResponse>, String> {
+        tokio::task::spawn_blocking(move || {
+            let repo_path = match args.repo_path {
+                Some(p) => PathBuf::from(p),
+                None => std::env::current_dir()
+                    .map_err(|e| format!("cannot determine working directory: {e}"))?,
+            };
+            let options = ManifestOptions {
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+                include_function_analysis: true,
+            };
+            build_history(&repo_path, &args.base_ref, &args.head_ref, &options)
+                .map(Json)
+                .map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?

@@ -90,6 +90,73 @@ impl RepoReader {
             .map_err(|e| GitError::ReadObject(e.to_string()))
     }
 
+    pub fn commit_author(&self, refspec: &str) -> Result<String, GitError> {
+        let commit = self.peel_to_commit(refspec)?;
+        let author = commit
+            .author()
+            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+        Ok(author.name.to_string())
+    }
+
+    pub fn commit_timestamp(&self, refspec: &str) -> Result<String, GitError> {
+        let commit = self.peel_to_commit(refspec)?;
+        let author = commit
+            .author()
+            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+        Ok(author.time.to_string())
+    }
+
+    pub fn walk_commits(
+        &self,
+        base_ref: &str,
+        head_ref: &str,
+    ) -> Result<Vec<CommitInfo>, GitError> {
+        let base_commit = self.peel_to_commit(base_ref)?;
+        let head_commit = self.peel_to_commit(head_ref)?;
+
+        let base_id = base_commit.id();
+        let mut current = head_commit;
+        let mut commits = Vec::new();
+
+        loop {
+            let info = CommitInfo {
+                sha: current.id().to_string(),
+                message: current
+                    .message_raw()
+                    .map_err(|e| GitError::ReadObject(e.to_string()))?
+                    .to_string()
+                    .trim()
+                    .to_string(),
+            };
+
+            if current.id() == base_id {
+                break;
+            }
+
+            commits.push(info);
+
+            let parent = current
+                .parent_ids()
+                .next()
+                .ok_or_else(|| {
+                    GitError::ReadObject(format!(
+                        "commit {} has no parent but base {} not yet reached",
+                        current.id(),
+                        base_id
+                    ))
+                })?
+                .object()
+                .map_err(|e| GitError::ReadObject(e.to_string()))?
+                .try_into_commit()
+                .map_err(|e| GitError::ReadObject(e.to_string()))?;
+
+            current = parent;
+        }
+
+        commits.reverse();
+        Ok(commits)
+    }
+
     pub(crate) fn peel_to_commit(&self, refspec: &str) -> Result<gix::Commit<'_>, GitError> {
         let rev = self
             .repo
@@ -283,6 +350,75 @@ mod tests {
         let reader = RepoReader::open(&path).unwrap();
         let result = reader.read_file_at_ref("HEAD", "nonexistent.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn it_walks_commits_in_range_returning_chronological_order() {
+        let (_dir, path) = create_test_repo();
+
+        // Add two more commits (3 total with initial)
+        std::fs::write(path.join("file2.txt"), "content2\n").unwrap();
+        Command::new("git")
+            .args(["add", "file2.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "second commit"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("file3.txt"), "content3\n").unwrap();
+        Command::new("git")
+            .args(["add", "file3.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "third commit"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let commits = reader.walk_commits("HEAD~2", "HEAD").unwrap();
+
+        assert_eq!(commits.len(), 2);
+        // Chronological: second commit first, third commit last
+        assert_eq!(commits[0].message, "second commit");
+        assert_eq!(commits[1].message, "third commit");
+    }
+
+    #[test]
+    fn it_walks_single_commit_range() {
+        let (_dir, path) = create_test_repo();
+
+        std::fs::write(path.join("file2.txt"), "content2\n").unwrap();
+        Command::new("git")
+            .args(["add", "file2.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "second commit"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let commits = reader.walk_commits("HEAD~1", "HEAD").unwrap();
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].message, "second commit");
+    }
+
+    #[test]
+    fn it_returns_empty_when_base_equals_head() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let commits = reader.walk_commits("HEAD", "HEAD").unwrap();
+        assert!(commits.is_empty());
     }
 
     #[test]

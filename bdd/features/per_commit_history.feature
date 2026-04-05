@@ -1,4 +1,4 @@
-@ISSUE-31 @not_implemented
+@ISSUE-31
 Feature: Per-commit history manifests
   git-prism can produce a manifest for each individual commit in a
   range, rather than collapsing everything into a single diff. This

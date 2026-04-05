@@ -323,8 +323,15 @@ def step_repo_with_header_commit(context: Context) -> None:
 
 @given("a git repository with three sequential commits")
 def step_repo_with_three_commits(context: Context) -> None:
-    """Create a repo with three sequential commits across two files."""
+    """Create a repo with an anchor commit followed by three sequential commits.
+
+    The anchor commit exists so that HEAD~3 resolves to a valid ref.
+    The three "real" commits are the ones returned in the history range.
+    """
     repo_dir = _init_repo(context)
+
+    _write_file(repo_dir, "README.md", "# anchor\n")
+    _commit(repo_dir, "anchor commit", ["README.md"])
 
     _write_file(repo_dir, "file_a.txt", "first version\n")
     _commit(repo_dir, "commit one", ["file_a.txt"])
