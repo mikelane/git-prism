@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Agent-optimized git data MCP server. Two tools: `get_change_manifest` (structured metadata about what changed) and `get_file_snapshots` (complete before/after file content). Replaces human-oriented diffs with structured JSON for LLM agents.
+Agent-optimized git data MCP server. Three tools: `get_change_manifest` (structured metadata about what changed), `get_file_snapshots` (complete before/after file content), and `get_commit_history` (per-commit manifests for a range). Replaces human-oriented diffs with structured JSON for LLM agents.
 
 Supports both commit-to-commit comparison (`main..HEAD`) and working tree comparison (`HEAD` alone), which shows staged and unstaged changes vs a base ref.
 
@@ -31,7 +31,7 @@ cargo build --release          # release build
 - **`rmcp` 1.3** — MCP SDK. Tools defined with `#[tool_router]` and `#[tool]` proc macros. Stdio transport.
 - **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`). Do not use `git2` or shell out to `git`.
 - **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
-- **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `languages`.
+- **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `history`, `languages`.
 
 ## Working Tree Mode
 

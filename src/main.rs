@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use tools::{
-    ManifestOptions, SnapshotOptions, build_manifest, build_snapshots, build_worktree_manifest,
+    ManifestOptions, SnapshotOptions, build_history, build_manifest, build_snapshots,
+    build_worktree_manifest,
 };
 
 #[derive(Parser)]
@@ -45,6 +46,14 @@ enum Commands {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Output per-commit history manifests as JSON (CLI mode, no MCP)
+    History {
+        /// Git ref range, e.g. "HEAD~3..HEAD"
+        range: String,
+        /// Path to the git repository (defaults to current directory)
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// List supported languages for function-level analysis
     Languages,
 }
@@ -56,11 +65,11 @@ enum RefRange<'a> {
     WorktreeCompare { base: &'a str },
 }
 
-fn validate_snapshot_range(range: &RefRange<'_>) -> anyhow::Result<()> {
+fn validate_commit_range(range: &RefRange<'_>, subcommand: &str) -> anyhow::Result<()> {
     match range {
         RefRange::WorktreeCompare { .. } => {
             anyhow::bail!(
-                "snapshot does not support working tree mode — use a commit range (e.g., HEAD~1..HEAD)"
+                "{subcommand} does not support working tree mode — use a commit range (e.g., HEAD~1..HEAD)"
             )
         }
         RefRange::CommitRange { .. } => Ok(()),
@@ -151,10 +160,31 @@ mod tests {
     }
 
     #[test]
+    fn it_rejects_worktree_mode_for_history_command() {
+        let range = "HEAD";
+        let ref_range = parse_range(range);
+        let err = validate_commit_range(&ref_range, "history");
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("does not support working tree mode"),
+            "expected 'does not support working tree mode' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_accepts_commit_range_for_history_command() {
+        let range = "HEAD~3..HEAD";
+        let ref_range = parse_range(range);
+        let result = validate_commit_range(&ref_range, "history");
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn it_rejects_worktree_mode_for_snapshot_command() {
         let range = "HEAD";
         let ref_range = parse_range(range);
-        let err = validate_snapshot_range(&ref_range);
+        let err = validate_commit_range(&ref_range, "snapshot");
         assert!(err.is_err());
         let msg = err.unwrap_err().to_string();
         assert!(
@@ -167,7 +197,7 @@ mod tests {
     fn it_accepts_commit_range_for_snapshot_command() {
         let range = "HEAD~1..HEAD";
         let ref_range = parse_range(range);
-        let result = validate_snapshot_range(&ref_range);
+        let result = validate_commit_range(&ref_range, "snapshot");
         assert!(result.is_ok());
     }
 }
@@ -199,12 +229,30 @@ async fn main() -> anyhow::Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
+        Commands::History { range, repo } => {
+            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine current directory")
+            });
+            let ref_range = parse_range(&range);
+            validate_commit_range(&ref_range, "history")?;
+            let (base_ref, head_ref) = match ref_range {
+                RefRange::CommitRange { base, head } => (base, head),
+                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
+            };
+            let options = ManifestOptions {
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+                include_function_analysis: true,
+            };
+            let history = build_history(&repo_path, base_ref, head_ref, &options)?;
+            println!("{}", serde_json::to_string_pretty(&history)?);
+        }
         Commands::Snapshot { range, paths, repo } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
             });
             let ref_range = parse_range(&range);
-            validate_snapshot_range(&ref_range)?;
+            validate_commit_range(&ref_range, "snapshot")?;
             let (base_ref, head_ref) = match ref_range {
                 RefRange::CommitRange { base, head } => (base, head),
                 RefRange::WorktreeCompare { .. } => unreachable!("validated above"),

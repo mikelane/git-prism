@@ -1,8 +1,8 @@
 # git-prism
 
-Agent-optimized git data for LLM agents. Two MCP tools that replace human-oriented
+Agent-optimized git data for LLM agents. Three MCP tools that replace human-oriented
 diffs with structured JSON -- function-level granularity, import tracking,
-dependency changes, and complete file snapshots.
+dependency changes, complete file snapshots, and per-commit history.
 
 ## The Problem
 
@@ -189,6 +189,51 @@ the agent gets the full file at each point in time.
 }
 ```
 
+### `get_commit_history`
+
+Returns one manifest per commit in a range, so agents can see what changed in
+each commit separately instead of a single collapsed diff.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `base_ref` | string | _(required)_ | Base git ref (exclusive -- commits after this) |
+| `head_ref` | string | _(required)_ | Head git ref (inclusive) |
+| `repo_path` | string | cwd | Path to the git repository |
+
+**Example output:**
+
+```json
+{
+  "commits": [
+    {
+      "metadata": {
+        "sha": "a1b2c3d4",
+        "message": "add validation helper",
+        "author": "Jane Dev",
+        "timestamp": "2026-04-03T10:30:00+00:00"
+      },
+      "files": [
+        {
+          "path": "src/validate.rs",
+          "change_type": "added",
+          "language": "rust",
+          "lines_added": 25,
+          "lines_removed": 0
+        }
+      ],
+      "summary": {
+        "total_files_changed": 1,
+        "files_added": 1,
+        "total_lines_added": 25,
+        "total_lines_removed": 0
+      }
+    }
+  ]
+}
+```
+
 ## CLI Usage
 
 git-prism also works as a standalone CLI for scripting and debugging:
@@ -200,6 +245,9 @@ git-prism manifest HEAD~1..HEAD
 # Manifest for a specific repo path
 git-prism manifest main..feature-branch --repo /path/to/repo
 
+# Per-commit history for a range
+git-prism history HEAD~5..HEAD
+
 # File snapshots for specific paths
 git-prism snapshot HEAD~3..HEAD --paths src/main.rs src/lib.rs
 
@@ -207,8 +255,8 @@ git-prism snapshot HEAD~3..HEAD --paths src/main.rs src/lib.rs
 git-prism languages
 ```
 
-The `manifest` and `snapshot` commands output JSON to stdout. The `languages`
-command outputs plain text.
+The `manifest`, `snapshot`, and `history` commands output JSON to stdout. The
+`languages` command outputs plain text.
 
 ## Agent Workflow
 
