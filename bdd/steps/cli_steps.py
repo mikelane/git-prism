@@ -156,5 +156,5 @@ def _command_accepts_repo(parts: list[str]) -> bool:
         return False
     if "--repo" in parts:
         return False
-    subcommands_with_repo = {"manifest", "snapshot"}
+    subcommands_with_repo = {"manifest", "snapshot", "history"}
     return len(parts) > 1 and parts[1] in subcommands_with_repo
