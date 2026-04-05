@@ -1,3 +1,5 @@
+pub mod c_lang;
+pub mod cpp;
 pub mod go;
 pub mod java;
 pub mod python;
@@ -29,6 +31,8 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
         "js" | "jsx" => Some(Box::new(typescript::TypeScriptAnalyzer::javascript())),
         "rs" => Some(Box::new(rust_lang::RustAnalyzer)),
         "java" => Some(Box::new(java::JavaAnalyzer)),
+        "c" | "h" => Some(Box::new(c_lang::CAnalyzer)),
+        "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => Some(Box::new(cpp::CppAnalyzer)),
         _ => None,
     }
 }
@@ -48,8 +52,28 @@ mod tests {
     }
 
     #[test]
+    fn registry_returns_some_for_c_extensions() {
+        for ext in &["c", "h"] {
+            assert!(
+                analyzer_for_extension(ext).is_some(),
+                "expected Some for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_returns_some_for_cpp_extensions() {
+        for ext in &["cpp", "hpp"] {
+            assert!(
+                analyzer_for_extension(ext).is_some(),
+                "expected Some for extension '{ext}'"
+            );
+        }
+    }
+
+    #[test]
     fn registry_returns_none_for_unsupported_extensions() {
-        for ext in &["rb", "c", "cpp", "txt", ""] {
+        for ext in &["rb", "txt", ""] {
             assert!(
                 analyzer_for_extension(ext).is_none(),
                 "expected None for extension '{ext}'"

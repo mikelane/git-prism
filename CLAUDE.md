@@ -28,7 +28,7 @@ cargo build --release          # release build
 
 - **`rmcp` 1.3** — MCP SDK. Tools defined with `#[tool_router]` and `#[tool]` proc macros. Stdio transport.
 - **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`). Do not use `git2` or shell out to `git`.
-- **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
+- **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
 - **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `languages`.
 
 ## Module Responsibilities
