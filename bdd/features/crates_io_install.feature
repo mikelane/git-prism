@@ -1,4 +1,4 @@
-@ISSUE-32 @not_implemented
+@ISSUE-32
 Feature: crates.io package publishing
   git-prism is published to crates.io so users can install it with
   "cargo install git-prism". The package must be available on the
