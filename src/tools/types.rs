@@ -200,6 +200,7 @@ pub fn detect_language(path: &str) -> &'static str {
         "ts" | "tsx" => "typescript",
         "js" | "jsx" => "javascript",
         "rs" => "rust",
+        "java" => "java",
         _ => "unknown",
     }
 }
@@ -241,6 +242,16 @@ mod tests {
     #[test]
     fn it_detects_rust_from_rs_extension() {
         assert_eq!(detect_language("lib.rs"), "rust");
+    }
+
+    #[test]
+    fn it_detects_java_from_java_extension() {
+        assert_eq!(detect_language("Main.java"), "java");
+    }
+
+    #[test]
+    fn it_detects_java_from_nested_path() {
+        assert_eq!(detect_language("src/com/example/Main.java"), "java");
     }
 
     #[test]

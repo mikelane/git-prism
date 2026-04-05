@@ -80,6 +80,9 @@ impl LanguageAnalyzer for JavaAnalyzer {
         let root = tree.root_node();
         let mut imports = Vec::new();
 
+        // Imports are stripped to bare package paths (e.g., "java.util.List") rather than
+        // preserving the full statement text ("import java.util.List;"). Java import syntax
+        // is verbose and uniform -- the package path is the meaningful, differentiating part.
         let mut cursor = root.walk();
         for child in root.children(&mut cursor) {
             if child.kind() == "import_declaration" {
