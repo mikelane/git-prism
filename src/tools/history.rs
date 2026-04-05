@@ -187,4 +187,60 @@ mod tests {
         assert_eq!(history.commits[1].files.len(), 1);
         assert_eq!(history.commits[1].files[0].path, "file_a.txt");
     }
+
+    #[test]
+    fn it_returns_error_for_invalid_base_ref() {
+        let (_dir, path) = create_repo_with_three_commits();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = build_history(&path, "nonexistent", "HEAD", &options);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn it_returns_error_for_invalid_head_ref() {
+        let (_dir, path) = create_repo_with_three_commits();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = build_history(&path, "HEAD~1", "nonexistent", &options);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn it_returns_empty_commits_when_base_equals_head() {
+        let (_dir, path) = create_repo_with_three_commits();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let history = build_history(&path, "HEAD", "HEAD", &options).unwrap();
+        assert!(history.commits.is_empty());
+    }
+
+    #[test]
+    fn it_includes_summary_counts_per_commit() {
+        let (_dir, path) = create_repo_with_three_commits();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let history = build_history(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        assert_eq!(history.commits.len(), 1);
+        let summary = &history.commits[0].summary;
+        assert_eq!(summary.total_files_changed, 1);
+        assert!(summary.total_lines_added > 0 || summary.total_lines_removed > 0);
+    }
 }

@@ -4,8 +4,8 @@ use chrono::Utc;
 
 use crate::git::reader::RepoReader;
 use crate::tools::types::{
-    detect_language, FileContent, SnapshotFileEntry, SnapshotMetadata, SnapshotOptions,
-    SnapshotResponse, ToolError,
+    FileContent, SnapshotFileEntry, SnapshotMetadata, SnapshotOptions, SnapshotResponse, ToolError,
+    detect_language,
 };
 
 const MAX_SNAPSHOT_FILES: usize = 20;
