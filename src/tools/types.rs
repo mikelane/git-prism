@@ -166,6 +166,28 @@ fn default_max_file_size() -> usize {
     100_000
 }
 
+// --- History types ---
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommitMetadata {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommitManifest {
+    pub metadata: CommitMetadata,
+    pub files: Vec<ManifestFileEntry>,
+    pub summary: ManifestSummary,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HistoryResponse {
+    pub commits: Vec<CommitManifest>,
+}
+
 // --- Tool options (for internal use) ---
 
 #[derive(Debug, Clone)]
@@ -407,6 +429,42 @@ mod tests {
         assert!(args.head_ref.is_none());
         assert!(args.include_function_analysis);
         assert!(args.include_patterns.is_empty());
+    }
+
+    #[test]
+    fn history_response_serializes_commits_array() {
+        let response = HistoryResponse {
+            commits: vec![CommitManifest {
+                metadata: CommitMetadata {
+                    sha: "abc123".into(),
+                    message: "test commit".into(),
+                    author: "Test User".into(),
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                },
+                files: vec![],
+                summary: ManifestSummary {
+                    total_files_changed: 0,
+                    files_added: 0,
+                    files_modified: 0,
+                    files_deleted: 0,
+                    files_renamed: 0,
+                    total_lines_added: 0,
+                    total_lines_removed: 0,
+                    total_functions_changed: None,
+                    languages_affected: vec![],
+                },
+            }],
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["commits"].as_array().unwrap().len(), 1);
+        assert_eq!(json["commits"][0]["metadata"]["sha"], "abc123");
+        assert_eq!(json["commits"][0]["metadata"]["author"], "Test User");
+        assert_eq!(
+            json["commits"][0]["metadata"]["timestamp"],
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(json["commits"][0]["metadata"]["message"], "test commit");
+        assert!(json["commits"][0]["files"].as_array().unwrap().is_empty());
     }
 
     #[test]

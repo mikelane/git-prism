@@ -8,10 +8,11 @@ use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
 use crate::tools::types::{
-    FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
-    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, TruncationInfo, detect_language,
+    detect_language, FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry,
+    ManifestMetadata, ManifestOptions, ManifestResponse, ManifestSummary, ToolError,
+    TruncationInfo,
 };
-use crate::treesitter::{Function, analyzer_for_extension};
+use crate::treesitter::{analyzer_for_extension, Function};
 
 const MAX_FILES: usize = 200;
 
