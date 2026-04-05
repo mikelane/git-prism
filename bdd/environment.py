@@ -46,10 +46,10 @@ def before_scenario(context, scenario):
 def after_scenario(context, scenario):
     # Telemetry scenarios spawn an MCP server and a mock OTLP collector;
     # tear both down before removing the temp repo directory so file
-    # handles can't keep the repo alive on shutdown.
-    if "telemetry" in scenario.feature.filename:
-        from telemetry_steps import telemetry_after_scenario
-        telemetry_after_scenario(context)
+    # handles can't keep the repo alive on shutdown. The helper no-ops
+    # when no collector/procs were registered, so call unconditionally.
+    from telemetry_steps import telemetry_after_scenario
+    telemetry_after_scenario(context)
 
     for path in getattr(context, "cleanup_dirs", []):
         if os.path.isdir(path):

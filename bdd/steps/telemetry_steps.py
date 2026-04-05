@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import time
 from concurrent import futures
@@ -60,7 +59,6 @@ class MockOtlpCollector:
 
     def start(self) -> None:
         """Bind a grpc.Server to a free port and register both servicers."""
-        self.port = _pick_free_port()
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
         trace_service_pb2_grpc.add_TraceServiceServicer_to_server(
             _TraceServicer(self), self.server,
@@ -68,8 +66,16 @@ class MockOtlpCollector:
         metrics_service_pb2_grpc.add_MetricsServiceServicer_to_server(
             _MetricsServicer(self), self.server,
         )
-        self.server.add_insecure_port(f"localhost:{self.port}")
+        self.port = self.server.add_insecure_port("localhost:0")
+        if self.port == 0:
+            raise RuntimeError("gRPC mock collector failed to bind")
         self.server.start()
+        # Verify the server is actually accepting connections before returning
+        channel = grpc.insecure_channel(f"localhost:{self.port}")
+        try:
+            grpc.channel_ready_future(channel).result(timeout=5)
+        finally:
+            channel.close()
 
     def stop(self) -> None:
         if self.server is not None:
@@ -132,13 +138,6 @@ class _MetricsServicer(metrics_service_pb2_grpc.MetricsServiceServicer):
     def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
         self._collector.record_metrics(request)
         return metrics_service_pb2.ExportMetricsServiceResponse()
-
-
-def _pick_free_port() -> int:
-    """Bind to port 0 to discover a free port, then close the socket."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("localhost", 0))
-        return sock.getsockname()[1]
 
 
 # ---------- helpers used by the steps ----------
@@ -568,14 +567,20 @@ def step_ref_pattern_bounded(context: Context, key: str) -> None:
 
 
 def _stop_server_procs(context: Context) -> None:
-    for proc in getattr(context, "server_procs", []):
-        if proc.poll() is None:
-            proc.terminate()
+    """Terminate any spawned git-prism processes, draining their pipes."""
+    procs = getattr(context, "server_procs", [])
+    for proc in procs:
+        if proc.poll() is not None:
+            continue  # already exited
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
             try:
-                proc.wait(timeout=2)
+                proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=2)
+                pass  # zombie — log and move on
     context.server_procs = []
 
 
