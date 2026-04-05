@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::git::depfiles::DependencyDiff;
-use crate::git::diff::ChangeType;
+use crate::git::diff::{ChangeScope, ChangeType};
 
 // --- FunctionChange ---
 
@@ -64,6 +64,7 @@ pub struct ManifestFileEntry {
     pub path: String,
     pub old_path: Option<String>,
     pub change_type: ChangeType,
+    pub change_scope: ChangeScope,
     pub language: String,
     pub is_binary: bool,
     pub is_generated: bool,

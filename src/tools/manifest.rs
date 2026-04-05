@@ -8,10 +8,11 @@ use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
 use crate::tools::types::{
-    FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
-    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, TruncationInfo, detect_language,
+    detect_language, FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry,
+    ManifestMetadata, ManifestOptions, ManifestResponse, ManifestSummary, ToolError,
+    TruncationInfo,
 };
-use crate::treesitter::{Function, analyzer_for_extension};
+use crate::treesitter::{analyzer_for_extension, Function};
 
 const MAX_FILES: usize = 200;
 
@@ -253,6 +254,7 @@ pub fn build_manifest(
             path: file_change.path.clone(),
             old_path: file_change.old_path.clone(),
             change_type: file_change.change_type,
+            change_scope: file_change.change_scope,
             language: language.to_string(),
             is_binary: file_change.is_binary,
             is_generated,

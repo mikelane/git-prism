@@ -13,11 +13,25 @@ pub enum ChangeType {
     Copied,
 }
 
+/// Indicates whether a file change comes from committed history,
+/// the staging area (index), or the working directory on disk.
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeScope {
+    /// Change between two committed trees (the existing behavior).
+    Committed,
+    /// Change between HEAD tree and the index (`git diff --cached`).
+    Staged,
+    /// Change between the index and the working directory (`git diff`).
+    Unstaged,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
     pub old_path: Option<String>,
     pub change_type: ChangeType,
+    pub change_scope: ChangeScope,
     pub is_binary: bool,
     pub lines_added: usize,
     pub lines_removed: usize,
@@ -58,6 +72,7 @@ impl RepoReader {
                             path: location.to_string(),
                             old_path: None,
                             change_type: ChangeType::Added,
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added,
                             lines_removed: 0,
@@ -76,6 +91,7 @@ impl RepoReader {
                             path: location.to_string(),
                             old_path: None,
                             change_type: ChangeType::Deleted,
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added: 0,
                             lines_removed,
@@ -115,6 +131,7 @@ impl RepoReader {
                             path: location.to_string(),
                             old_path: None,
                             change_type: ChangeType::Modified,
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added,
                             lines_removed,
@@ -159,6 +176,7 @@ impl RepoReader {
                             } else {
                                 ChangeType::Renamed
                             },
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added,
                             lines_removed,
@@ -534,5 +552,27 @@ mod tests {
         let binary = diff.files.iter().find(|f| f.path == "image.png").unwrap();
         assert!(binary.is_binary);
         assert_eq!(binary.lines_added, 0);
+    }
+
+    #[test]
+    fn it_sets_committed_scope_on_diff_commits() {
+        let (_dir, path) = create_repo_with_two_commits();
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        for file in &diff.files {
+            assert_eq!(file.change_scope, ChangeScope::Committed);
+        }
+    }
+
+    #[test]
+    fn change_scope_serializes_as_snake_case() {
+        let json = serde_json::to_value(ChangeScope::Staged).unwrap();
+        assert_eq!(json, "staged");
+
+        let json = serde_json::to_value(ChangeScope::Unstaged).unwrap();
+        assert_eq!(json, "unstaged");
+
+        let json = serde_json::to_value(ChangeScope::Committed).unwrap();
+        assert_eq!(json, "committed");
     }
 }
