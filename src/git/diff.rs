@@ -37,6 +37,10 @@ pub struct FileChange {
     pub lines_removed: usize,
     pub size_before: usize,
     pub size_after: usize,
+    /// For staged changes, the blob object ID in the index.
+    /// Used to read the staged file content from the object database
+    /// rather than from disk (which may have further unstaged edits).
+    pub staged_blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -78,6 +82,7 @@ impl RepoReader {
                             lines_removed: 0,
                             size_before: 0,
                             size_after,
+                            staged_blob_id: None,
                         }
                     }
                     C::Deletion {
@@ -97,6 +102,7 @@ impl RepoReader {
                             lines_removed,
                             size_before,
                             size_after: 0,
+                            staged_blob_id: None,
                         }
                     }
                     C::Modification {
@@ -137,6 +143,7 @@ impl RepoReader {
                             lines_removed,
                             size_before,
                             size_after,
+                            staged_blob_id: None,
                         }
                     }
                     C::Rewrite {
@@ -182,6 +189,7 @@ impl RepoReader {
                             lines_removed,
                             size_before,
                             size_after,
+                            staged_blob_id: None,
                         }
                     }
                 };
@@ -206,13 +214,7 @@ fn blob_stats(id: &gix::Id<'_>) -> Result<(usize, bool, usize), GitError> {
         .object()
         .map_err(|e| GitError::ReadObject(e.to_string()))?;
     let is_binary = obj.data.contains(&0);
-    let lines = if is_binary || obj.data.is_empty() {
-        0
-    } else {
-        let newline_count = obj.data.iter().filter(|&&b| b == b'\n').count();
-        let last_byte = obj.data[obj.data.len() - 1];
-        newline_count + if last_byte != b'\n' { 1 } else { 0 }
-    };
+    let lines = if is_binary { 0 } else { count_lines(&obj.data) };
     Ok((obj.data.len(), is_binary, lines))
 }
 
@@ -251,6 +253,19 @@ impl gix::diff::blob::Sink for LineCounter {
     fn finish(self) -> Self::Out {
         self
     }
+}
+
+/// Count the number of lines in a byte slice.
+///
+/// A file with no trailing newline still counts the last partial line
+/// (e.g. `"hello"` is 1 line, `"one\ntwo"` is 2 lines).
+/// An empty slice returns 0.
+pub(crate) fn count_lines(data: &[u8]) -> usize {
+    if data.is_empty() {
+        return 0;
+    }
+    let newline_count = data.iter().filter(|&&b| b == b'\n').count();
+    newline_count + if data[data.len() - 1] != b'\n' { 1 } else { 0 }
 }
 
 #[cfg(test)]
@@ -565,6 +580,31 @@ mod tests {
         for file in &diff.files {
             assert_eq!(file.change_scope, ChangeScope::Committed);
         }
+    }
+
+    #[test]
+    fn count_lines_returns_zero_for_empty_data() {
+        assert_eq!(count_lines(b""), 0);
+    }
+
+    #[test]
+    fn count_lines_counts_single_line_without_trailing_newline() {
+        assert_eq!(count_lines(b"hello"), 1);
+    }
+
+    #[test]
+    fn count_lines_counts_single_line_with_trailing_newline() {
+        assert_eq!(count_lines(b"hello\n"), 1);
+    }
+
+    #[test]
+    fn count_lines_counts_multiple_lines_with_trailing_newline() {
+        assert_eq!(count_lines(b"one\ntwo\n"), 2);
+    }
+
+    #[test]
+    fn count_lines_counts_multiple_lines_without_trailing_newline() {
+        assert_eq!(count_lines(b"one\ntwo\nthree"), 3);
     }
 
     #[test]

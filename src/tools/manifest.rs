@@ -385,7 +385,10 @@ pub fn build_worktree_manifest(
 
             let head_content = match file_change.change_type {
                 ChangeType::Deleted => None,
-                _ => read_worktree_file(repo_path, &file_change.path),
+                _ => match &file_change.staged_blob_id {
+                    Some(blob_id) => reader.read_blob(blob_id).ok(),
+                    None => read_worktree_file(repo_path, &file_change.path),
+                },
             };
 
             let base_fns = base_content
@@ -475,6 +478,8 @@ pub fn build_worktree_manifest(
         },
         summary,
         files: manifest_files,
+        // Dependency file diffing requires two committed blobs; worktree mode
+        // doesn't have a committed head blob for comparison.
         dependency_changes: vec![],
         truncated,
         truncation_info,
@@ -887,6 +892,91 @@ mod tests {
         let change = diff_imports(&base, &head);
         assert!(change.added.is_empty());
         assert_eq!(change.removed, vec!["fmt", "os"]);
+    }
+
+    #[test]
+    fn it_reads_staged_content_from_index_not_disk_for_function_analysis() {
+        use std::process::Command;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit with a Python file containing one function
+        std::fs::write(path.join("lib.py"), "def original():\n    return 1\n").unwrap();
+        Command::new("git")
+            .args(["add", "lib.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage a version with a new function "staged_fn"
+        std::fs::write(
+            path.join("lib.py"),
+            "def original():\n    return 1\n\ndef staged_fn():\n    return 2\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Now modify disk to have a DIFFERENT function "disk_fn" instead of "staged_fn"
+        std::fs::write(
+            path.join("lib.py"),
+            "def original():\n    return 1\n\ndef disk_fn():\n    return 3\n",
+        )
+        .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        // The staged entry should show "staged_fn" (from index), not "disk_fn" (from disk)
+        let staged_entry = manifest
+            .files
+            .iter()
+            .find(|f| f.path == "lib.py" && f.change_scope == crate::git::diff::ChangeScope::Staged)
+            .expect("should have a staged entry for lib.py");
+
+        let fns = staged_entry
+            .functions_changed
+            .as_ref()
+            .expect("should have function analysis");
+
+        assert!(
+            fns.iter().any(|f| f.name == "staged_fn"),
+            "staged entry should show 'staged_fn' from index, not 'disk_fn' from disk. Got: {:?}",
+            fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !fns.iter().any(|f| f.name == "disk_fn"),
+            "staged entry should NOT show 'disk_fn' from disk"
+        );
     }
 
     #[test]

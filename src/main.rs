@@ -56,6 +56,17 @@ enum RefRange<'a> {
     WorktreeCompare { base: &'a str },
 }
 
+fn validate_snapshot_range(range: &RefRange<'_>) -> anyhow::Result<()> {
+    match range {
+        RefRange::WorktreeCompare { .. } => {
+            anyhow::bail!(
+                "snapshot does not support working tree mode — use a commit range (e.g., HEAD~1..HEAD)"
+            )
+        }
+        RefRange::CommitRange { .. } => Ok(()),
+    }
+}
+
 fn parse_range(range: &str) -> RefRange<'_> {
     if let Some((base, head)) = range.split_once("...") {
         RefRange::CommitRange {
@@ -138,6 +149,27 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn it_rejects_worktree_mode_for_snapshot_command() {
+        let range = "HEAD";
+        let ref_range = parse_range(range);
+        let err = validate_snapshot_range(&ref_range);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("does not support working tree mode"),
+            "expected 'does not support working tree mode' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_accepts_commit_range_for_snapshot_command() {
+        let range = "HEAD~1..HEAD";
+        let ref_range = parse_range(range);
+        let result = validate_snapshot_range(&ref_range);
+        assert!(result.is_ok());
+    }
 }
 
 #[tokio::main]
@@ -172,9 +204,10 @@ async fn main() -> anyhow::Result<()> {
                 std::env::current_dir().expect("cannot determine current directory")
             });
             let ref_range = parse_range(&range);
+            validate_snapshot_range(&ref_range)?;
             let (base_ref, head_ref) = match ref_range {
                 RefRange::CommitRange { base, head } => (base, head),
-                RefRange::WorktreeCompare { base } => (base, "HEAD"),
+                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
             };
             let options = SnapshotOptions {
                 include_before: true,

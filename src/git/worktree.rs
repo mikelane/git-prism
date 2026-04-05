@@ -1,4 +1,6 @@
-use crate::git::diff::{ChangeScope, ChangeType, DiffResult, FileChange, count_line_changes};
+use crate::git::diff::{
+    ChangeScope, ChangeType, DiffResult, FileChange, count_line_changes, count_lines,
+};
 use crate::git::reader::{GitError, RepoReader};
 
 impl RepoReader {
@@ -65,6 +67,7 @@ impl RepoReader {
                     lines_removed: 0,
                     size_before: 0,
                     size_after: data.len(),
+                    staged_blob_id: Some(id.to_hex().to_string()),
                 }
             }
             C::Deletion {
@@ -88,6 +91,7 @@ impl RepoReader {
                     lines_removed,
                     size_before: data.len(),
                     size_after: 0,
+                    staged_blob_id: None,
                 }
             }
             C::Modification {
@@ -119,6 +123,7 @@ impl RepoReader {
                     lines_removed,
                     size_before: old_obj.data.len(),
                     size_after: new_obj.data.len(),
+                    staged_blob_id: Some(id.to_hex().to_string()),
                 }
             }
             C::Rewrite {
@@ -156,6 +161,7 @@ impl RepoReader {
                     lines_removed,
                     size_before: old_obj.data.len(),
                     size_after: new_obj.data.len(),
+                    staged_blob_id: Some(id.to_hex().to_string()),
                 }
             }
         };
@@ -205,6 +211,7 @@ impl RepoReader {
                                 lines_removed,
                                 size_before: old_obj.data.len(),
                                 size_after: 0,
+                                staged_blob_id: None,
                             }))
                         }
                         Change::Type { .. } | Change::Modification { .. } => {
@@ -229,6 +236,7 @@ impl RepoReader {
                                 lines_removed,
                                 size_before: old_obj.data.len(),
                                 size_after: new_data.len(),
+                                staged_blob_id: None,
                             }))
                         }
                         Change::SubmoduleModification(..) => Ok(None),
@@ -245,15 +253,6 @@ impl RepoReader {
 
 fn obj_err(e: impl std::fmt::Display) -> GitError {
     GitError::ReadObject(e.to_string())
-}
-
-fn count_lines(data: &[u8]) -> usize {
-    if data.is_empty() {
-        return 0;
-    }
-    let newline_count = data.iter().filter(|&&b| b == b'\n').count();
-    let last_byte = data[data.len() - 1];
-    newline_count + if last_byte != b'\n' { 1 } else { 0 }
 }
 
 #[cfg(test)]
