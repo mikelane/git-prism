@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Languages => {
             println!("Supported languages for function-level analysis:");
             println!("  c          (.c, .h)");
-            println!("  cpp        (.cpp, .hpp)");
+            println!("  cpp        (.cpp, .hpp, .cc, .cxx, .hh, .hxx)");
             println!("  go         (.go)");
             println!("  java       (.java)");
             println!("  javascript (.js, .jsx)");

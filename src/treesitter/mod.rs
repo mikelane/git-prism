@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn registry_returns_some_for_cpp_extensions() {
-        for ext in &["cpp", "hpp"] {
+        for ext in &["cpp", "hpp", "cc", "cxx", "hh", "hxx"] {
             assert!(
                 analyzer_for_extension(ext).is_some(),
                 "expected Some for extension '{ext}'"
