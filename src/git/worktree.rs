@@ -1,4 +1,4 @@
-use crate::git::diff::{count_line_changes, ChangeScope, ChangeType, DiffResult, FileChange};
+use crate::git::diff::{ChangeScope, ChangeType, DiffResult, FileChange, count_line_changes};
 use crate::git::reader::{GitError, RepoReader};
 
 impl RepoReader {
