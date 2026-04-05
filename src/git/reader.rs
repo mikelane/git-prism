@@ -27,6 +27,10 @@ pub struct RepoReader {
 }
 
 impl RepoReader {
+    pub(crate) fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
         // Raw gix error omitted from user-facing message — it contains internal
         // paths and format that aren't actionable for the caller.
@@ -70,6 +74,18 @@ impl RepoReader {
             .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
         std::str::from_utf8(&blob.data)
+            .map(|s| s.to_string())
+            .map_err(|e| GitError::ReadObject(e.to_string()))
+    }
+
+    pub fn read_blob(&self, hex_id: &str) -> Result<String, GitError> {
+        let id = gix::ObjectId::from_hex(hex_id.as_bytes())
+            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+        let obj = self
+            .repo
+            .find_object(id)
+            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+        std::str::from_utf8(&obj.data)
             .map(|s| s.to_string())
             .map_err(|e| GitError::ReadObject(e.to_string()))
     }

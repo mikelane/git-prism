@@ -13,16 +13,34 @@ pub enum ChangeType {
     Copied,
 }
 
+/// Indicates whether a file change comes from committed history,
+/// the staging area (index), or the working directory on disk.
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeScope {
+    /// Change between two committed trees (the existing behavior).
+    Committed,
+    /// Change between HEAD tree and the index (`git diff --cached`).
+    Staged,
+    /// Change between the index and the working directory (`git diff`).
+    Unstaged,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
     pub old_path: Option<String>,
     pub change_type: ChangeType,
+    pub change_scope: ChangeScope,
     pub is_binary: bool,
     pub lines_added: usize,
     pub lines_removed: usize,
     pub size_before: usize,
     pub size_after: usize,
+    /// For staged changes, the blob object ID in the index.
+    /// Used to read the staged file content from the object database
+    /// rather than from disk (which may have further unstaged edits).
+    pub staged_blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -58,11 +76,13 @@ impl RepoReader {
                             path: location.to_string(),
                             old_path: None,
                             change_type: ChangeType::Added,
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added,
                             lines_removed: 0,
                             size_before: 0,
                             size_after,
+                            staged_blob_id: None,
                         }
                     }
                     C::Deletion {
@@ -76,11 +96,13 @@ impl RepoReader {
                             path: location.to_string(),
                             old_path: None,
                             change_type: ChangeType::Deleted,
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added: 0,
                             lines_removed,
                             size_before,
                             size_after: 0,
+                            staged_blob_id: None,
                         }
                     }
                     C::Modification {
@@ -115,11 +137,13 @@ impl RepoReader {
                             path: location.to_string(),
                             old_path: None,
                             change_type: ChangeType::Modified,
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added,
                             lines_removed,
                             size_before,
                             size_after,
+                            staged_blob_id: None,
                         }
                     }
                     C::Rewrite {
@@ -159,11 +183,13 @@ impl RepoReader {
                             } else {
                                 ChangeType::Renamed
                             },
+                            change_scope: ChangeScope::Committed,
                             is_binary,
                             lines_added,
                             lines_removed,
                             size_before,
                             size_after,
+                            staged_blob_id: None,
                         }
                     }
                 };
@@ -188,17 +214,14 @@ fn blob_stats(id: &gix::Id<'_>) -> Result<(usize, bool, usize), GitError> {
         .object()
         .map_err(|e| GitError::ReadObject(e.to_string()))?;
     let is_binary = obj.data.contains(&0);
-    let lines = if is_binary || obj.data.is_empty() {
-        0
-    } else {
-        let newline_count = obj.data.iter().filter(|&&b| b == b'\n').count();
-        let last_byte = obj.data[obj.data.len() - 1];
-        newline_count + if last_byte != b'\n' { 1 } else { 0 }
-    };
+    let lines = if is_binary { 0 } else { count_lines(&obj.data) };
     Ok((obj.data.len(), is_binary, lines))
 }
 
-fn count_line_changes(old_data: Option<&[u8]>, new_data: Option<&[u8]>) -> (usize, usize) {
+pub(crate) fn count_line_changes(
+    old_data: Option<&[u8]>,
+    new_data: Option<&[u8]>,
+) -> (usize, usize) {
     let old_text = old_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
     let new_text = new_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
 
@@ -230,6 +253,19 @@ impl gix::diff::blob::Sink for LineCounter {
     fn finish(self) -> Self::Out {
         self
     }
+}
+
+/// Count the number of lines in a byte slice.
+///
+/// A file with no trailing newline still counts the last partial line
+/// (e.g. `"hello"` is 1 line, `"one\ntwo"` is 2 lines).
+/// An empty slice returns 0.
+pub(crate) fn count_lines(data: &[u8]) -> usize {
+    if data.is_empty() {
+        return 0;
+    }
+    let newline_count = data.iter().filter(|&&b| b == b'\n').count();
+    newline_count + if data[data.len() - 1] != b'\n' { 1 } else { 0 }
 }
 
 #[cfg(test)]
@@ -534,5 +570,52 @@ mod tests {
         let binary = diff.files.iter().find(|f| f.path == "image.png").unwrap();
         assert!(binary.is_binary);
         assert_eq!(binary.lines_added, 0);
+    }
+
+    #[test]
+    fn it_sets_committed_scope_on_diff_commits() {
+        let (_dir, path) = create_repo_with_two_commits();
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        for file in &diff.files {
+            assert_eq!(file.change_scope, ChangeScope::Committed);
+        }
+    }
+
+    #[test]
+    fn count_lines_returns_zero_for_empty_data() {
+        assert_eq!(count_lines(b""), 0);
+    }
+
+    #[test]
+    fn count_lines_counts_single_line_without_trailing_newline() {
+        assert_eq!(count_lines(b"hello"), 1);
+    }
+
+    #[test]
+    fn count_lines_counts_single_line_with_trailing_newline() {
+        assert_eq!(count_lines(b"hello\n"), 1);
+    }
+
+    #[test]
+    fn count_lines_counts_multiple_lines_with_trailing_newline() {
+        assert_eq!(count_lines(b"one\ntwo\n"), 2);
+    }
+
+    #[test]
+    fn count_lines_counts_multiple_lines_without_trailing_newline() {
+        assert_eq!(count_lines(b"one\ntwo\nthree"), 3);
+    }
+
+    #[test]
+    fn change_scope_serializes_as_snake_case() {
+        let json = serde_json::to_value(ChangeScope::Staged).unwrap();
+        assert_eq!(json, "staged");
+
+        let json = serde_json::to_value(ChangeScope::Unstaged).unwrap();
+        assert_eq!(json, "unstaged");
+
+        let json = serde_json::to_value(ChangeScope::Committed).unwrap();
+        assert_eq!(json, "committed");
     }
 }

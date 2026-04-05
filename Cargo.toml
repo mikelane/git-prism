@@ -13,7 +13,7 @@ categories = ["development-tools", "command-line-utilities"]
 [dependencies]
 rmcp = { version = "1.3", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
-gix = { version = "0.81", default-features = false, features = ["basic", "blob-diff", "sha1"] }
+gix = { version = "0.81", default-features = false, features = ["basic", "blob-diff", "sha1", "status"] }
 tree-sitter = "0.26"
 tree-sitter-go = "0.25"
 tree-sitter-python = "0.25"

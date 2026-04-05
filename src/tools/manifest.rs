@@ -253,6 +253,7 @@ pub fn build_manifest(
             path: file_change.path.clone(),
             old_path: file_change.old_path.clone(),
             change_type: file_change.change_type,
+            change_scope: file_change.change_scope,
             language: language.to_string(),
             is_binary: file_change.is_binary,
             is_generated,
@@ -308,6 +309,186 @@ pub fn build_manifest(
         truncated,
         truncation_info,
     })
+}
+
+/// Build a manifest comparing a committed ref against the current working tree.
+///
+/// Unlike [`build_manifest`] which compares two committed trees, this reads
+/// staged and unstaged changes via `git status` semantics. Each file entry
+/// carries a `change_scope` of `Staged` or `Unstaged`. Function analysis
+/// reads file content from disk rather than the object database.
+pub fn build_worktree_manifest(
+    repo_path: &Path,
+    base_ref: &str,
+    options: &ManifestOptions,
+) -> Result<ManifestResponse, ToolError> {
+    let reader = RepoReader::open(repo_path)?;
+    let base_commit = reader.resolve_commit(base_ref)?;
+
+    let diff_result = reader.diff_worktree()?;
+
+    let mut files_to_process = diff_result.files;
+
+    if !options.include_patterns.is_empty() {
+        files_to_process.retain(|f| {
+            options
+                .include_patterns
+                .iter()
+                .any(|p| matches_glob_pattern(&f.path, p))
+        });
+    }
+
+    if !options.exclude_patterns.is_empty() {
+        files_to_process.retain(|f| {
+            !options
+                .exclude_patterns
+                .iter()
+                .any(|p| matches_glob_pattern(&f.path, p))
+        });
+    }
+
+    let total_files = files_to_process.len();
+    let truncated = total_files > MAX_FILES;
+    let truncation_info = if truncated {
+        files_to_process.truncate(MAX_FILES);
+        Some(TruncationInfo {
+            total_files,
+            files_included: MAX_FILES,
+            files_omitted: total_files - MAX_FILES,
+        })
+    } else {
+        None
+    };
+
+    let mut manifest_files = Vec::new();
+    let mut languages_set = std::collections::HashSet::new();
+    let mut total_functions_changed: Option<usize> = None;
+
+    for file_change in &files_to_process {
+        let language = detect_language(&file_change.path);
+        let ext = extension_from_path(&file_change.path);
+        let is_generated = GeneratedFileDetector::is_generated(&file_change.path, None);
+
+        if language != "unknown" {
+            languages_set.insert(language.to_string());
+        }
+
+        let (functions_changed, imports_changed) = if let Some(analyzer) = options
+            .include_function_analysis
+            .then(|| analyzer_for_extension(ext))
+            .flatten()
+        {
+            let base_content = match file_change.change_type {
+                ChangeType::Added => None,
+                _ => reader.read_file_at_ref(base_ref, &file_change.path).ok(),
+            };
+
+            let head_content = match file_change.change_type {
+                ChangeType::Deleted => None,
+                _ => match &file_change.staged_blob_id {
+                    Some(blob_id) => reader.read_blob(blob_id).ok(),
+                    None => read_worktree_file(repo_path, &file_change.path),
+                },
+            };
+
+            let base_fns = base_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let head_fns = head_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let fn_changes = diff_functions(&base_fns, &head_fns);
+            let count = fn_changes.len();
+            *total_functions_changed.get_or_insert(0) += count;
+
+            let base_imports = base_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let head_imports = head_content
+                .as_ref()
+                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                .unwrap_or_default();
+
+            let import_change = diff_imports(&base_imports, &head_imports);
+
+            (Some(fn_changes), Some(import_change))
+        } else {
+            (None, None)
+        };
+
+        manifest_files.push(ManifestFileEntry {
+            path: file_change.path.clone(),
+            old_path: file_change.old_path.clone(),
+            change_type: file_change.change_type,
+            change_scope: file_change.change_scope,
+            language: language.to_string(),
+            is_binary: file_change.is_binary,
+            is_generated,
+            lines_added: file_change.lines_added,
+            lines_removed: file_change.lines_removed,
+            size_before: file_change.size_before,
+            size_after: file_change.size_after,
+            functions_changed,
+            imports_changed,
+        });
+    }
+
+    let mut languages_affected: Vec<String> = languages_set.into_iter().collect();
+    languages_affected.sort();
+
+    let summary = ManifestSummary {
+        total_files_changed: manifest_files.len(),
+        files_added: manifest_files
+            .iter()
+            .filter(|f| f.change_type == ChangeType::Added)
+            .count(),
+        files_modified: manifest_files
+            .iter()
+            .filter(|f| f.change_type == ChangeType::Modified)
+            .count(),
+        files_deleted: manifest_files
+            .iter()
+            .filter(|f| f.change_type == ChangeType::Deleted)
+            .count(),
+        files_renamed: manifest_files
+            .iter()
+            .filter(|f| f.change_type == ChangeType::Renamed)
+            .count(),
+        total_lines_added: manifest_files.iter().map(|f| f.lines_added).sum(),
+        total_lines_removed: manifest_files.iter().map(|f| f.lines_removed).sum(),
+        total_functions_changed,
+        languages_affected,
+    };
+
+    Ok(ManifestResponse {
+        metadata: ManifestMetadata {
+            repo_path: repo_path.display().to_string(),
+            base_ref: base_ref.to_string(),
+            head_ref: "WORKTREE".to_string(),
+            base_sha: base_commit.sha,
+            head_sha: "WORKTREE".to_string(),
+            generated_at: Utc::now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        summary,
+        files: manifest_files,
+        // Dependency file diffing requires two committed blobs; worktree mode
+        // doesn't have a committed head blob for comparison.
+        dependency_changes: vec![],
+        truncated,
+        truncation_info,
+    })
+}
+
+fn read_worktree_file(repo_path: &Path, file_path: &str) -> Option<String> {
+    let full_path = repo_path.join(file_path);
+    std::fs::read_to_string(&full_path).ok()
 }
 
 #[cfg(test)]
@@ -711,5 +892,145 @@ mod tests {
         let change = diff_imports(&base, &head);
         assert!(change.added.is_empty());
         assert_eq!(change.removed, vec!["fmt", "os"]);
+    }
+
+    #[test]
+    fn it_reads_staged_content_from_index_not_disk_for_function_analysis() {
+        use std::process::Command;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit with a Python file containing one function
+        std::fs::write(path.join("lib.py"), "def original():\n    return 1\n").unwrap();
+        Command::new("git")
+            .args(["add", "lib.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage a version with a new function "staged_fn"
+        std::fs::write(
+            path.join("lib.py"),
+            "def original():\n    return 1\n\ndef staged_fn():\n    return 2\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Now modify disk to have a DIFFERENT function "disk_fn" instead of "staged_fn"
+        std::fs::write(
+            path.join("lib.py"),
+            "def original():\n    return 1\n\ndef disk_fn():\n    return 3\n",
+        )
+        .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        // The staged entry should show "staged_fn" (from index), not "disk_fn" (from disk)
+        let staged_entry = manifest
+            .files
+            .iter()
+            .find(|f| f.path == "lib.py" && f.change_scope == crate::git::diff::ChangeScope::Staged)
+            .expect("should have a staged entry for lib.py");
+
+        let fns = staged_entry
+            .functions_changed
+            .as_ref()
+            .expect("should have function analysis");
+
+        assert!(
+            fns.iter().any(|f| f.name == "staged_fn"),
+            "staged entry should show 'staged_fn' from index, not 'disk_fn' from disk. Got: {:?}",
+            fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !fns.iter().any(|f| f.name == "disk_fn"),
+            "staged entry should NOT show 'disk_fn' from disk"
+        );
+    }
+
+    #[test]
+    fn it_builds_worktree_manifest_with_staged_file() {
+        use std::process::Command;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("existing.txt"), "hello\n").unwrap();
+        Command::new("git")
+            .args(["add", "existing.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage a new file
+        std::fs::write(path.join("new.py"), "def foo(): pass\n").unwrap();
+        Command::new("git")
+            .args(["add", "new.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        assert!(manifest.summary.total_files_changed > 0);
+        let new_file = manifest.files.iter().find(|f| f.path == "new.py").unwrap();
+        assert_eq!(new_file.change_type, ChangeType::Added);
     }
 }
