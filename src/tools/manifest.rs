@@ -8,10 +8,11 @@ use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
 use crate::tools::types::{
-    FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
-    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, TruncationInfo, detect_language,
+    detect_language, FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry,
+    ManifestMetadata, ManifestOptions, ManifestResponse, ManifestSummary, ToolError,
+    TruncationInfo,
 };
-use crate::treesitter::{Function, analyzer_for_extension};
+use crate::treesitter::{analyzer_for_extension, Function};
 
 const MAX_FILES: usize = 200;
 
@@ -311,6 +312,12 @@ pub fn build_manifest(
     })
 }
 
+/// Build a manifest comparing a committed ref against the current working tree.
+///
+/// Unlike [`build_manifest`] which compares two committed trees, this reads
+/// staged and unstaged changes via `git status` semantics. Each file entry
+/// carries a `change_scope` of `Staged` or `Unstaged`. Function analysis
+/// reads file content from disk rather than the object database.
 pub fn build_worktree_manifest(
     repo_path: &Path,
     base_ref: &str,
