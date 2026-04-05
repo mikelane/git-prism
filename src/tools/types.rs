@@ -201,6 +201,8 @@ pub fn detect_language(path: &str) -> &'static str {
         "js" | "jsx" => "javascript",
         "rs" => "rust",
         "java" => "java",
+        "c" | "h" => "c",
+        "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "cpp",
         _ => "unknown",
     }
 }
@@ -252,6 +254,46 @@ mod tests {
     #[test]
     fn it_detects_java_from_nested_path() {
         assert_eq!(detect_language("src/com/example/Main.java"), "java");
+    }
+
+    #[test]
+    fn it_detects_c_from_c_extension() {
+        assert_eq!(detect_language("main.c"), "c");
+    }
+
+    #[test]
+    fn it_detects_c_from_h_extension() {
+        assert_eq!(detect_language("utils.h"), "c");
+    }
+
+    #[test]
+    fn it_detects_cpp_from_cpp_extension() {
+        assert_eq!(detect_language("widget.cpp"), "cpp");
+    }
+
+    #[test]
+    fn it_detects_cpp_from_hpp_extension() {
+        assert_eq!(detect_language("widget.hpp"), "cpp");
+    }
+
+    #[test]
+    fn it_detects_cpp_from_cc_extension() {
+        assert_eq!(detect_language("widget.cc"), "cpp");
+    }
+
+    #[test]
+    fn it_detects_cpp_from_cxx_extension() {
+        assert_eq!(detect_language("widget.cxx"), "cpp");
+    }
+
+    #[test]
+    fn it_detects_cpp_from_hh_extension() {
+        assert_eq!(detect_language("widget.hh"), "cpp");
+    }
+
+    #[test]
+    fn it_detects_cpp_from_hxx_extension() {
+        assert_eq!(detect_language("widget.hxx"), "cpp");
     }
 
     #[test]

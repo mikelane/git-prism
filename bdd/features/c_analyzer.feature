@@ -1,4 +1,4 @@
-@ISSUE-30 @not_implemented
+@ISSUE-30
 Feature: C and C++ language analysis
   git-prism extracts function and import information from C and C++
   source files using tree-sitter. This covers .c, .h, .cpp, and .hpp

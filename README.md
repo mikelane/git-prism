@@ -238,12 +238,14 @@ to extract functions, methods, and imports from source code.
 
 | Language | Extensions | Extracts |
 |----------|------------|----------|
+| C | `.c`, `.h` | functions, declarations, `#include` directives |
+| C++ | `.cpp`, `.hpp` | class/namespace-qualified methods, functions, `#include` directives |
 | Go | `.go` | functions, methods, imports |
 | Java | `.java` | methods, constructors, imports |
-| Python | `.py` | functions, methods, imports |
-| TypeScript | `.ts`, `.tsx` | functions, arrow functions, methods, imports |
 | JavaScript | `.js`, `.jsx` | functions, arrow functions, methods, imports |
+| Python | `.py` | functions, methods, imports |
 | Rust | `.rs` | functions, methods, use statements |
+| TypeScript | `.ts`, `.tsx` | functions, arrow functions, methods, imports |
 
 Files in unsupported languages still appear in the manifest with full
 line/size/change-type metadata -- `functions_changed` is `null` (not an empty

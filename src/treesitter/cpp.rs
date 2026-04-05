@@ -1,0 +1,333 @@
+use super::{Function, LanguageAnalyzer};
+use tree_sitter::Parser;
+
+pub struct CppAnalyzer;
+
+fn create_parser() -> Parser {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_cpp::LANGUAGE.into())
+        .expect("Error loading C++ grammar");
+    parser
+}
+
+fn signature_text(source: &[u8], node: &tree_sitter::Node) -> String {
+    let start = node.start_byte();
+    let body = node.child_by_field_name("body");
+    let end = body.map_or(node.end_byte(), |b| b.start_byte());
+    let raw = &source[start..end];
+    String::from_utf8_lossy(raw).trim().to_string()
+}
+
+fn is_preprocessor_container(kind: &str) -> bool {
+    matches!(
+        kind,
+        "preproc_ifdef" | "preproc_if" | "preproc_else" | "preproc_elif"
+    )
+}
+
+fn function_name_from_declarator(source: &[u8], declarator: &tree_sitter::Node) -> String {
+    declarator
+        .child_by_field_name("declarator")
+        .and_then(|n| n.utf8_text(source).ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn collect_functions(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    scope: &[String],
+    functions: &mut Vec<Function>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "namespace_definition" => {
+                let ns_name = child
+                    .children(&mut child.walk())
+                    .find(|c| c.kind() == "namespace_identifier")
+                    .and_then(|n| n.utf8_text(source).ok())
+                    .unwrap_or("")
+                    .to_string();
+                let mut new_scope = scope.to_vec();
+                if !ns_name.is_empty() {
+                    new_scope.push(ns_name);
+                }
+                if let Some(body) = child.child_by_field_name("body") {
+                    collect_functions(&body, source, &new_scope, functions);
+                }
+            }
+            "class_specifier" | "struct_specifier" => {
+                let class_name = child
+                    .children(&mut child.walk())
+                    .find(|c| c.kind() == "type_identifier")
+                    .and_then(|n| n.utf8_text(source).ok())
+                    .unwrap_or("")
+                    .to_string();
+                let mut new_scope = scope.to_vec();
+                if !class_name.is_empty() {
+                    new_scope.push(class_name);
+                }
+                if let Some(body) = child.child_by_field_name("body") {
+                    collect_functions(&body, source, &new_scope, functions);
+                }
+            }
+            "function_definition" => {
+                let raw_name = child
+                    .child_by_field_name("declarator")
+                    .map(|d| function_name_from_declarator(source, &d))
+                    .unwrap_or_default();
+                let qualified = if scope.is_empty() {
+                    raw_name
+                } else {
+                    format!("{}::{}", scope.join("::"), raw_name)
+                };
+                let sig = signature_text(source, &child);
+                functions.push(Function {
+                    name: qualified,
+                    signature: sig,
+                    start_line: child.start_position().row + 1,
+                    end_line: child.end_position().row + 1,
+                });
+            }
+            "declaration" => {
+                if let Some(declarator) = child.child_by_field_name("declarator")
+                    && declarator.kind() == "function_declarator"
+                {
+                    let raw_name = function_name_from_declarator(source, &declarator);
+                    let qualified = if scope.is_empty() {
+                        raw_name
+                    } else {
+                        format!("{}::{}", scope.join("::"), raw_name)
+                    };
+                    let sig = child.utf8_text(source).unwrap_or("").trim().to_string();
+                    functions.push(Function {
+                        name: qualified,
+                        signature: sig,
+                        start_line: child.start_position().row + 1,
+                        end_line: child.end_position().row + 1,
+                    });
+                }
+            }
+            kind if is_preprocessor_container(kind) => {
+                collect_functions(&child, source, scope, functions);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_imports(node: &tree_sitter::Node, source: &[u8], imports: &mut Vec<String>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "preproc_include" => {
+                let text = child.utf8_text(source).unwrap_or("").trim().to_string();
+                imports.push(text);
+            }
+            kind if is_preprocessor_container(kind) => {
+                collect_imports(&child, source, imports);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl LanguageAnalyzer for CppAnalyzer {
+    fn extract_functions(&self, source: &[u8]) -> anyhow::Result<Vec<Function>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse C++ source"))?;
+        let mut functions = Vec::new();
+        collect_functions(&tree.root_node(), source, &[], &mut functions);
+        Ok(functions)
+    }
+
+    fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse C++ source"))?;
+        let mut imports = Vec::new();
+        collect_imports(&tree.root_node(), source, &mut imports);
+        Ok(imports)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_class_method() {
+        let source = br#"class Calculator {
+public:
+    int add(int a, int b) {
+        return a + b;
+    }
+};
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "Calculator::add");
+        assert_eq!(functions[0].signature, "int add(int a, int b)");
+        assert_eq!(functions[0].start_line, 3);
+        assert_eq!(functions[0].end_line, 5);
+    }
+
+    #[test]
+    fn extracts_namespace_qualified_class_method() {
+        let source = br#"namespace math {
+
+class Calculator {
+public:
+    int add(int a, int b) {
+        return a + b;
+    }
+};
+
+}  // namespace math
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "math::Calculator::add");
+    }
+
+    #[test]
+    fn extracts_free_function() {
+        let source = br#"void free_func(int x) {
+    return;
+}
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "free_func");
+        assert_eq!(functions[0].signature, "void free_func(int x)");
+    }
+
+    #[test]
+    fn extracts_multiple_methods() {
+        let source = br#"class Calc {
+public:
+    int add(int a, int b) { return a + b; }
+    int sub(int a, int b) { return a - b; }
+};
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "Calc::add");
+        assert_eq!(functions[1].name, "Calc::sub");
+    }
+
+    #[test]
+    fn empty_file_returns_no_functions() {
+        let source = b"";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert!(functions.is_empty());
+    }
+
+    #[test]
+    fn extracts_include_directives() {
+        let source = br#"#include <iostream>
+#include <string>
+#include "myheader.h"
+"#;
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 3);
+        assert_eq!(imports[0], "#include <iostream>");
+        assert_eq!(imports[1], "#include <string>");
+        assert_eq!(imports[2], "#include \"myheader.h\"");
+    }
+
+    #[test]
+    fn extracts_function_inside_ifdef() {
+        let source = br#"#ifdef SOME_DEFINE
+void guarded_func(int x) {
+    return;
+}
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "guarded_func");
+    }
+
+    #[test]
+    fn extracts_class_method_inside_preproc_if() {
+        let source = br#"#if defined(PLATFORM_LINUX)
+class LinuxImpl {
+public:
+    void init() {
+        // linux init
+    }
+};
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "LinuxImpl::init");
+    }
+
+    #[test]
+    fn extracts_functions_from_nested_preproc_blocks() {
+        let source = br#"#ifdef FEATURE_A
+#ifdef FEATURE_B
+void nested_func() {
+    return;
+}
+#endif
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "nested_func");
+    }
+
+    #[test]
+    fn extracts_include_inside_ifdef() {
+        let source = br#"#include <iostream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0], "#include <iostream>");
+        assert_eq!(imports[1], "#include <windows.h>");
+    }
+
+    #[test]
+    fn extracts_include_inside_nested_preproc() {
+        let source = br#"#ifdef PLATFORM
+#ifdef USE_BOOST
+#include <boost/shared_ptr.hpp>
+#endif
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0], "#include <boost/shared_ptr.hpp>");
+    }
+
+    #[test]
+    fn no_imports_returns_empty() {
+        let source = br#"void hello() {}
+"#;
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert!(imports.is_empty());
+    }
+}
