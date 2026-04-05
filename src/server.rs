@@ -128,6 +128,7 @@ impl GitPrismServer {
 impl ServerHandler for GitPrismServer {}
 
 pub async fn run_server() -> anyhow::Result<()> {
+    let _telemetry = crate::telemetry::init();
     let server = GitPrismServer::new();
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;

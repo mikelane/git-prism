@@ -1,0 +1,245 @@
+use std::time::Duration;
+
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider};
+use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
+
+const DEFAULT_SERVICE_NAME: &str = "git-prism";
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Environment variable names for telemetry configuration.
+const ENV_OTLP_ENDPOINT: &str = "GIT_PRISM_OTLP_ENDPOINT";
+const ENV_OTLP_HEADERS: &str = "GIT_PRISM_OTLP_HEADERS";
+const ENV_SERVICE_NAME: &str = "GIT_PRISM_SERVICE_NAME";
+const ENV_SERVICE_VERSION: &str = "GIT_PRISM_SERVICE_VERSION";
+
+/// Guard that owns the telemetry providers. When dropped, it flushes
+/// pending spans and metrics with a bounded timeout.
+pub struct TelemetryGuard {
+    tracer_provider: Option<SdkTracerProvider>,
+    meter_provider: Option<SdkMeterProvider>,
+}
+
+impl TelemetryGuard {
+    /// Returns `true` if telemetry is active (providers are initialized).
+    #[cfg(test)]
+    fn is_active(&self) -> bool {
+        self.tracer_provider.is_some()
+    }
+}
+
+impl Drop for TelemetryGuard {
+    fn drop(&mut self) {
+        if let Some(tp) = self.tracer_provider.take() {
+            let _ = tp.shutdown();
+        }
+        if let Some(mp) = self.meter_provider.take() {
+            let _ = mp.shutdown();
+        }
+    }
+}
+
+/// Read telemetry configuration from environment variables and initialize
+/// OpenTelemetry providers if an OTLP endpoint is configured.
+///
+/// When `GIT_PRISM_OTLP_ENDPOINT` is not set, this returns a no-op guard
+/// with zero overhead.
+pub fn init() -> TelemetryGuard {
+    let endpoint = match std::env::var(ENV_OTLP_ENDPOINT) {
+        Ok(ep) if !ep.is_empty() => ep,
+        _ => {
+            // No endpoint configured — return no-op guard, zero cost.
+            return TelemetryGuard {
+                tracer_provider: None,
+                meter_provider: None,
+            };
+        }
+    };
+
+    let service_name =
+        std::env::var(ENV_SERVICE_NAME).unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string());
+    let service_version = std::env::var(ENV_SERVICE_VERSION)
+        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+    let _headers = std::env::var(ENV_OTLP_HEADERS).ok();
+
+    // Build the OTLP trace exporter.
+    let trace_exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .with_timeout(FLUSH_TIMEOUT)
+        .build()
+    {
+        Ok(exp) => exp,
+        Err(_) => {
+            return TelemetryGuard {
+                tracer_provider: None,
+                meter_provider: None,
+            };
+        }
+    };
+
+    // Build the OTLP metrics exporter.
+    let metrics_exporter = match opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .with_timeout(FLUSH_TIMEOUT)
+        .build()
+    {
+        Ok(exp) => exp,
+        Err(_) => {
+            return TelemetryGuard {
+                tracer_provider: None,
+                meter_provider: None,
+            };
+        }
+    };
+
+    let resource = opentelemetry_sdk::Resource::builder()
+        .with_service_name(service_name)
+        .with_attribute(opentelemetry::KeyValue::new(
+            "service.version",
+            service_version,
+        ))
+        .build();
+
+    // Tracer provider
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(trace_exporter)
+        .with_resource(resource.clone())
+        .build();
+
+    let tracer = tracer_provider.tracer("git-prism");
+
+    // Meter provider
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metrics_exporter).build();
+
+    let meter_provider = SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(resource)
+        .build();
+
+    // Install global meter provider
+    opentelemetry::global::set_meter_provider(meter_provider.clone());
+
+    // Set up the tracing-opentelemetry layer
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // Initialize the tracing subscriber with the OTel layer
+    let _ = Registry::default().with(otel_layer).try_init();
+
+    TelemetryGuard {
+        tracer_provider: Some(tracer_provider),
+        meter_provider: Some(meter_provider),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to remove telemetry env vars for test isolation.
+    // SAFETY: Tests run with --test-threads=1 or we accept the inherent
+    // unsafety of env mutation in tests. These env vars are only used by
+    // this module's tests.
+    unsafe fn clear_telemetry_env() {
+        std::env::remove_var(ENV_OTLP_ENDPOINT);
+        std::env::remove_var(ENV_OTLP_HEADERS);
+        std::env::remove_var(ENV_SERVICE_NAME);
+        std::env::remove_var(ENV_SERVICE_VERSION);
+    }
+
+    #[test]
+    fn test_init_without_env_returns_noop() {
+        // SAFETY: env vars are only used by this module's telemetry tests.
+        unsafe {
+            clear_telemetry_env();
+        }
+        let guard = init();
+        assert!(
+            !guard.is_active(),
+            "guard should be no-op when no endpoint is set"
+        );
+    }
+
+    #[test]
+    fn test_init_with_empty_endpoint_returns_noop() {
+        // SAFETY: env vars are only used by this module's telemetry tests.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "");
+        }
+        let guard = init();
+        assert!(
+            !guard.is_active(),
+            "guard should be no-op when endpoint is empty"
+        );
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_init_with_endpoint_creates_providers() {
+        // SAFETY: env vars are only used by this module's telemetry tests.
+        unsafe {
+            clear_telemetry_env();
+            // Use a dummy endpoint — the exporter won't connect but providers
+            // should still be created.
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
+        }
+        let guard = init();
+        assert!(
+            guard.is_active(),
+            "guard should be active when endpoint is set"
+        );
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn test_guard_drop_does_not_panic() {
+        // No-op guard
+        let noop_guard = TelemetryGuard {
+            tracer_provider: None,
+            meter_provider: None,
+        };
+        drop(noop_guard);
+
+        // Active guard (with real providers)
+        // SAFETY: env vars are only used by this module's telemetry tests.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
+        }
+        let active_guard = init();
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        drop(active_guard);
+        // If we reach here without panicking, the test passes.
+    }
+
+    #[tokio::test]
+    async fn test_custom_service_name() {
+        // SAFETY: env vars are only used by this module's telemetry tests.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
+            std::env::set_var(ENV_SERVICE_NAME, "custom-prism");
+        }
+        let guard = init();
+        assert!(guard.is_active());
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+            std::env::remove_var(ENV_SERVICE_NAME);
+        }
+        drop(guard);
+    }
+}
