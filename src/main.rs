@@ -1,4 +1,5 @@
 mod git;
+pub mod privacy;
 mod server;
 mod telemetry;
 mod tools;

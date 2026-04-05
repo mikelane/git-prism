@@ -1,0 +1,197 @@
+use std::path::Path;
+
+use schemars::JsonSchema;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+/// SHA-256 hash of the canonicalized absolute path, hex-encoded.
+/// Deterministic: same path always produces the same hash.
+pub fn hash_repo_path(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Bounded enum representing the pattern of a git ref string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RefPattern {
+    Worktree,
+    SingleCommit,
+    RangeDoubleDot,
+    RangeTripleDot,
+    Branch,
+    Sha,
+}
+
+impl RefPattern {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RefPattern::Worktree => "worktree",
+            RefPattern::SingleCommit => "single_commit",
+            RefPattern::RangeDoubleDot => "range_double_dot",
+            RefPattern::RangeTripleDot => "range_triple_dot",
+            RefPattern::Branch => "branch",
+            RefPattern::Sha => "sha",
+        }
+    }
+}
+
+/// Classify a raw ref string into a bounded `RefPattern`.
+///
+/// Note: `RefPattern::Worktree` is never returned by this function — the caller
+/// sets it based on context (e.g., when there is no head_ref).
+pub fn normalize_ref_pattern(ref_str: &str) -> RefPattern {
+    if ref_str.contains("...") {
+        return RefPattern::RangeTripleDot;
+    }
+    if ref_str.contains("..") {
+        return RefPattern::RangeDoubleDot;
+    }
+    if is_hex_sha(ref_str) {
+        return RefPattern::Sha;
+    }
+    if ref_str.contains('~') || ref_str.contains('^') {
+        return RefPattern::SingleCommit;
+    }
+    if ref_str == "HEAD" {
+        return RefPattern::SingleCommit;
+    }
+    RefPattern::Branch
+}
+
+/// Check if a string looks like a hex SHA (40 chars or 7+ chars, all hex).
+fn is_hex_sha(s: &str) -> bool {
+    let len = s.len();
+    (len == 40 || len >= 7) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Maps error description strings to a bounded label set for metrics.
+pub fn classify_error_kind(err: &str) -> &'static str {
+    let lower = err.to_lowercase();
+    if lower.contains("resolve") || lower.contains("ref") {
+        "ref_not_found"
+    } else if lower.contains("repo") || lower.contains("repository") {
+        "repo_not_found"
+    } else if lower.contains("diff") {
+        "diff_failed"
+    } else if lower.contains("parse") || lower.contains("tree-sitter") {
+        "parse_failed"
+    } else if lower.contains("i/o") || lower.contains("io error") || lower.contains("permission") {
+        "io_error"
+    } else {
+        "unknown"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_repo_path_deterministic() {
+        let path = Path::new("/tmp/some-repo");
+        let hash1 = hash_repo_path(path);
+        let hash2 = hash_repo_path(path);
+        assert_eq!(hash1, hash2);
+        // SHA-256 hex is 64 chars
+        assert_eq!(hash1.len(), 64);
+    }
+
+    #[test]
+    fn test_hash_repo_path_different_paths_differ() {
+        let hash1 = hash_repo_path(Path::new("/tmp/repo-a"));
+        let hash2 = hash_repo_path(Path::new("/tmp/repo-b"));
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_normalize_double_dot_range() {
+        assert_eq!(
+            normalize_ref_pattern("main..HEAD"),
+            RefPattern::RangeDoubleDot
+        );
+    }
+
+    #[test]
+    fn test_normalize_triple_dot_range() {
+        assert_eq!(
+            normalize_ref_pattern("main...HEAD"),
+            RefPattern::RangeTripleDot
+        );
+    }
+
+    #[test]
+    fn test_normalize_sha() {
+        let sha40 = "a".repeat(40);
+        assert_eq!(normalize_ref_pattern(&sha40), RefPattern::Sha);
+    }
+
+    #[test]
+    fn test_normalize_short_sha() {
+        assert_eq!(normalize_ref_pattern("abc1234"), RefPattern::Sha);
+        assert_eq!(normalize_ref_pattern("deadbeef"), RefPattern::Sha);
+    }
+
+    #[test]
+    fn test_normalize_head() {
+        assert_eq!(normalize_ref_pattern("HEAD"), RefPattern::SingleCommit);
+    }
+
+    #[test]
+    fn test_normalize_head_tilde() {
+        assert_eq!(normalize_ref_pattern("HEAD~3"), RefPattern::SingleCommit);
+    }
+
+    #[test]
+    fn test_normalize_head_caret() {
+        assert_eq!(normalize_ref_pattern("HEAD^2"), RefPattern::SingleCommit);
+    }
+
+    #[test]
+    fn test_normalize_branch() {
+        assert_eq!(normalize_ref_pattern("main"), RefPattern::Branch);
+        assert_eq!(normalize_ref_pattern("feature/foo"), RefPattern::Branch);
+    }
+
+    #[test]
+    fn test_classify_error_ref_not_found() {
+        assert_eq!(
+            classify_error_kind("could not resolve ref"),
+            "ref_not_found"
+        );
+        assert_eq!(classify_error_kind("ref not found"), "ref_not_found");
+    }
+
+    #[test]
+    fn test_classify_error_unknown() {
+        assert_eq!(classify_error_kind("something went wrong"), "unknown");
+        assert_eq!(classify_error_kind("totally random"), "unknown");
+    }
+
+    #[test]
+    fn test_ref_pattern_serializes_to_expected_strings() {
+        let all_variants = [
+            RefPattern::Worktree,
+            RefPattern::SingleCommit,
+            RefPattern::RangeDoubleDot,
+            RefPattern::RangeTripleDot,
+            RefPattern::Branch,
+            RefPattern::Sha,
+        ];
+        let expected = [
+            "worktree",
+            "single_commit",
+            "range_double_dot",
+            "range_triple_dot",
+            "branch",
+            "sha",
+        ];
+        for (variant, exp) in all_variants.iter().zip(expected.iter()) {
+            let json = serde_json::to_string(variant).unwrap();
+            assert_eq!(json, format!("\"{}\"", exp));
+            assert_eq!(variant.as_str(), *exp);
+        }
+    }
+}
