@@ -239,6 +239,7 @@ to extract functions, methods, and imports from source code.
 | Language | Extensions | Extracts |
 |----------|------------|----------|
 | Go | `.go` | functions, methods, imports |
+| Java | `.java` | methods, constructors, imports |
 | Python | `.py` | functions, methods, imports |
 | TypeScript | `.ts`, `.tsx` | functions, arrow functions, methods, imports |
 | JavaScript | `.js`, `.jsx` | functions, arrow functions, methods, imports |
