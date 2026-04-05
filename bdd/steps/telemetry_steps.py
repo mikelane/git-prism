@@ -1,0 +1,597 @@
+"""Step definitions for the OpenTelemetry (metrics + traces) feature.
+
+The production telemetry module does not exist yet — these scenarios are
+tagged @not_implemented and must FAIL with assertion errors until the
+`src/telemetry.rs` module and instrumentation sites land.
+
+This file also defines a minimal in-memory OTLP gRPC collector. It
+implements the two OTLP service servicers (`TraceServiceServicer` and
+`MetricsServiceServicer`) from `opentelemetry-proto` and records every
+export request it receives. Steps assert against that recorded state.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import subprocess
+import time
+from concurrent import futures
+from threading import Lock
+from typing import Any
+
+import grpc
+from behave import given, then, when
+from behave.runner import Context
+from opentelemetry.proto.collector.metrics.v1 import (
+    metrics_service_pb2,
+    metrics_service_pb2_grpc,
+)
+from opentelemetry.proto.collector.trace.v1 import (
+    trace_service_pb2,
+    trace_service_pb2_grpc,
+)
+
+VALID_REF_PATTERNS = {
+    "worktree",
+    "single_commit",
+    "range_double_dot",
+    "range_triple_dot",
+    "branch",
+    "sha",
+}
+
+
+class MockOtlpCollector:
+    """In-memory OTLP gRPC collector for assertion use in BDD tests.
+
+    Implements the two OTLP service servicers that a real OTLP backend
+    exposes, storing every received export request in memory so step
+    definitions can assert on the state the server emitted.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._trace_requests: list[Any] = []
+        self._metric_requests: list[Any] = []
+        self.server: grpc.Server | None = None
+        self.port: int | None = None
+
+    def start(self) -> None:
+        """Bind a grpc.Server to a free port and register both servicers."""
+        self.port = _pick_free_port()
+        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        trace_service_pb2_grpc.add_TraceServiceServicer_to_server(
+            _TraceServicer(self), self.server,
+        )
+        metrics_service_pb2_grpc.add_MetricsServiceServicer_to_server(
+            _MetricsServicer(self), self.server,
+        )
+        self.server.add_insecure_port(f"localhost:{self.port}")
+        self.server.start()
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server.stop(grace=1).wait()
+            self.server = None
+
+    def record_trace(self, request: Any) -> None:
+        with self._lock:
+            self._trace_requests.append(request)
+
+    def record_metrics(self, request: Any) -> None:
+        with self._lock:
+            self._metric_requests.append(request)
+
+    def get_trace_requests(self) -> list[Any]:
+        with self._lock:
+            return list(self._trace_requests)
+
+    def get_metric_requests(self) -> list[Any]:
+        with self._lock:
+            return list(self._metric_requests)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._trace_requests.clear()
+            self._metric_requests.clear()
+
+    def all_spans(self) -> list[Any]:
+        """Flatten every received ResourceSpans -> ScopeSpans -> Span."""
+        out: list[Any] = []
+        for req in self.get_trace_requests():
+            for resource_spans in req.resource_spans:
+                for scope_spans in resource_spans.scope_spans:
+                    out.extend(scope_spans.spans)
+        return out
+
+    def all_metrics(self) -> list[Any]:
+        """Flatten every received ResourceMetrics -> ScopeMetrics -> Metric."""
+        out: list[Any] = []
+        for req in self.get_metric_requests():
+            for resource_metrics in req.resource_metrics:
+                for scope_metrics in resource_metrics.scope_metrics:
+                    out.extend(scope_metrics.metrics)
+        return out
+
+
+class _TraceServicer(trace_service_pb2_grpc.TraceServiceServicer):
+    def __init__(self, collector: MockOtlpCollector) -> None:
+        self._collector = collector
+
+    def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
+        self._collector.record_trace(request)
+        return trace_service_pb2.ExportTraceServiceResponse()
+
+
+class _MetricsServicer(metrics_service_pb2_grpc.MetricsServiceServicer):
+    def __init__(self, collector: MockOtlpCollector) -> None:
+        self._collector = collector
+
+    def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
+        self._collector.record_metrics(request)
+        return metrics_service_pb2.ExportMetricsServiceResponse()
+
+
+def _pick_free_port() -> int:
+    """Bind to port 0 to discover a free port, then close the socket."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("localhost", 0))
+        return sock.getsockname()[1]
+
+
+# ---------- helpers used by the steps ----------
+
+
+def _get_collector(context: Context) -> MockOtlpCollector:
+    collector = getattr(context, "otlp_collector", None)
+    if collector is None:
+        msg = (
+            "Mock OTLP collector was not started. "
+            "The Background step 'a mock OTLP collector is running' must run first."
+        )
+        raise AssertionError(msg)
+    return collector
+
+
+def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
+    """Send a minimal JSON-RPC 'initialize' message over stdin."""
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "bdd-telemetry-tests", "version": "0.0.0"},
+        },
+    }
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.flush()
+
+
+def _send_tool_call(
+    proc: subprocess.Popen[str],
+    tool_name: str,
+    arguments: dict[str, Any],
+    call_id: int = 2,
+) -> None:
+    """Send a JSON-RPC tools/call request over stdin."""
+    request = {
+        "jsonrpc": "2.0",
+        "id": call_id,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.flush()
+
+
+def _spawn_server(
+    context: Context,
+    *,
+    endpoint: str | None,
+    cwd: str | None = None,
+) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    env.pop("GIT_PRISM_OTLP_ENDPOINT", None)
+    env.pop("GIT_PRISM_OTLP_HEADERS", None)
+    env.pop("GIT_PRISM_SERVICE_NAME", None)
+    env.pop("GIT_PRISM_SERVICE_VERSION", None)
+    if endpoint is not None:
+        env["GIT_PRISM_OTLP_ENDPOINT"] = endpoint
+    proc = subprocess.Popen(  # noqa: S603 -- test harness, inputs are fixed strings
+        [context.binary_path, "serve"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=cwd,
+    )
+    context.server_procs = getattr(context, "server_procs", [])
+    context.server_procs.append(proc)
+    return proc
+
+
+def _span_has_attribute(span: Any, key: str, value: str) -> bool:
+    for attr in span.attributes:
+        if attr.key == key:
+            return attr.value.string_value == value
+    return False
+
+
+def _attribute_values(span: Any, key: str) -> list[str]:
+    return [
+        attr.value.string_value
+        for attr in span.attributes
+        if attr.key == key
+    ]
+
+
+def _all_attribute_strings(collector: MockOtlpCollector) -> list[str]:
+    """Return every string-valued attribute across all spans and metrics."""
+    strings: list[str] = []
+    for span in collector.all_spans():
+        for attr in span.attributes:
+            if attr.value.string_value:
+                strings.append(attr.value.string_value)
+    for req in collector.get_trace_requests():
+        for resource_spans in req.resource_spans:
+            for attr in resource_spans.resource.attributes:
+                if attr.value.string_value:
+                    strings.append(attr.value.string_value)
+    for req in collector.get_metric_requests():
+        for resource_metrics in req.resource_metrics:
+            for attr in resource_metrics.resource.attributes:
+                if attr.value.string_value:
+                    strings.append(attr.value.string_value)
+            for scope_metrics in resource_metrics.scope_metrics:
+                for metric in scope_metrics.metrics:
+                    for dp in _metric_data_points(metric):
+                        for attr in dp.attributes:
+                            if attr.value.string_value:
+                                strings.append(attr.value.string_value)
+    return strings
+
+
+def _metric_data_points(metric: Any) -> list[Any]:
+    which = metric.WhichOneof("data")
+    if which is None:
+        return []
+    data = getattr(metric, which)
+    return list(getattr(data, "data_points", []))
+
+
+def _collect_repo_shas(repo_path: str) -> list[str]:
+    result = subprocess.run(  # noqa: S603,S607 -- test harness
+        ["git", "rev-list", "--all"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+# ---------- Background and env setup ----------
+
+
+@given("a mock OTLP collector is running")
+def step_mock_collector_running(context: Context) -> None:
+    collector = MockOtlpCollector()
+    collector.start()
+    context.otlp_collector = collector
+
+
+@given("no telemetry environment variables are set")
+def step_no_telemetry_env(context: Context) -> None:
+    context.telemetry_endpoint = None
+
+
+@given("GIT_PRISM_OTLP_ENDPOINT points at the mock collector")
+def step_endpoint_set(context: Context) -> None:
+    collector = _get_collector(context)
+    context.telemetry_endpoint = f"http://localhost:{collector.port}"
+
+
+# The "a git repository with two commits" step lives in cli_steps.py and
+# is reused here — it creates exactly the Rust fixture these scenarios need.
+
+
+# ---------- Server lifecycle steps ----------
+
+
+@when('I start "git-prism serve" and send an MCP initialize request')
+def step_start_server_init_only(context: Context) -> None:
+    endpoint = getattr(context, "telemetry_endpoint", None)
+    proc = _spawn_server(context, endpoint=endpoint)
+    _send_mcp_initialize(proc)
+
+
+@when(
+    'I start "git-prism serve" against that repo and call "{tool_name}"',
+)
+def step_start_server_and_call_tool(context: Context, tool_name: str) -> None:
+    endpoint = getattr(context, "telemetry_endpoint", None)
+    repo_path = context.repo_path
+    proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
+    _send_mcp_initialize(proc)
+    _send_tool_call(
+        proc,
+        tool_name,
+        {"base_ref": "HEAD~1", "head_ref": "HEAD", "repo_path": repo_path},
+    )
+
+
+@when(
+    'I start "git-prism serve" against that repo and call "{tool_name}" '
+    "with an invalid ref",
+)
+def step_start_server_and_call_tool_invalid_ref(
+    context: Context, tool_name: str,
+) -> None:
+    endpoint = getattr(context, "telemetry_endpoint", None)
+    repo_path = context.repo_path
+    proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
+    _send_mcp_initialize(proc)
+    _send_tool_call(
+        proc,
+        tool_name,
+        {
+            "base_ref": "does-not-exist-ref-xyzzy",
+            "head_ref": "HEAD",
+            "repo_path": repo_path,
+        },
+    )
+
+
+@when("I wait {seconds:d} seconds for any exports")
+def step_wait(context: Context, seconds: int) -> None:
+    time.sleep(seconds)
+
+
+# ---------- Assertions: metrics ----------
+
+
+@then("the mock collector received zero trace exports")
+def step_zero_traces(context: Context) -> None:
+    collector = _get_collector(context)
+    requests = collector.get_trace_requests()
+    assert len(requests) == 0, (
+        f"Expected zero trace exports, got {len(requests)} "
+        f"(spans: {len(collector.all_spans())}). "
+        f"Telemetry should be off by default."
+    )
+
+
+@then("the mock collector received zero metric exports")
+def step_zero_metrics(context: Context) -> None:
+    collector = _get_collector(context)
+    requests = collector.get_metric_requests()
+    assert len(requests) == 0, (
+        f"Expected zero metric exports, got {len(requests)} "
+        f"(metrics: {len(collector.all_metrics())}). "
+        f"Telemetry should be off by default."
+    )
+
+
+@then('the mock collector received a metric named "{metric_name}"')
+def step_metric_received(context: Context, metric_name: str) -> None:
+    collector = _get_collector(context)
+    metrics = collector.all_metrics()
+    names = [m.name for m in metrics]
+    assert metric_name in names, (
+        f"Expected metric '{metric_name}' in collector. "
+        f"Received metrics: {names!r}"
+    )
+
+
+@then('the "{metric_name}" counter value is at least {minimum:d}')
+def step_counter_at_least(
+    context: Context, metric_name: str, minimum: int,
+) -> None:
+    collector = _get_collector(context)
+    total = 0
+    for metric in collector.all_metrics():
+        if metric.name != metric_name:
+            continue
+        for dp in _metric_data_points(metric):
+            total += int(getattr(dp, "as_int", 0) or 0)
+    assert total >= minimum, (
+        f"Expected '{metric_name}' counter >= {minimum}, got {total}."
+    )
+
+
+@then(
+    'that metric has a data point with label "{key}" equal to "{value}"',
+)
+def step_metric_has_label(context: Context, key: str, value: str) -> None:
+    collector = _get_collector(context)
+    for metric in collector.all_metrics():
+        for dp in _metric_data_points(metric):
+            for attr in dp.attributes:
+                if attr.key == key and attr.value.string_value == value:
+                    return
+    all_labels = [
+        (metric.name, attr.key, attr.value.string_value)
+        for metric in collector.all_metrics()
+        for dp in _metric_data_points(metric)
+        for attr in dp.attributes
+    ]
+    msg = (
+        f"No metric data point found with label {key}={value!r}. "
+        f"All (metric, key, value) labels: {all_labels!r}"
+    )
+    raise AssertionError(msg)
+
+
+# ---------- Assertions: spans ----------
+
+
+@then('the mock collector received a span named "{span_name}"')
+def step_span_received(context: Context, span_name: str) -> None:
+    collector = _get_collector(context)
+    spans = collector.all_spans()
+    names = [s.name for s in spans]
+    assert span_name in names, (
+        f"Expected span '{span_name}' in collector. "
+        f"Received spans: {names!r}"
+    )
+
+
+@then('that span has a child span named "{child_name}"')
+def step_span_has_child(context: Context, child_name: str) -> None:
+    collector = _get_collector(context)
+    spans = collector.all_spans()
+    # The most recently referenced parent in our scenarios is the root
+    # mcp.tool.* span; but we accept any span of that name as the parent.
+    # Find candidate parents and confirm at least one child with name=child_name.
+    parent_span_ids = {
+        s.span_id for s in spans if s.name.startswith("mcp.tool.")
+    }
+    for span in spans:
+        if span.name == child_name and span.parent_span_id in parent_span_ids:
+            return
+    names = [(s.name, s.span_id.hex(), s.parent_span_id.hex()) for s in spans]
+    msg = (
+        f"No child span named '{child_name}' found under an mcp.tool.* parent. "
+        f"All (name, span_id, parent_span_id): {names!r}"
+    )
+    raise AssertionError(msg)
+
+
+@then('that span has status "{status}"')
+def step_span_has_status(context: Context, status: str) -> None:
+    collector = _get_collector(context)
+    # Status code mapping in OTLP: 0=UNSET, 1=OK, 2=ERROR.
+    want = {"unset": 0, "ok": 1, "error": 2}[status.lower()]
+    for span in collector.all_spans():
+        if span.name.startswith("mcp.tool.") and span.status.code == want:
+            return
+    statuses = [(s.name, s.status.code) for s in collector.all_spans()]
+    msg = (
+        f"No mcp.tool.* span found with status {status!r} (code {want}). "
+        f"All (name, status_code): {statuses!r}"
+    )
+    raise AssertionError(msg)
+
+
+@then('that span has an attribute "{key}" equal to "{value}"')
+def step_span_has_attribute(context: Context, key: str, value: str) -> None:
+    collector = _get_collector(context)
+    for span in collector.all_spans():
+        if _span_has_attribute(span, key, value):
+            return
+    found = [
+        (span.name, attr.key, attr.value.string_value)
+        for span in collector.all_spans()
+        for attr in span.attributes
+    ]
+    msg = (
+        f"No span found with attribute {key}={value!r}. "
+        f"All (span, key, value): {found!r}"
+    )
+    raise AssertionError(msg)
+
+
+# ---------- Assertions: privacy ----------
+
+
+def _require_some_exports(collector: MockOtlpCollector) -> None:
+    # A passing privacy assertion requires something to scan. If the
+    # collector received nothing, the scenario is vacuously passing and
+    # tells us nothing about real privacy. Fail loudly in that case so
+    # BDD bootstrap rightly fails until instrumentation lands.
+    assert collector.all_spans() or collector.all_metrics(), (
+        "Privacy check attempted but no exports were received. "
+        "Telemetry instrumentation must emit at least one span or metric "
+        "for this scenario to be meaningful."
+    )
+
+
+@then("no exported attribute contains the raw repo path")
+def step_no_raw_repo_path(context: Context) -> None:
+    collector = _get_collector(context)
+    _require_some_exports(collector)
+    repo_path = context.repo_path
+    strings = _all_attribute_strings(collector)
+    matches = [s for s in strings if repo_path in s]
+    assert not matches, (
+        f"Found raw repo path {repo_path!r} in exported attributes: "
+        f"{matches!r}"
+    )
+
+
+@then("no exported attribute contains any commit SHA from the repo")
+def step_no_raw_shas(context: Context) -> None:
+    collector = _get_collector(context)
+    _require_some_exports(collector)
+    shas = _collect_repo_shas(context.repo_path)
+    strings = _all_attribute_strings(collector)
+    leaks = [
+        (sha, s)
+        for sha in shas
+        for s in strings
+        if sha in s or sha[:12] in s
+    ]
+    assert not leaks, (
+        f"Found commit SHA(s) leaked in exported attributes: {leaks!r}"
+    )
+
+
+@then(
+    'every "{key}" span attribute value is in '
+    '{{"worktree", "single_commit", "range_double_dot", '
+    '"range_triple_dot", "branch", "sha"}}',
+)
+def step_ref_pattern_bounded(context: Context, key: str) -> None:
+    collector = _get_collector(context)
+    values: list[str] = []
+    for span in collector.all_spans():
+        values.extend(_attribute_values(span, key))
+    assert values, (
+        f"No span attribute named {key!r} was exported. "
+        f"Expected at least one bounded ref-pattern value."
+    )
+    bad = [v for v in values if v not in VALID_REF_PATTERNS]
+    assert not bad, (
+        f"Ref-pattern attribute {key!r} has out-of-enum values: {bad!r}. "
+        f"Valid values: {sorted(VALID_REF_PATTERNS)!r}"
+    )
+
+
+# ---------- Lifecycle hooks for telemetry scenarios ----------
+
+
+def _stop_server_procs(context: Context) -> None:
+    for proc in getattr(context, "server_procs", []):
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+    context.server_procs = []
+
+
+def _stop_collector(context: Context) -> None:
+    collector = getattr(context, "otlp_collector", None)
+    if collector is not None:
+        collector.stop()
+        context.otlp_collector = None
+
+
+# Ensure cleanup even if a step raises. behave calls step-defined
+# `after_scenario` hooks via environment.py, so we expose helpers the
+# environment hook can call by name.
+def telemetry_after_scenario(context: Context) -> None:
+    _stop_server_procs(context)
+    _stop_collector(context)
+
+
+__all__ = ["MockOtlpCollector", "telemetry_after_scenario"]

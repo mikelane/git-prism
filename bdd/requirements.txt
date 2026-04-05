@@ -1,1 +1,5 @@
 behave>=1.2.6
+grpcio>=1.80.0
+grpcio-tools>=1.80.0
+opentelemetry-proto>=1.29.0
+protobuf>=5.29.2
