@@ -19,6 +19,13 @@ fn signature_text(source: &[u8], node: &tree_sitter::Node) -> String {
     String::from_utf8_lossy(raw).trim().to_string()
 }
 
+fn is_preprocessor_container(kind: &str) -> bool {
+    matches!(
+        kind,
+        "preproc_ifdef" | "preproc_if" | "preproc_else" | "preproc_elif"
+    )
+}
+
 fn function_name_from_declarator(source: &[u8], declarator: &tree_sitter::Node) -> String {
     declarator
         .child_by_field_name("declarator")
@@ -103,6 +110,9 @@ fn collect_functions(
                     });
                 }
             }
+            kind if is_preprocessor_container(kind) => {
+                collect_functions(&child, source, scope, functions);
+            }
             _ => {}
         }
     }
@@ -111,9 +121,15 @@ fn collect_functions(
 fn collect_imports(node: &tree_sitter::Node, source: &[u8], imports: &mut Vec<String>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "preproc_include" {
-            let text = child.utf8_text(source).unwrap_or("").trim().to_string();
-            imports.push(text);
+        match child.kind() {
+            "preproc_include" => {
+                let text = child.utf8_text(source).unwrap_or("").trim().to_string();
+                imports.push(text);
+            }
+            kind if is_preprocessor_container(kind) => {
+                collect_imports(&child, source, imports);
+            }
+            _ => {}
         }
     }
 }
@@ -229,6 +245,81 @@ public:
         assert_eq!(imports[0], "#include <iostream>");
         assert_eq!(imports[1], "#include <string>");
         assert_eq!(imports[2], "#include \"myheader.h\"");
+    }
+
+    #[test]
+    fn extracts_function_inside_ifdef() {
+        let source = br#"#ifdef SOME_DEFINE
+void guarded_func(int x) {
+    return;
+}
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "guarded_func");
+    }
+
+    #[test]
+    fn extracts_class_method_inside_preproc_if() {
+        let source = br#"#if defined(PLATFORM_LINUX)
+class LinuxImpl {
+public:
+    void init() {
+        // linux init
+    }
+};
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "LinuxImpl::init");
+    }
+
+    #[test]
+    fn extracts_functions_from_nested_preproc_blocks() {
+        let source = br#"#ifdef FEATURE_A
+#ifdef FEATURE_B
+void nested_func() {
+    return;
+}
+#endif
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "nested_func");
+    }
+
+    #[test]
+    fn extracts_include_inside_ifdef() {
+        let source = br#"#include <iostream>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0], "#include <iostream>");
+        assert_eq!(imports[1], "#include <windows.h>");
+    }
+
+    #[test]
+    fn extracts_include_inside_nested_preproc() {
+        let source = br#"#ifdef PLATFORM
+#ifdef USE_BOOST
+#include <boost/shared_ptr.hpp>
+#endif
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0], "#include <boost/shared_ptr.hpp>");
     }
 
     #[test]

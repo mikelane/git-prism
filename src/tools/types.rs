@@ -247,7 +247,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn it_detects_java_from_java_extension() {
         assert_eq!(detect_language("Main.java"), "java");
     }
