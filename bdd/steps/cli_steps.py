@@ -1,6 +1,7 @@
 """Step definitions for CLI invocation and output assertions."""
 
 import os
+import re
 import subprocess
 import tempfile
 
@@ -158,3 +159,19 @@ def _command_accepts_repo(parts: list[str]) -> bool:
         return False
     subcommands_with_repo = {"manifest", "snapshot", "history"}
     return len(parts) > 1 and parts[1] in subcommands_with_repo
+
+
+@then('the languages list includes "{language}"')
+def step_languages_list_includes(context, language):
+    """Match a language name at the start of a line in the languages output.
+
+    The languages command outputs lines like:
+      go         (.go)
+      python     (.py)
+    We match the language name as a whole word at the start (after whitespace).
+    """
+    output = context.result.stdout
+    pattern = rf"^\s+{re.escape(language)}\s"
+    assert re.search(pattern, output, re.MULTILINE), (
+        f"Language '{language}' not found in languages output:\n{output}"
+    )
