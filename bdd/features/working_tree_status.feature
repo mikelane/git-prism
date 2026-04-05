@@ -1,4 +1,4 @@
-@ISSUE-28 @not_implemented
+@ISSUE-28
 Feature: Working tree status manifest
   git-prism can produce a change manifest comparing HEAD against the
   current working tree. This lets agents see staged and unstaged changes
