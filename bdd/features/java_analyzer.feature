@@ -1,4 +1,4 @@
-@ISSUE-29 @not_implemented
+@ISSUE-29
 Feature: Java language analysis
   git-prism extracts function and import information from Java source
   files using tree-sitter, enabling agents to understand which methods
