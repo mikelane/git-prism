@@ -1,19 +1,17 @@
 """Step definitions for CLI invocation and output assertions."""
 
-import os
+from __future__ import annotations
+
 import re
 import subprocess
-import tempfile
+from pathlib import Path
 
-from behave import given, then, when, use_step_matcher
+from behave import given, then, use_step_matcher, when
+from behave.runner import Context
 
+from repo_setup_steps import _commit, _init_repo, _write_file
 
-@given("a git repository with two commits")
-def step_create_test_repo(context):
-    tmp = tempfile.mkdtemp()
-    context.cleanup_dirs.append(tmp)
-
-    rust_initial = """\
+RUST_INITIAL = """\
 fn greet(name: &str) -> String {
     format!("Hello, {}!", name)
 }
@@ -22,7 +20,8 @@ fn main() {
     println!("{}", greet("world"));
 }
 """
-    rust_modified = """\
+
+RUST_MODIFIED = """\
 fn greet(name: &str) -> String {
     format!("Hello, {}!", name)
 }
@@ -36,43 +35,18 @@ fn main() {
     println!("{}", farewell("world"));
 }
 """
-    subprocess.run(["git", "init"], cwd=tmp, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=tmp,
-        check=True,
-        capture_output=True,
-    )
 
-    main_rs = os.path.join(tmp, "main.rs")
 
-    with open(main_rs, "w") as f:
-        f.write(rust_initial)
-    subprocess.run(["git", "add", "main.rs"], cwd=tmp, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial commit"],
-        cwd=tmp,
-        check=True,
-        capture_output=True,
-    )
+@given("a git repository with two commits")
+def step_create_test_repo(context: Context) -> None:
+    """Create a temporary git repo with two commits modifying a Rust file."""
+    repo_dir = _init_repo(context)
 
-    with open(main_rs, "w") as f:
-        f.write(rust_modified)
-    subprocess.run(["git", "add", "main.rs"], cwd=tmp, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "add farewell function"],
-        cwd=tmp,
-        check=True,
-        capture_output=True,
-    )
+    _write_file(repo_dir, "main.rs", RUST_INITIAL)
+    _commit(repo_dir, "initial commit", ["main.rs"])
 
-    context.repo_path = tmp
+    _write_file(repo_dir, "main.rs", RUST_MODIFIED)
+    _commit(repo_dir, "add farewell function", ["main.rs"])
 
 
 # Use regex matcher to disambiguate the two "I run" step patterns
@@ -80,7 +54,8 @@ use_step_matcher("re")
 
 
 @when(r'I run "(?P<command>[^"]+)" in "(?P<directory>[^"]+)"')
-def step_run_command_in_dir(context, command, directory):
+def step_run_command_in_dir(context: Context, command: str, directory: str) -> None:
+    """Run a CLI command in a specific directory."""
     parts = command.split()
     if parts[0] == "git-prism":
         parts[0] = context.binary_path
@@ -89,27 +64,26 @@ def step_run_command_in_dir(context, command, directory):
     if _command_accepts_repo(parts):
         parts.extend(["--repo", directory])
 
-    result = subprocess.run(
+    context.result = subprocess.run(
         parts, capture_output=True, text=True, cwd=directory
     )
-    context.result = result
 
 
 @when(r'I run "(?P<command>[^"]+)"')
-def step_run_command(context, command):
+def step_run_command(context: Context, command: str) -> None:
+    """Run a CLI command, defaulting to the test repo directory."""
     parts = command.split()
     if parts[0] == "git-prism":
         parts[0] = context.binary_path
 
-    run_dir = getattr(context, "repo_path", context.project_root)
+    run_dir: str = getattr(context, "repo_path", context.project_root)
 
     # For commands that accept --repo, inject it when running against a test repo
-    repo_path = getattr(context, "repo_path", None)
+    repo_path: str | None = getattr(context, "repo_path", None)
     if repo_path and _command_accepts_repo(parts):
         parts.extend(["--repo", repo_path])
 
-    result = subprocess.run(parts, capture_output=True, text=True, cwd=run_dir)
-    context.result = result
+    context.result = subprocess.run(parts, capture_output=True, text=True, cwd=run_dir)
 
 
 # Restore default matcher for remaining steps
@@ -117,7 +91,8 @@ use_step_matcher("parse")
 
 
 @then("the exit code is {code:d}")
-def step_check_exit_code(context, code):
+def step_check_exit_code(context: Context, code: int) -> None:
+    """Assert that the process exited with the expected code."""
     assert context.result.returncode == code, (
         f"Expected exit code {code}, got {context.result.returncode}\n"
         f"stdout: {context.result.stdout}\n"
@@ -126,7 +101,8 @@ def step_check_exit_code(context, code):
 
 
 @then("the exit code is not {code:d}")
-def step_check_exit_code_not(context, code):
+def step_check_exit_code_not(context: Context, code: int) -> None:
+    """Assert that the process did NOT exit with the given code."""
     assert context.result.returncode != code, (
         f"Expected exit code other than {code}, but got {code}\n"
         f"stdout: {context.result.stdout}\n"
@@ -135,7 +111,8 @@ def step_check_exit_code_not(context, code):
 
 
 @then('the output contains "{text}"')
-def step_output_contains(context, text):
+def step_output_contains(context: Context, text: str) -> None:
+    """Assert that stdout+stderr contains the expected text."""
     full_output = context.result.stdout + context.result.stderr
     assert text in full_output, (
         f"'{text}' not found in output:\n{full_output}"
@@ -143,17 +120,41 @@ def step_output_contains(context, text):
 
 
 @then('the output does not contain "{text}"')
-def step_output_not_contains(context, text):
+def step_output_not_contains(context: Context, text: str) -> None:
+    """Assert that stdout+stderr does NOT contain the given text."""
     full_output = context.result.stdout + context.result.stderr
     assert text not in full_output, (
         f"'{text}' found in output but should not be:\n{full_output}"
     )
 
 
+@then("the stderr is not empty")
+def step_stderr_not_empty(context: Context) -> None:
+    """Assert that stderr contains at least some output.
+
+    Error scenarios must produce a diagnostic message on stderr.
+    A silent failure (exit code != 0 with empty stderr) is not
+    a helpful error -- it leaves the user with no information.
+    """
+    assert context.result.stderr.strip(), (
+        f"stderr is empty -- the command failed silently with exit code "
+        f"{context.result.returncode}. Error scenarios must produce a "
+        f"diagnostic message.\nstdout: {context.result.stdout}"
+    )
+
+
 def _command_accepts_repo(parts: list[str]) -> bool:
-    """Check if the command is a subcommand that accepts --repo."""
-    binary_basename = os.path.basename(parts[0])
-    if binary_basename != "git-prism" and not parts[0].endswith("git-prism"):
+    """Check if the command is a subcommand that accepts --repo.
+
+    Args:
+        parts: The split command-line tokens, where parts[0] is the binary.
+
+    Returns:
+        True if the command is a git-prism subcommand that accepts --repo
+        and --repo is not already present.
+    """
+    binary_name = Path(parts[0]).name
+    if binary_name != "git-prism" and not parts[0].endswith("git-prism"):
         return False
     if "--repo" in parts:
         return False
@@ -162,12 +163,12 @@ def _command_accepts_repo(parts: list[str]) -> bool:
 
 
 @then('the languages list includes "{language}"')
-def step_languages_list_includes(context, language):
-    """Match a language name at the start of a line in the languages output.
+def step_languages_list_includes(context: Context, language: str) -> None:
+    """Assert that a language appears in the languages command output.
 
     The languages command outputs lines like:
-      go         (.go)
-      python     (.py)
+        go         (.go)
+        python     (.py)
     We match the language name as a whole word at the start (after whitespace).
     """
     output = context.result.stdout

@@ -4,47 +4,85 @@ These steps create temporary git repos with specific file contents
 and commit histories for testing git-prism's various features.
 """
 
-import os
+from __future__ import annotations
+
 import subprocess
 import tempfile
+from pathlib import Path
 
 from behave import given
+from behave.runner import Context
 
 
-def _init_repo(context):
-    """Create and initialize a temporary git repository."""
-    tmp = tempfile.mkdtemp()
-    context.cleanup_dirs.append(tmp)
-    subprocess.run(["git", "init"], cwd=tmp, check=True, capture_output=True)
+def _init_repo(context: Context) -> str:
+    """Create and initialize a temporary git repository.
+
+    Args:
+        context: The behave context, used to register cleanup dirs and store repo_path.
+
+    Returns:
+        The absolute path to the temporary repository directory.
+    """
+    repo_dir = tempfile.mkdtemp()
+    context.cleanup_dirs.append(repo_dir)
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp, check=True, capture_output=True,
+        cwd=repo_dir, check=True, capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test"],
-        cwd=tmp, check=True, capture_output=True,
+        cwd=repo_dir, check=True, capture_output=True,
     )
-    context.repo_path = tmp
-    return tmp
+    context.repo_path = repo_dir
+    return repo_dir
 
 
-def _write_file(repo_path, filename, content):
-    """Write content to a file in the repo, creating directories as needed."""
-    filepath = os.path.join(repo_path, filename)
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "w") as f:
-        f.write(content)
+def _write_file(repo_path: str, filename: str, content: str) -> Path:
+    """Write content to a file in the repo, creating directories as needed.
+
+    Args:
+        repo_path: The root directory of the git repository.
+        filename: The relative path within the repo (may include subdirectories).
+        content: The text content to write.
+
+    Returns:
+        The full path to the written file.
+    """
+    filepath = Path(repo_path) / filename
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text(content)
     return filepath
 
 
-def _commit(repo_path, message, files=None):
-    """Stage files and create a commit."""
-    if files:
-        for f in files:
-            subprocess.run(
-                ["git", "add", f], cwd=repo_path,
-                check=True, capture_output=True,
-            )
+def _commit(
+    repo_path: str,
+    message: str,
+    files: list[str],
+) -> None:
+    """Stage specified files and create a commit.
+
+    Args:
+        repo_path: The root directory of the git repository.
+        message: The commit message.
+        files: Filenames to stage before committing. Must not be empty --
+            accidental empty commits produce opaque git errors that waste
+            debugging time in test fixtures.
+
+    Raises:
+        ValueError: If files is empty, indicating a bug in the test fixture.
+    """
+    if not files:
+        msg = (
+            f"_commit() called with no files to stage for message: '{message}'. "
+            f"This is almost certainly a bug in the test fixture."
+        )
+        raise ValueError(msg)
+    for filename in files:
+        subprocess.run(
+            ["git", "add", filename], cwd=repo_path,
+            check=True, capture_output=True,
+        )
     subprocess.run(
         ["git", "commit", "-m", message],
         cwd=repo_path, check=True, capture_output=True,
@@ -55,14 +93,16 @@ def _commit(repo_path, message, files=None):
 
 
 @given("a git repository with one commit")
-def step_repo_with_one_commit(context):
-    tmp = _init_repo(context)
-    _write_file(tmp, "README.md", "# Test\n")
-    _commit(tmp, "initial commit", ["README.md"])
+def step_repo_with_one_commit(context: Context) -> None:
+    """Create a temporary repo with a single initial commit."""
+    repo_dir = _init_repo(context)
+    _write_file(repo_dir, "README.md", "# Test\n")
+    _commit(repo_dir, "initial commit", ["README.md"])
 
 
 @given('a new file "{filename}" is staged with content')
-def step_stage_new_file(context, filename):
+def step_stage_new_file(context: Context, filename: str) -> None:
+    """Write a file and stage it in the test repo."""
     repo = context.repo_path
     _write_file(repo, filename, context.text)
     subprocess.run(
@@ -72,19 +112,22 @@ def step_stage_new_file(context, filename):
 
 
 @given('a git repository with a committed file "{filename}" containing')
-def step_repo_with_committed_file(context, filename):
-    tmp = _init_repo(context)
-    _write_file(tmp, filename, context.text)
-    _commit(tmp, "initial commit", [filename])
+def step_repo_with_committed_file(context: Context, filename: str) -> None:
+    """Create a temporary repo with a single committed file."""
+    repo_dir = _init_repo(context)
+    _write_file(repo_dir, filename, context.text)
+    _commit(repo_dir, "initial commit", [filename])
 
 
 @given('the file "{filename}" is modified on disk to')
-def step_modify_file_on_disk(context, filename):
+def step_modify_file_on_disk(context: Context, filename: str) -> None:
+    """Overwrite a file in the test repo without staging."""
     _write_file(context.repo_path, filename, context.text)
 
 
 @given('the file "{filename}" is modified and staged with content')
-def step_modify_and_stage_file(context, filename):
+def step_modify_and_stage_file(context: Context, filename: str) -> None:
+    """Overwrite and stage a file in the test repo."""
     repo = context.repo_path
     _write_file(repo, filename, context.text)
     subprocess.run(
@@ -94,7 +137,8 @@ def step_modify_and_stage_file(context, filename):
 
 
 @given('the file "{filename}" is further modified on disk to')
-def step_further_modify_on_disk(context, filename):
+def step_further_modify_on_disk(context: Context, filename: str) -> None:
+    """Overwrite a file again without staging (creating unstaged changes)."""
     _write_file(context.repo_path, filename, context.text)
 
 
@@ -132,14 +176,15 @@ public class Calculator {
 
 
 @given("a git repository with a Java commit")
-def step_repo_with_java_commit(context):
-    tmp = _init_repo(context)
+def step_repo_with_java_commit(context: Context) -> None:
+    """Create a repo with two Java commits: initial class and added method."""
+    repo_dir = _init_repo(context)
 
-    _write_file(tmp, "Calculator.java", JAVA_INITIAL)
-    _commit(tmp, "initial java", ["Calculator.java"])
+    _write_file(repo_dir, "Calculator.java", JAVA_INITIAL)
+    _commit(repo_dir, "initial java", ["Calculator.java"])
 
-    _write_file(tmp, "Calculator.java", JAVA_MODIFIED)
-    _commit(tmp, "add multiply method and Map import", ["Calculator.java"])
+    _write_file(repo_dir, "Calculator.java", JAVA_MODIFIED)
+    _commit(repo_dir, "add multiply method and Map import", ["Calculator.java"])
 
 
 # ---------- C analyzer fixtures ----------
@@ -179,14 +224,15 @@ int main(void) {
 
 
 @given("a git repository with a C commit")
-def step_repo_with_c_commit(context):
-    tmp = _init_repo(context)
+def step_repo_with_c_commit(context: Context) -> None:
+    """Create a repo with two C commits: initial and added farewell function."""
+    repo_dir = _init_repo(context)
 
-    _write_file(tmp, "main.c", C_INITIAL)
-    _commit(tmp, "initial c", ["main.c"])
+    _write_file(repo_dir, "main.c", C_INITIAL)
+    _commit(repo_dir, "initial c", ["main.c"])
 
-    _write_file(tmp, "main.c", C_MODIFIED)
-    _commit(tmp, "add farewell function", ["main.c"])
+    _write_file(repo_dir, "main.c", C_MODIFIED)
+    _commit(repo_dir, "add farewell function", ["main.c"])
 
 
 CPP_INITIAL = """\
@@ -228,14 +274,15 @@ public:
 
 
 @given("a git repository with a C++ commit")
-def step_repo_with_cpp_commit(context):
-    tmp = _init_repo(context)
+def step_repo_with_cpp_commit(context: Context) -> None:
+    """Create a repo with two C++ commits: initial class and added method."""
+    repo_dir = _init_repo(context)
 
-    _write_file(tmp, "calculator.cpp", CPP_INITIAL)
-    _commit(tmp, "initial cpp", ["calculator.cpp"])
+    _write_file(repo_dir, "calculator.cpp", CPP_INITIAL)
+    _commit(repo_dir, "initial cpp", ["calculator.cpp"])
 
-    _write_file(tmp, "calculator.cpp", CPP_MODIFIED)
-    _commit(tmp, "add multiply method", ["calculator.cpp"])
+    _write_file(repo_dir, "calculator.cpp", CPP_MODIFIED)
+    _commit(repo_dir, "add multiply method", ["calculator.cpp"])
 
 
 HEADER_INITIAL = """\
@@ -260,28 +307,30 @@ void greet(const char* name);
 
 
 @given("a git repository with a C header commit")
-def step_repo_with_header_commit(context):
-    tmp = _init_repo(context)
+def step_repo_with_header_commit(context: Context) -> None:
+    """Create a repo with two header commits: initial and added declarations."""
+    repo_dir = _init_repo(context)
 
-    _write_file(tmp, "utils.h", HEADER_INITIAL)
-    _commit(tmp, "initial header", ["utils.h"])
+    _write_file(repo_dir, "utils.h", HEADER_INITIAL)
+    _commit(repo_dir, "initial header", ["utils.h"])
 
-    _write_file(tmp, "utils.h", HEADER_MODIFIED)
-    _commit(tmp, "add multiply and greet declarations", ["utils.h"])
+    _write_file(repo_dir, "utils.h", HEADER_MODIFIED)
+    _commit(repo_dir, "add multiply and greet declarations", ["utils.h"])
 
 
 # ---------- Per-commit history fixtures ----------
 
 
 @given("a git repository with three sequential commits")
-def step_repo_with_three_commits(context):
-    tmp = _init_repo(context)
+def step_repo_with_three_commits(context: Context) -> None:
+    """Create a repo with three sequential commits across two files."""
+    repo_dir = _init_repo(context)
 
-    _write_file(tmp, "file_a.txt", "first version\n")
-    _commit(tmp, "commit one", ["file_a.txt"])
+    _write_file(repo_dir, "file_a.txt", "first version\n")
+    _commit(repo_dir, "commit one", ["file_a.txt"])
 
-    _write_file(tmp, "file_b.txt", "second file\n")
-    _commit(tmp, "commit two", ["file_b.txt"])
+    _write_file(repo_dir, "file_b.txt", "second file\n")
+    _commit(repo_dir, "commit two", ["file_b.txt"])
 
-    _write_file(tmp, "file_a.txt", "updated version\n")
-    _commit(tmp, "commit three", ["file_a.txt"])
+    _write_file(repo_dir, "file_a.txt", "updated version\n")
+    _commit(repo_dir, "commit three", ["file_a.txt"])

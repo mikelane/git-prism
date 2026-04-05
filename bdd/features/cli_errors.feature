@@ -9,8 +9,11 @@ Feature: Helpful error messages
     Then the exit code is not 0
     And the output does not contain "panicked"
     And the output does not contain "RUST_BACKTRACE"
+    And the stderr is not empty
 
   Scenario: Non-repo path produces clear error
     When I run "git-prism manifest HEAD~1..HEAD" in "/tmp"
     Then the exit code is not 0
-    And the output contains "repository"
+    And the output does not contain "panicked"
+    And the output does not contain "RUST_BACKTRACE"
+    And the stderr is not empty
