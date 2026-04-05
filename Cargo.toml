@@ -9,6 +9,17 @@ homepage = "https://github.com/mikelane/git-prism"
 readme = "README.md"
 keywords = ["mcp", "git", "llm", "agent", "tree-sitter"]
 categories = ["development-tools", "command-line-utilities"]
+exclude = [
+    "bdd/",
+    "demo/",
+    "docs/",
+    ".claude/",
+    ".github/",
+    ".worktrees/",
+    "lefthook.yml",
+    "dist-workspace.toml",
+    "CLAUDE.md",
+]
 
 [dependencies]
 rmcp = { version = "1.3", features = ["server", "transport-io"] }

@@ -18,13 +18,17 @@ deeper inspection is needed.
 
 ## Installation
 
-### From source (Rust toolchain required)
+### From crates.io (recommended)
+
+```bash
+cargo install git-prism
+```
+
+### From source
 
 ```bash
 cargo install --path .
 ```
-
-Once published to crates.io, `cargo install git-prism` will also work.
 
 ### Binary download
 
