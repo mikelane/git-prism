@@ -6,7 +6,7 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use crate::tools::{
     ManifestArgs, ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions,
-    SnapshotResponse, build_manifest, build_snapshots,
+    SnapshotResponse, build_manifest, build_snapshots, build_worktree_manifest,
 };
 
 #[derive(Debug, Clone)]
@@ -47,15 +47,16 @@ impl GitPrismServer {
                 None => std::env::current_dir()
                     .map_err(|e| format!("cannot determine working directory: {e}"))?,
             };
-            let head_ref = args.head_ref.as_deref().unwrap_or("HEAD");
             let options = ManifestOptions {
                 include_patterns: args.include_patterns,
                 exclude_patterns: args.exclude_patterns,
                 include_function_analysis: args.include_function_analysis,
             };
-            build_manifest(&repo_path, &args.base_ref, head_ref, &options)
-                .map(Json)
-                .map_err(|e| e.to_string())
+            let manifest = match args.head_ref {
+                Some(head) => build_manifest(&repo_path, &args.base_ref, &head, &options),
+                None => build_worktree_manifest(&repo_path, &args.base_ref, &options),
+            };
+            manifest.map(Json).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?
