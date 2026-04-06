@@ -79,6 +79,20 @@ fn is_hex_sha(s: &str) -> bool {
     (len == 40 || len >= 12) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Classify the ref pattern for metrics based on split ref arguments.
+///
+/// MCP tool args arrive pre-split (no `..` syntax), so we can't distinguish
+/// `..` from `...`. When `head_ref` is `None`, the mode is `"worktree"`.
+/// When both refs are present, we classify `base_ref` using
+/// `normalize_ref_pattern` to get a spec-compliant label (`branch`, `sha`,
+/// `single_commit`, etc.).
+pub fn classify_ref_mode(base_ref: &str, head_ref: Option<&str>) -> &'static str {
+    match head_ref {
+        None => "worktree",
+        Some(_) => normalize_ref_pattern(base_ref).as_str(),
+    }
+}
+
 /// Maps error description strings to a bounded label set for metrics.
 pub fn classify_error_kind(err: &str) -> &'static str {
     let lower = err.to_lowercase();
@@ -233,5 +247,18 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", exp));
             assert_eq!(variant.as_str(), *exp);
         }
+    }
+
+    #[test]
+    fn test_classify_ref_mode_worktree() {
+        assert_eq!(classify_ref_mode("HEAD", None), "worktree");
+    }
+
+    #[test]
+    fn test_classify_ref_mode_with_head_ref() {
+        // When both refs provided, classifies base_ref via normalize_ref_pattern.
+        assert_eq!(classify_ref_mode("main", Some("HEAD")), "branch");
+        assert_eq!(classify_ref_mode("HEAD~3", Some("HEAD")), "single_commit");
+        assert_eq!(classify_ref_mode(&"a".repeat(40), Some("HEAD")), "sha");
     }
 }

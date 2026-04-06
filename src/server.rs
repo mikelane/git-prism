@@ -65,16 +65,52 @@ impl GitPrismServer {
                 None => std::env::current_dir()
                     .map_err(|e| format!("cannot determine working directory: {e}"))?,
             };
+
+            let root_span = tracing::info_span!(
+                "mcp.tool.get_change_manifest",
+                tool_name = "get_change_manifest",
+                repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
+                ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
+                ref_head = tracing::field::Empty,
+                response_files_count = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                response_truncated = tracing::field::Empty,
+            );
+            let _enter = root_span.enter();
+
+            if let Some(ref head) = args.head_ref {
+                root_span.record(
+                    "ref_head",
+                    crate::privacy::normalize_ref_pattern(head).as_str(),
+                );
+            } else {
+                root_span.record("ref_head", "worktree");
+            }
+
             let options = ManifestOptions {
                 include_patterns: args.include_patterns,
                 exclude_patterns: args.exclude_patterns,
                 include_function_analysis: args.include_function_analysis,
             };
-            let manifest = match args.head_ref {
+            let result = match args.head_ref {
                 Some(head) => build_manifest(&repo_path, &args.base_ref, &head, &options),
                 None => build_worktree_manifest(&repo_path, &args.base_ref, &options),
             };
-            manifest.map(Json).map_err(|e| e.to_string())
+
+            match &result {
+                Ok(manifest) => {
+                    root_span.record("response_files_count", manifest.files.len() as i64);
+                    root_span.record("response_truncated", manifest.truncated);
+                    // Serialize once for byte counting — also used for metrics outside spawn_blocking.
+                    let bytes = serde_json::to_vec(manifest).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "tool invocation failed");
+                }
+            }
+
+            result.map(Json).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -87,7 +123,8 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // Response size metrics
+                // TODO(#43): response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport — consider caching.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -110,12 +147,10 @@ impl GitPrismServer {
                 }
 
                 // Ref pattern classification
-                let pattern = if head_ref_clone.is_none() {
-                    crate::privacy::RefPattern::Worktree
-                } else {
-                    crate::privacy::normalize_ref_pattern(&base_ref_clone)
-                };
-                metrics.record_ref_pattern(pattern.as_str());
+                metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
+                    &base_ref_clone,
+                    head_ref_clone.as_deref(),
+                ));
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");
@@ -139,20 +174,50 @@ impl GitPrismServer {
         let start = std::time::Instant::now();
         let tool_name = "get_commit_history";
 
+        // Extract ref info before moving args into spawn_blocking.
+        let base_ref_clone = args.base_ref.clone();
+        let head_ref_clone = args.head_ref.clone();
+
         let result = tokio::task::spawn_blocking(move || {
             let repo_path = match args.repo_path {
                 Some(p) => PathBuf::from(p),
                 None => std::env::current_dir()
                     .map_err(|e| format!("cannot determine working directory: {e}"))?,
             };
+
+            let root_span = tracing::info_span!(
+                "mcp.tool.get_commit_history",
+                tool_name = "get_commit_history",
+                repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
+                ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
+                ref_head = crate::privacy::normalize_ref_pattern(&args.head_ref).as_str(),
+                response_files_count = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                response_truncated = tracing::field::Empty,
+            );
+            let _enter = root_span.enter();
+
             let options = ManifestOptions {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
                 include_function_analysis: true,
             };
-            build_history(&repo_path, &args.base_ref, &args.head_ref, &options)
-                .map(Json)
-                .map_err(|e| e.to_string())
+            let result = build_history(&repo_path, &args.base_ref, &args.head_ref, &options);
+
+            match &result {
+                Ok(response) => {
+                    let total_files: usize = response.commits.iter().map(|c| c.files.len()).sum();
+                    root_span.record("response_files_count", total_files as i64);
+                    root_span.record("response_truncated", false);
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "tool invocation failed");
+                }
+            }
+
+            result.map(Json).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -165,9 +230,25 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
+                // TODO(#43): response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport — consider caching.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
+                    &base_ref_clone,
+                    Some(&head_ref_clone),
+                ));
+
+                for commit in &response.commits {
+                    for file in &commit.files {
+                        if file.language != "unknown" {
+                            metrics.record_language(&file.language);
+                        }
+                        metrics.record_change_scope(change_scope_label(file.change_scope));
+                    }
+                }
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");
@@ -191,22 +272,66 @@ impl GitPrismServer {
         let start = std::time::Instant::now();
         let tool_name = "get_file_snapshots";
 
+        // Extract ref info before moving args into spawn_blocking.
+        let base_ref_clone = args.base_ref.clone();
+        let head_ref_clone = args.head_ref.clone();
+
         let result = tokio::task::spawn_blocking(move || {
             let repo_path = match args.repo_path {
                 Some(p) => PathBuf::from(p),
                 None => std::env::current_dir()
                     .map_err(|e| format!("cannot determine working directory: {e}"))?,
             };
+
             let head_ref = args.head_ref.as_deref().unwrap_or("HEAD");
+
+            let root_span = tracing::info_span!(
+                "mcp.tool.get_file_snapshots",
+                tool_name = "get_file_snapshots",
+                repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
+                ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
+                ref_head = tracing::field::Empty,
+                response_files_count = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                response_truncated = tracing::field::Empty,
+            );
+            let _enter = root_span.enter();
+
+            if args.head_ref.is_some() {
+                root_span.record(
+                    "ref_head",
+                    crate::privacy::normalize_ref_pattern(head_ref).as_str(),
+                );
+            } else {
+                root_span.record("ref_head", "worktree");
+            }
+
             let options = SnapshotOptions {
                 include_before: args.include_before,
                 include_after: args.include_after,
                 max_file_size_bytes: args.max_file_size_bytes,
                 line_range: args.line_range,
             };
-            build_snapshots(&repo_path, &args.base_ref, head_ref, &args.paths, &options)
-                .map(Json)
-                .map_err(|e| e.to_string())
+            let result =
+                build_snapshots(&repo_path, &args.base_ref, head_ref, &args.paths, &options);
+
+            match &result {
+                Ok(response) => {
+                    root_span.record("response_files_count", response.files.len() as i64);
+                    let any_truncated = response.files.iter().any(|f| {
+                        f.before.as_ref().is_some_and(|c| c.truncated)
+                            || f.after.as_ref().is_some_and(|c| c.truncated)
+                    });
+                    root_span.record("response_truncated", any_truncated);
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "tool invocation failed");
+                }
+            }
+
+            result.map(Json).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -219,9 +344,15 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
+                // TODO(#43): response is serialized again by rmcp — consider caching or estimating size
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
+                    &base_ref_clone,
+                    head_ref_clone.as_deref(),
+                ));
 
                 // Check for per-file truncation in snapshots
                 for file in &response.files {
