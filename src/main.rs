@@ -1,5 +1,6 @@
 mod git;
-pub mod privacy;
+#[allow(dead_code)]
+pub(crate) mod privacy;
 mod server;
 mod telemetry;
 mod tools;

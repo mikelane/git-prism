@@ -6,6 +6,11 @@ use sha2::{Digest, Sha256};
 
 /// SHA-256 hash of the canonicalized absolute path, hex-encoded.
 /// Deterministic: same path always produces the same hash.
+///
+/// If canonicalization fails (e.g., the path doesn't exist on disk), the path
+/// is hashed as-is. This means two different string representations of the same
+/// filesystem path (e.g., with and without trailing slash, or relative vs absolute)
+/// may produce different hashes when the path is not resolvable.
 pub fn hash_repo_path(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut hasher = Sha256::new();
@@ -61,18 +66,30 @@ pub fn normalize_ref_pattern(ref_str: &str) -> RefPattern {
     RefPattern::Branch
 }
 
-/// Check if a string looks like a hex SHA (40 chars or 7+ chars, all hex).
+/// Best-effort heuristic to detect hex SHA strings.
+///
+/// Accepts exactly 40 characters (full SHA-1) or >= 12 all-hex characters as a
+/// short SHA. The 12-char minimum reduces false positives from branch names that
+/// happen to be valid hex (e.g., `deadbeef`, `cafebabe`). Git's default
+/// abbreviation is 7 characters, but real-world short SHAs passed to tools are
+/// typically 12+. There is inherent ambiguity — a 12+ hex-char branch name would
+/// still be misclassified — but this is acceptable for telemetry categorization.
 fn is_hex_sha(s: &str) -> bool {
     let len = s.len();
-    (len == 40 || len >= 7) && s.chars().all(|c| c.is_ascii_hexdigit())
+    (len == 40 || len >= 12) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Maps error description strings to a bounded label set for metrics.
 pub fn classify_error_kind(err: &str) -> &'static str {
     let lower = err.to_lowercase();
-    if lower.contains("resolve") || lower.contains("ref") {
+    if lower.contains("resolve") || lower.contains("ref not found") || lower.contains("invalid ref")
+    {
         "ref_not_found"
-    } else if lower.contains("repo") || lower.contains("repository") {
+    } else if lower.contains("repository")
+        || lower.contains("repo not found")
+        || lower.contains("not a git")
+        || lower.contains("open repo")
+    {
         "repo_not_found"
     } else if lower.contains("diff") {
         "diff_failed"
@@ -130,8 +147,11 @@ mod tests {
 
     #[test]
     fn test_normalize_short_sha() {
-        assert_eq!(normalize_ref_pattern("abc1234"), RefPattern::Sha);
-        assert_eq!(normalize_ref_pattern("deadbeef"), RefPattern::Sha);
+        // 12+ hex chars are classified as short SHAs
+        assert_eq!(normalize_ref_pattern("abc1234def56"), RefPattern::Sha);
+        // 7-char and 8-char hex strings are now Branch (below 12-char threshold)
+        assert_eq!(normalize_ref_pattern("abc1234"), RefPattern::Branch);
+        assert_eq!(normalize_ref_pattern("deadbeef"), RefPattern::Branch);
     }
 
     #[test]
@@ -168,6 +188,26 @@ mod tests {
     fn test_classify_error_unknown() {
         assert_eq!(classify_error_kind("something went wrong"), "unknown");
         assert_eq!(classify_error_kind("totally random"), "unknown");
+    }
+
+    #[test]
+    fn test_normalize_ref_pattern_edge_cases() {
+        // Empty string falls through to Branch
+        assert_eq!(normalize_ref_pattern(""), RefPattern::Branch);
+        // Full ref paths are Branch
+        assert_eq!(normalize_ref_pattern("refs/heads/main"), RefPattern::Branch);
+        // Remote-tracking refs are Branch
+        assert_eq!(normalize_ref_pattern("origin/main"), RefPattern::Branch);
+        // Tags are Branch (no special tag variant)
+        assert_eq!(normalize_ref_pattern("v1.0.0"), RefPattern::Branch);
+    }
+
+    #[test]
+    fn test_classify_error_no_false_positives() {
+        // "refactoring" should NOT match "ref not found" patterns
+        assert_eq!(classify_error_kind("refactoring in progress"), "unknown");
+        // "reproduce" should NOT match "repo" patterns
+        assert_eq!(classify_error_kind("could not reproduce"), "unknown");
     }
 
     #[test]
