@@ -4,11 +4,21 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
+use crate::git::diff::ChangeScope;
 use crate::tools::{
     HistoryArgs, HistoryResponse, ManifestArgs, ManifestOptions, ManifestResponse, SnapshotArgs,
     SnapshotOptions, SnapshotResponse, build_history, build_manifest, build_snapshots,
     build_worktree_manifest,
 };
+
+/// Convert a `ChangeScope` variant to a static metric label string.
+fn change_scope_label(scope: ChangeScope) -> &'static str {
+    match scope {
+        ChangeScope::Committed => "committed",
+        ChangeScope::Staged => "staged",
+        ChangeScope::Unstaged => "unstaged",
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GitPrismServer {
@@ -42,7 +52,14 @@ impl GitPrismServer {
         &self,
         Parameters(args): Parameters<ManifestArgs>,
     ) -> Result<Json<ManifestResponse>, String> {
-        tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let tool_name = "get_change_manifest";
+
+        // Extract ref info before moving args into spawn_blocking.
+        let base_ref_clone = args.base_ref.clone();
+        let head_ref_clone = args.head_ref.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
             let repo_path = match args.repo_path {
                 Some(p) => PathBuf::from(p),
                 None => std::env::current_dir()
@@ -60,7 +77,53 @@ impl GitPrismServer {
             manifest.map(Json).map_err(|e| e.to_string())
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        let metrics = crate::metrics::get();
+        let duration_ms = start.elapsed().as_millis() as f64;
+        metrics.record_duration(tool_name, duration_ms);
+
+        match &result {
+            Ok(Json(response)) => {
+                metrics.record_request(tool_name, "success");
+
+                // Response size metrics
+                let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                metrics.record_response_bytes(tool_name, json_bytes as f64);
+                metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                // Manifest-specific metrics
+                metrics.record_files_returned(response.files.len() as f64);
+
+                for file in &response.files {
+                    if file.language != "unknown" {
+                        metrics.record_language(&file.language);
+                    }
+                    metrics.record_change_scope(change_scope_label(file.change_scope));
+                    if let Some(fns) = &file.functions_changed {
+                        metrics.record_functions_changed(&file.language, fns.len() as f64);
+                    }
+                }
+
+                if response.truncated {
+                    metrics.record_truncated(tool_name, "max_files");
+                }
+
+                // Ref pattern classification
+                let pattern = if head_ref_clone.is_none() {
+                    crate::privacy::RefPattern::Worktree
+                } else {
+                    crate::privacy::normalize_ref_pattern(&base_ref_clone)
+                };
+                metrics.record_ref_pattern(pattern.as_str());
+            }
+            Err(e) => {
+                metrics.record_request(tool_name, "error");
+                metrics.record_error(tool_name, crate::privacy::classify_error_kind(e));
+            }
+        }
+
+        result
     }
 
     /// Returns one manifest per commit in a range, so agents can see
@@ -73,7 +136,10 @@ impl GitPrismServer {
         &self,
         Parameters(args): Parameters<HistoryArgs>,
     ) -> Result<Json<HistoryResponse>, String> {
-        tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let tool_name = "get_commit_history";
+
+        let result = tokio::task::spawn_blocking(move || {
             let repo_path = match args.repo_path {
                 Some(p) => PathBuf::from(p),
                 None => std::env::current_dir()
@@ -89,7 +155,27 @@ impl GitPrismServer {
                 .map_err(|e| e.to_string())
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        let metrics = crate::metrics::get();
+        let duration_ms = start.elapsed().as_millis() as f64;
+        metrics.record_duration(tool_name, duration_ms);
+
+        match &result {
+            Ok(Json(response)) => {
+                metrics.record_request(tool_name, "success");
+
+                let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                metrics.record_response_bytes(tool_name, json_bytes as f64);
+                metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+            }
+            Err(e) => {
+                metrics.record_request(tool_name, "error");
+                metrics.record_error(tool_name, crate::privacy::classify_error_kind(e));
+            }
+        }
+
+        result
     }
 
     /// Returns complete before/after file content at two git refs for
@@ -102,7 +188,10 @@ impl GitPrismServer {
         &self,
         Parameters(args): Parameters<SnapshotArgs>,
     ) -> Result<Json<SnapshotResponse>, String> {
-        tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let tool_name = "get_file_snapshots";
+
+        let result = tokio::task::spawn_blocking(move || {
             let repo_path = match args.repo_path {
                 Some(p) => PathBuf::from(p),
                 None => std::env::current_dir()
@@ -120,7 +209,36 @@ impl GitPrismServer {
                 .map_err(|e| e.to_string())
         })
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        let metrics = crate::metrics::get();
+        let duration_ms = start.elapsed().as_millis() as f64;
+        metrics.record_duration(tool_name, duration_ms);
+
+        match &result {
+            Ok(Json(response)) => {
+                metrics.record_request(tool_name, "success");
+
+                let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                metrics.record_response_bytes(tool_name, json_bytes as f64);
+                metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                // Check for per-file truncation in snapshots
+                for file in &response.files {
+                    let truncated = file.before.as_ref().is_some_and(|c| c.truncated)
+                        || file.after.as_ref().is_some_and(|c| c.truncated);
+                    if truncated {
+                        metrics.record_truncated(tool_name, "max_file_size");
+                    }
+                }
+            }
+            Err(e) => {
+                metrics.record_request(tool_name, "error");
+                metrics.record_error(tool_name, crate::privacy::classify_error_kind(e));
+            }
+        }
+
+        result
     }
 }
 
@@ -129,6 +247,7 @@ impl ServerHandler for GitPrismServer {}
 
 pub async fn run_server() -> anyhow::Result<()> {
     let _telemetry = crate::telemetry::init();
+    crate::metrics::get().record_session_started();
     let server = GitPrismServer::new();
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;

@@ -1,4 +1,5 @@
 mod git;
+pub(crate) mod metrics;
 #[allow(dead_code)]
 pub(crate) mod privacy;
 mod server;
