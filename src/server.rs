@@ -101,6 +101,9 @@ impl GitPrismServer {
                 Ok(manifest) => {
                     root_span.record("response_files_count", manifest.files.len() as i64);
                     root_span.record("response_truncated", manifest.truncated);
+                    // Serialize once for byte counting — also used for metrics outside spawn_blocking.
+                    let bytes = serde_json::to_vec(manifest).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "tool invocation failed");
@@ -120,7 +123,8 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized again by rmcp — consider caching or estimating size
+                // TODO(#43): response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport — consider caching.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -205,6 +209,8 @@ impl GitPrismServer {
                     let total_files: usize = response.commits.iter().map(|c| c.files.len()).sum();
                     root_span.record("response_files_count", total_files as i64);
                     root_span.record("response_truncated", false);
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "tool invocation failed");
@@ -224,7 +230,8 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized again by rmcp — consider caching or estimating size
+                // TODO(#43): response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport — consider caching.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -316,6 +323,8 @@ impl GitPrismServer {
                             || f.after.as_ref().is_some_and(|c| c.truncated)
                     });
                     root_span.record("response_truncated", any_truncated);
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "tool invocation failed");

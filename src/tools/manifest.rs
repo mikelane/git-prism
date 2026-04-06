@@ -225,6 +225,8 @@ pub fn build_manifest(
                 (base_fns, head_fns, base_imports, head_imports)
             };
 
+            // Span names match the spec tree: treesitter.extract_functions produces
+            // the function change list by diffing base vs head extracted functions.
             let fn_changes = {
                 let _span = tracing::info_span!("treesitter.extract_functions").entered();
                 diff_functions(&base_fns, &head_fns)
@@ -440,6 +442,8 @@ pub fn build_worktree_manifest(
                 (base_fns, head_fns, base_imports, head_imports)
             };
 
+            // Span names match the spec tree: treesitter.extract_functions produces
+            // the function change list by diffing base vs head extracted functions.
             let fn_changes = {
                 let _span = tracing::info_span!("treesitter.extract_functions").entered();
                 diff_functions(&base_fns, &head_fns)

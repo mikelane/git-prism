@@ -81,16 +81,15 @@ fn is_hex_sha(s: &str) -> bool {
 
 /// Classify the ref pattern for metrics based on split ref arguments.
 ///
-/// Since MCP tool args arrive pre-split (no `..` syntax), we infer the mode
-/// from whether `head_ref` is present and classify `base_ref` individually.
-pub fn classify_ref_mode(_base_ref: &str, head_ref: Option<&str>) -> &'static str {
+/// MCP tool args arrive pre-split (no `..` syntax), so we can't distinguish
+/// `..` from `...`. When `head_ref` is `None`, the mode is `"worktree"`.
+/// When both refs are present, we classify `base_ref` using
+/// `normalize_ref_pattern` to get a spec-compliant label (`branch`, `sha`,
+/// `single_commit`, etc.).
+pub fn classify_ref_mode(base_ref: &str, head_ref: Option<&str>) -> &'static str {
     match head_ref {
         None => "worktree",
-        Some(_) => {
-            // Both refs provided = commit range. We can't distinguish .. from ...
-            // after splitting, so we report a generic label.
-            "commit_range"
-        }
+        Some(_) => normalize_ref_pattern(base_ref).as_str(),
     }
 }
 
@@ -248,5 +247,18 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", exp));
             assert_eq!(variant.as_str(), *exp);
         }
+    }
+
+    #[test]
+    fn test_classify_ref_mode_worktree() {
+        assert_eq!(classify_ref_mode("HEAD", None), "worktree");
+    }
+
+    #[test]
+    fn test_classify_ref_mode_with_head_ref() {
+        // When both refs provided, classifies base_ref via normalize_ref_pattern.
+        assert_eq!(classify_ref_mode("main", Some("HEAD")), "branch");
+        assert_eq!(classify_ref_mode("HEAD~3", Some("HEAD")), "single_commit");
+        assert_eq!(classify_ref_mode(&"a".repeat(40), Some("HEAD")), "sha");
     }
 }
