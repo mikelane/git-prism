@@ -32,6 +32,7 @@ impl RepoReader {
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self, GitError> {
+        let _span = tracing::info_span!("git.open_repo").entered();
         // Raw gix error omitted from user-facing message — it contains internal
         // paths and format that aren't actionable for the caller.
         let repo = gix::open(path).map_err(|_| GitError::OpenRepo(path.display().to_string()))?;
@@ -39,6 +40,7 @@ impl RepoReader {
     }
 
     pub fn resolve_commit(&self, refspec: &str) -> Result<CommitInfo, GitError> {
+        let _span = tracing::info_span!("git.resolve_ref").entered();
         let commit = self.peel_to_commit(refspec)?;
 
         let message = commit
@@ -53,6 +55,7 @@ impl RepoReader {
     }
 
     pub fn read_file_at_ref(&self, refspec: &str, file_path: &str) -> Result<String, GitError> {
+        let _span = tracing::info_span!("git.read_blob").entered();
         let commit = self.peel_to_commit(refspec)?;
 
         let tree = commit
@@ -111,6 +114,7 @@ impl RepoReader {
         base_ref: &str,
         head_ref: &str,
     ) -> Result<Vec<CommitInfo>, GitError> {
+        let _span = tracing::info_span!("git.walk_commits").entered();
         let base_commit = self.peel_to_commit(base_ref)?;
         let head_commit = self.peel_to_commit(head_ref)?;
 

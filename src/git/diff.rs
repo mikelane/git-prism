@@ -50,6 +50,7 @@ pub struct DiffResult {
 
 impl RepoReader {
     pub fn diff_commits(&self, base_ref: &str, head_ref: &str) -> Result<DiffResult, GitError> {
+        let _span = tracing::info_span!("git.diff_commits").entered();
         let base_commit = self.peel_to_commit(base_ref)?;
         let head_commit = self.peel_to_commit(head_ref)?;
 

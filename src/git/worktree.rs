@@ -9,6 +9,7 @@ impl RepoReader {
     /// Returns a `DiffResult` where each `FileChange` carries a `change_scope`
     /// of either `Staged` or `Unstaged`, mirroring `git status` semantics.
     pub fn diff_worktree(&self) -> Result<DiffResult, GitError> {
+        let _span = tracing::info_span!("git.diff_worktree").entered();
         use gix::status::Item;
 
         let status_iter = self

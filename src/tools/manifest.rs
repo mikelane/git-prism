@@ -172,11 +172,17 @@ pub fn build_manifest(
     for file_change in &files_to_process {
         let language = detect_language(&file_change.path);
         let ext = extension_from_path(&file_change.path);
-        let is_generated = GeneratedFileDetector::is_generated(&file_change.path, None);
+        let is_generated = {
+            let _span = tracing::info_span!("manifest.detect_generated").entered();
+            GeneratedFileDetector::is_generated(&file_change.path, None)
+        };
 
         if language != "unknown" {
             languages_set.insert(language.to_string());
         }
+
+        let _file_span =
+            tracing::info_span!("manifest.analyze_file", file.language = language).entered();
 
         // Function and import analysis
         let (functions_changed, imports_changed) = if let Some(analyzer) = options
@@ -194,30 +200,45 @@ pub fn build_manifest(
                 _ => reader.read_file_at_ref(head_ref, &file_change.path).ok(),
             };
 
-            let base_fns = base_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let base_fns = {
+                let _span = tracing::info_span!("treesitter.parse").entered();
+                base_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
-            let head_fns = head_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let head_fns = {
+                let _span = tracing::info_span!("treesitter.parse").entered();
+                head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
-            let fn_changes = diff_functions(&base_fns, &head_fns);
+            let fn_changes = {
+                let _span = tracing::info_span!("treesitter.extract_functions").entered();
+                diff_functions(&base_fns, &head_fns)
+            };
 
             let count = fn_changes.len();
             *total_functions_changed.get_or_insert(0) += count;
 
-            let base_imports = base_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let base_imports = {
+                let _span = tracing::info_span!("treesitter.extract_imports").entered();
+                base_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
-            let head_imports = head_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let head_imports = {
+                let _span = tracing::info_span!("treesitter.extract_imports").entered();
+                head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
             let import_change = diff_imports(&base_imports, &head_imports);
 
@@ -228,6 +249,7 @@ pub fn build_manifest(
 
         // Dependency analysis
         if is_dependency_file(&file_change.path) {
+            let _dep_span = tracing::info_span!("manifest.diff_dependencies").entered();
             let base_content = match file_change.change_type {
                 ChangeType::Added => String::new(),
                 _ => reader
@@ -367,11 +389,17 @@ pub fn build_worktree_manifest(
     for file_change in &files_to_process {
         let language = detect_language(&file_change.path);
         let ext = extension_from_path(&file_change.path);
-        let is_generated = GeneratedFileDetector::is_generated(&file_change.path, None);
+        let is_generated = {
+            let _span = tracing::info_span!("manifest.detect_generated").entered();
+            GeneratedFileDetector::is_generated(&file_change.path, None)
+        };
 
         if language != "unknown" {
             languages_set.insert(language.to_string());
         }
+
+        let _file_span =
+            tracing::info_span!("manifest.analyze_file", file.language = language).entered();
 
         let (functions_changed, imports_changed) = if let Some(analyzer) = options
             .include_function_analysis
@@ -391,29 +419,44 @@ pub fn build_worktree_manifest(
                 },
             };
 
-            let base_fns = base_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let base_fns = {
+                let _span = tracing::info_span!("treesitter.parse").entered();
+                base_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
-            let head_fns = head_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let head_fns = {
+                let _span = tracing::info_span!("treesitter.parse").entered();
+                head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
-            let fn_changes = diff_functions(&base_fns, &head_fns);
+            let fn_changes = {
+                let _span = tracing::info_span!("treesitter.extract_functions").entered();
+                diff_functions(&base_fns, &head_fns)
+            };
             let count = fn_changes.len();
             *total_functions_changed.get_or_insert(0) += count;
 
-            let base_imports = base_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let base_imports = {
+                let _span = tracing::info_span!("treesitter.extract_imports").entered();
+                base_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
-            let head_imports = head_content
-                .as_ref()
-                .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                .unwrap_or_default();
+            let head_imports = {
+                let _span = tracing::info_span!("treesitter.extract_imports").entered();
+                head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default()
+            };
 
             let import_change = diff_imports(&base_imports, &head_imports);
 
