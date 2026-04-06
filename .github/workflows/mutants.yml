@@ -1,6 +1,7 @@
 name: Mutation Testing
 
 on:
+  workflow_dispatch: {}
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/mutants.toml"
+      - ".github/workflows/mutants.yml"
   schedule:
     # Weekly full run: Sunday at 03:00 UTC
     - cron: "0 3 * * 0"
