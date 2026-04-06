@@ -6,11 +6,11 @@ use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider};
 use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
 const DEFAULT_SERVICE_NAME: &str = "git-prism";
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Environment variable names for telemetry configuration.
 const ENV_OTLP_ENDPOINT: &str = "GIT_PRISM_OTLP_ENDPOINT";
-const ENV_OTLP_HEADERS: &str = "GIT_PRISM_OTLP_HEADERS";
+// TODO: wire up GIT_PRISM_OTLP_HEADERS (#43)
 const ENV_SERVICE_NAME: &str = "GIT_PRISM_SERVICE_NAME";
 const ENV_SERVICE_VERSION: &str = "GIT_PRISM_SERVICE_VERSION";
 
@@ -29,6 +29,9 @@ impl TelemetryGuard {
     }
 }
 
+/// The design spec targets a 5s flush on shutdown. The SDK's `.shutdown()` handles
+/// its own timing internally, so we rely on its defaults here rather than passing
+/// an explicit timeout.
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         if let Some(tp) = self.tracer_provider.take() {
@@ -61,17 +64,17 @@ pub fn init() -> TelemetryGuard {
         std::env::var(ENV_SERVICE_NAME).unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string());
     let service_version = std::env::var(ENV_SERVICE_VERSION)
         .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-    let _headers = std::env::var(ENV_OTLP_HEADERS).ok();
 
     // Build the OTLP trace exporter.
     let trace_exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
-        .with_timeout(FLUSH_TIMEOUT)
+        .with_timeout(EXPORT_TIMEOUT)
         .build()
     {
         Ok(exp) => exp,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("git-prism: failed to initialize trace exporter: {e}");
             return TelemetryGuard {
                 tracer_provider: None,
                 meter_provider: None,
@@ -83,11 +86,12 @@ pub fn init() -> TelemetryGuard {
     let metrics_exporter = match opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
-        .with_timeout(FLUSH_TIMEOUT)
+        .with_timeout(EXPORT_TIMEOUT)
         .build()
     {
         Ok(exp) => exp,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("git-prism: failed to initialize metrics exporter: {e}");
             return TelemetryGuard {
                 tracer_provider: None,
                 meter_provider: None,
@@ -126,7 +130,9 @@ pub fn init() -> TelemetryGuard {
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     // Initialize the tracing subscriber with the OTel layer
-    let _ = Registry::default().with(otel_layer).try_init();
+    if let Err(e) = Registry::default().with(otel_layer).try_init() {
+        eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
+    }
 
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
@@ -137,21 +143,28 @@ pub fn init() -> TelemetryGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex to serialize tests that mutate process-global environment variables.
+    /// `std::env::set_var` / `remove_var` are not thread-safe; concurrent mutation
+    /// is undefined behavior. Every test that touches env vars MUST hold this lock
+    /// for the duration of the test (setup, exercise, and cleanup).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     // Helper to remove telemetry env vars for test isolation.
-    // SAFETY: Tests run with --test-threads=1 or we accept the inherent
-    // unsafety of env mutation in tests. These env vars are only used by
-    // this module's tests.
+    // SAFETY: Caller must hold ENV_MUTEX. `set_var`/`remove_var` are unsafe
+    // because they mutate shared process state; the mutex serializes access
+    // so no concurrent mutation occurs.
     unsafe fn clear_telemetry_env() {
         std::env::remove_var(ENV_OTLP_ENDPOINT);
-        std::env::remove_var(ENV_OTLP_HEADERS);
         std::env::remove_var(ENV_SERVICE_NAME);
         std::env::remove_var(ENV_SERVICE_VERSION);
     }
 
     #[test]
     fn test_init_without_env_returns_noop() {
-        // SAFETY: env vars are only used by this module's telemetry tests.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
         }
@@ -164,7 +177,8 @@ mod tests {
 
     #[test]
     fn test_init_with_empty_endpoint_returns_noop() {
-        // SAFETY: env vars are only used by this module's telemetry tests.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
             std::env::set_var(ENV_OTLP_ENDPOINT, "");
@@ -182,7 +196,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_with_endpoint_creates_providers() {
-        // SAFETY: env vars are only used by this module's telemetry tests.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
             // Use a dummy endpoint — the exporter won't connect but providers
@@ -203,6 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_guard_drop_does_not_panic() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         // No-op guard
         let noop_guard = TelemetryGuard {
             tracer_provider: None,
@@ -211,7 +227,7 @@ mod tests {
         drop(noop_guard);
 
         // Active guard (with real providers)
-        // SAFETY: env vars are only used by this module's telemetry tests.
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
             std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
@@ -226,8 +242,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_custom_service_name() {
-        // SAFETY: env vars are only used by this module's telemetry tests.
+    async fn test_init_with_custom_service_name_succeeds() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
             std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
