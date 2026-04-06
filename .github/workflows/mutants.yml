@@ -1,0 +1,156 @@
+name: Mutation Testing
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/mutants.toml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**/*.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/mutants.toml"
+  schedule:
+    # Weekly full run: Sunday at 03:00 UTC
+    - cron: "0 3 * * 0"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_MUTANTS_VERSION: "27.0.0"
+
+jobs:
+  # On PRs: incremental mode — only mutants in changed files.
+  # Fast feedback, typically <10 minutes.
+  incremental:
+    name: Mutants (incremental)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-mutants
+            target
+          key: ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-
+
+      - name: Install cargo-mutants
+        run: |
+          if ! cargo mutants --version 2>/dev/null | grep -q "$CARGO_MUTANTS_VERSION"; then
+            cargo install "cargo-mutants@$CARGO_MUTANTS_VERSION"
+          fi
+
+      - name: Fetch base branch
+        run: git fetch origin "${{ github.base_ref }}"
+
+      - name: Generate diff against base
+        run: git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
+
+      - name: Run cargo-mutants on changed files
+        run: cargo mutants --timeout 300 --jobs 4 --in-diff pr.diff
+
+      - name: Upload mutants output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-incremental
+          path: mutants.out/
+
+  # On main push: full suite — all in-scope mutants.
+  # Posts score to step summary. Does not block the merge.
+  full:
+    name: Mutants (full suite)
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-mutants
+            target
+          key: ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-
+
+      - name: Install cargo-mutants
+        run: |
+          if ! cargo mutants --version 2>/dev/null | grep -q "$CARGO_MUTANTS_VERSION"; then
+            cargo install "cargo-mutants@$CARGO_MUTANTS_VERSION"
+          fi
+
+      - name: Run full mutation testing
+        run: cargo mutants --timeout 300 --jobs 4
+
+      - name: Generate summary
+        if: always()
+        run: |
+          if [ -f mutants.out/outcomes.json ]; then
+            python3 - <<'SCRIPT'
+          import json, os, textwrap
+
+          with open("mutants.out/outcomes.json") as f:
+              data = json.load(f)
+
+          outcomes = data.get("outcomes", data) if isinstance(data, dict) else data
+
+          killed = sum(1 for o in outcomes if o.get("summary") in ("CaughtMutant", "Timeout"))
+          survived = sum(1 for o in outcomes if o.get("summary") == "MissedMutant")
+          unviable = sum(1 for o in outcomes if o.get("summary") == "Unviable")
+          total_testable = killed + survived
+
+          if total_testable > 0:
+              score = killed / total_testable * 100
+              score_str = f"{score:.1f}%"
+              verdict = "✅ Score meets 90% threshold." if score >= 90 else "⚠️ Score below 90% threshold — see surviving mutants in the artifact."
+          else:
+              score_str = "N/A (no testable mutants)"
+              verdict = "ℹ️ No testable mutants were generated."
+
+          summary = textwrap.dedent(f"""\
+          ## Mutation Testing Results
+
+          | Metric | Value |
+          |--------|-------|
+          | Mutants killed | {killed} |
+          | Mutants survived | {survived} |
+          | Unviable | {unviable} |
+          | **Mutation score** | **{score_str}** |
+
+          {verdict}
+          """)
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(summary)
+          SCRIPT
+          fi
+
+      - name: Upload mutants output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-full
+          path: mutants.out/
