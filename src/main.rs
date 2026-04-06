@@ -1,5 +1,6 @@
 mod git;
 mod server;
+mod telemetry;
 mod tools;
 mod treesitter;
 
