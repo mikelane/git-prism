@@ -313,6 +313,26 @@ packages:
 - `go.mod` (Go)
 - `pyproject.toml` (Python, PEP 621)
 
+## Telemetry
+
+Optional OpenTelemetry instrumentation, disabled by default and opt-in via environment variables.
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `GIT_PRISM_OTLP_ENDPOINT` | OTLP gRPC endpoint URL. When unset, telemetry is disabled. | unset (disabled) |
+| `GIT_PRISM_OTLP_HEADERS` | Comma-separated `key=value` pairs for auth headers. | unset |
+| `GIT_PRISM_SERVICE_NAME` | Service name reported to the backend. | `git-prism` |
+| `GIT_PRISM_SERVICE_VERSION` | Service version reported to the backend. | crate version |
+
+Quick start with Jaeger (any OTLP-compatible backend works):
+```bash
+docker run -d --name jaeger -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one:latest
+GIT_PRISM_OTLP_ENDPOINT=http://localhost:4317 git-prism serve
+```
+
+**Privacy:** No raw paths, file contents, author names, or ref names are exported. Paths are
+SHA-256 hashed; refs normalized to a bounded enum. See [docs/telemetry.md](docs/telemetry.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
