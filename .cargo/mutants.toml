@@ -1,0 +1,31 @@
+# cargo-mutants configuration for git-prism
+# See: https://mutants.rs/config.html
+
+# Only examine production source code, not test helpers or build scripts.
+examine_globs = ["src/**/*.rs"]
+
+# Exclude files that are genuinely untestable in isolation:
+#
+# - main.rs: Entry point shim — main() and CLI dispatch cannot be
+#   mutation-tested without end-to-end process invocation. parse_range()
+#   and validate_commit_range() have direct unit tests already.
+#
+# - server.rs: MCP server lifecycle and tool handler wiring — requires
+#   a running rmcp transport and async runtime. The business logic it
+#   calls (build_manifest, build_snapshots, build_history) is tested
+#   directly. Metrics/span recording is observability plumbing.
+#
+# - telemetry.rs: OTel provider initialization — tested via BDD scenarios
+#   with a mock OTLP collector. Mutating init() or Drop requires an OTLP
+#   endpoint to detect, which unit tests can't provide.
+#
+# - metrics.rs: OTel instrument creation and recording helpers — all
+#   methods delegate to the global meter provider. When no endpoint is
+#   configured (test default), every call is a no-op, so mutants in
+#   recording logic are undetectable without a live exporter.
+exclude_globs = [
+    "src/main.rs",
+    "src/server.rs",
+    "src/telemetry.rs",
+    "src/metrics.rs",
+]
