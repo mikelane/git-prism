@@ -315,8 +315,7 @@ packages:
 
 ## Telemetry
 
-git-prism supports optional OpenTelemetry-based observability. Telemetry is
-**disabled by default** and opt-in via environment variables.
+Optional OpenTelemetry instrumentation, disabled by default and opt-in via environment variables.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
@@ -325,16 +324,14 @@ git-prism supports optional OpenTelemetry-based observability. Telemetry is
 | `GIT_PRISM_SERVICE_NAME` | Service name reported to the backend. | `git-prism` |
 | `GIT_PRISM_SERVICE_VERSION` | Service version reported to the backend. | crate version |
 
-Quick start with SigNoz:
-
+Quick start with Jaeger (any OTLP-compatible backend works):
 ```bash
-docker run -d --name signoz -p 4317:4317 -p 3301:3301 signoz/signoz:latest
+docker run -d --name jaeger -p 4317:4317 -p 16686:16686 jaegertracing/all-in-one:latest
 GIT_PRISM_OTLP_ENDPOINT=http://localhost:4317 git-prism serve
 ```
 
-**Privacy:** No raw repository paths, file contents, commit SHAs, author names,
-or ref names are exported. Paths are SHA-256 hashed; refs are normalized to a
-bounded enum. See [docs/telemetry.md](docs/telemetry.md) for the full reference.
+**Privacy:** No raw paths, file contents, author names, or ref names are exported. Paths are
+SHA-256 hashed; refs normalized to a bounded enum. See [docs/telemetry.md](docs/telemetry.md).
 
 ## Contributing
 

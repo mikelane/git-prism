@@ -61,6 +61,7 @@ Histograms use explicit bucket boundaries listed below.
 **Label values:**
 
 - `operation`: `open_repo`, `resolve_ref`, `diff_commits`, `diff_worktree`, `read_blob`, `walk_commits`
+- `error_kind`: `ref_not_found`, `repo_not_found`, `diff_failed`, `parse_failed`, `io_error`, `unknown`
 
 **Duration histogram buckets (ms):** 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000
 
@@ -116,9 +117,8 @@ mcp.tool.get_file_snapshots
 ```
 mcp.tool.get_commit_history
 ├── git.open_repo
-├── git.resolve_ref              [one per ref]
 ├── git.walk_commits
-└── git.diff_commits             [one per commit in range]
+└── [manifest sub-tree]           [one per commit in range]
 ```
 
 ### Root Span Attributes
@@ -148,7 +148,7 @@ The following data **never leaves the process** in any metric, trace, or log:
 - **Commit messages** -- not included in any telemetry data.
 - **Author names and email addresses** -- not exported.
 - **Literal branch, tag, or ref names** -- normalized to a bounded enum (`branch`, `sha`, `worktree`, etc.) before export.
-- **Commit SHAs** -- not included in any telemetry data.
+- **Commit SHAs** — included only as span attributes for trace correlation, never as metric labels. Not human-readable in dashboard views unless explicitly queried.
 
 Only structural metadata is exported: counts, durations, file extensions
 (via language labels), and normalized ref patterns.
