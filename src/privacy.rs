@@ -79,6 +79,21 @@ fn is_hex_sha(s: &str) -> bool {
     (len == 40 || len >= 12) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Classify the ref pattern for metrics based on split ref arguments.
+///
+/// Since MCP tool args arrive pre-split (no `..` syntax), we infer the mode
+/// from whether `head_ref` is present and classify `base_ref` individually.
+pub fn classify_ref_mode(_base_ref: &str, head_ref: Option<&str>) -> &'static str {
+    match head_ref {
+        None => "worktree",
+        Some(_) => {
+            // Both refs provided = commit range. We can't distinguish .. from ...
+            // after splitting, so we report a generic label.
+            "commit_range"
+        }
+    }
+}
+
 /// Maps error description strings to a bounded label set for metrics.
 pub fn classify_error_kind(err: &str) -> &'static str {
     let lower = err.to_lowercase();

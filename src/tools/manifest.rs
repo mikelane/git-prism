@@ -200,20 +200,29 @@ pub fn build_manifest(
                 _ => reader.read_file_at_ref(head_ref, &file_change.path).ok(),
             };
 
-            let base_fns = {
-                let _span = tracing::info_span!("treesitter.parse").entered();
-                base_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                    .unwrap_or_default()
-            };
+            // Single treesitter.parse span wrapping all parsing (base+head functions+imports)
+            let (base_fns, head_fns, base_imports, head_imports) = {
+                let _parse_span =
+                    tracing::info_span!("treesitter.parse", language = language).entered();
 
-            let head_fns = {
-                let _span = tracing::info_span!("treesitter.parse").entered();
-                head_content
+                let base_fns = base_content
                     .as_ref()
                     .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let head_fns = head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                    .unwrap_or_default();
+                let base_imports = base_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default();
+                let head_imports = head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default();
+
+                (base_fns, head_fns, base_imports, head_imports)
             };
 
             let fn_changes = {
@@ -224,23 +233,10 @@ pub fn build_manifest(
             let count = fn_changes.len();
             *total_functions_changed.get_or_insert(0) += count;
 
-            let base_imports = {
+            let import_change = {
                 let _span = tracing::info_span!("treesitter.extract_imports").entered();
-                base_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                    .unwrap_or_default()
+                diff_imports(&base_imports, &head_imports)
             };
-
-            let head_imports = {
-                let _span = tracing::info_span!("treesitter.extract_imports").entered();
-                head_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                    .unwrap_or_default()
-            };
-
-            let import_change = diff_imports(&base_imports, &head_imports);
 
             (Some(fn_changes), Some(import_change))
         } else {
@@ -419,20 +415,29 @@ pub fn build_worktree_manifest(
                 },
             };
 
-            let base_fns = {
-                let _span = tracing::info_span!("treesitter.parse").entered();
-                base_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                    .unwrap_or_default()
-            };
+            // Single treesitter.parse span wrapping all parsing (base+head functions+imports)
+            let (base_fns, head_fns, base_imports, head_imports) = {
+                let _parse_span =
+                    tracing::info_span!("treesitter.parse", language = language).entered();
 
-            let head_fns = {
-                let _span = tracing::info_span!("treesitter.parse").entered();
-                head_content
+                let base_fns = base_content
                     .as_ref()
                     .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let head_fns = head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_functions(c.as_bytes()).ok())
+                    .unwrap_or_default();
+                let base_imports = base_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default();
+                let head_imports = head_content
+                    .as_ref()
+                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
+                    .unwrap_or_default();
+
+                (base_fns, head_fns, base_imports, head_imports)
             };
 
             let fn_changes = {
@@ -442,23 +447,10 @@ pub fn build_worktree_manifest(
             let count = fn_changes.len();
             *total_functions_changed.get_or_insert(0) += count;
 
-            let base_imports = {
+            let import_change = {
                 let _span = tracing::info_span!("treesitter.extract_imports").entered();
-                base_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                    .unwrap_or_default()
+                diff_imports(&base_imports, &head_imports)
             };
-
-            let head_imports = {
-                let _span = tracing::info_span!("treesitter.extract_imports").entered();
-                head_content
-                    .as_ref()
-                    .and_then(|c| analyzer.extract_imports(c.as_bytes()).ok())
-                    .unwrap_or_default()
-            };
-
-            let import_change = diff_imports(&base_imports, &head_imports);
 
             (Some(fn_changes), Some(import_change))
         } else {

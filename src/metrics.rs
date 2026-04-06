@@ -13,6 +13,9 @@ const SIZE_BUCKETS: &[f64] = &[
     100.0, 500.0, 1000.0, 5000.0, 10000.0, 50000.0, 100000.0, 500000.0, 1000000.0,
 ];
 
+/// Histogram bucket boundaries for count-scale measurements (files, functions).
+const COUNT_BUCKETS: &[f64] = &[1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0];
+
 /// All OpenTelemetry instruments for git-prism metrics.
 ///
 /// Created lazily via [`get()`] from the global meter provider installed by
@@ -30,6 +33,13 @@ pub struct Metrics {
 
     // Performance histograms
     tool_duration_ms: Histogram<f64>,
+    // TODO: gix_operation_ms and treesitter_parse_ms are created so all instruments
+    // exist, but actual recording happens via span timing in the tracing/OTel bridge
+    // layer rather than explicit calls deep in the git/treesitter modules.
+    #[allow(dead_code)]
+    gix_operation_ms: Histogram<f64>,
+    #[allow(dead_code)]
+    treesitter_parse_ms: Histogram<f64>,
 
     // Token-efficiency histograms
     response_tokens_estimated: Histogram<f64>,
@@ -40,7 +50,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create all instruments from the global meter provider.
-    pub fn new() -> Self {
+    fn new() -> Self {
         let meter = global::meter("git-prism");
 
         let sessions_started = meter
@@ -99,13 +109,25 @@ impl Metrics {
         let manifest_files_returned = meter
             .f64_histogram("git_prism.manifest.files_returned")
             .with_description("Number of files in manifest response")
-            .with_boundaries(SIZE_BUCKETS.to_vec())
+            .with_boundaries(COUNT_BUCKETS.to_vec())
             .build();
 
         let manifest_functions_changed = meter
             .f64_histogram("git_prism.manifest.functions_changed")
             .with_description("Per-file function change count")
-            .with_boundaries(SIZE_BUCKETS.to_vec())
+            .with_boundaries(COUNT_BUCKETS.to_vec())
+            .build();
+
+        let gix_operation_ms = meter
+            .f64_histogram("git_prism.gix.operation_ms")
+            .with_description("Time spent in gix operations")
+            .with_boundaries(DURATION_BUCKETS.to_vec())
+            .build();
+
+        let treesitter_parse_ms = meter
+            .f64_histogram("git_prism.treesitter.parse_ms")
+            .with_description("Tree-sitter parse and extraction time")
+            .with_boundaries(DURATION_BUCKETS.to_vec())
             .build();
 
         Self {
@@ -121,6 +143,8 @@ impl Metrics {
             response_bytes,
             manifest_files_returned,
             manifest_functions_changed,
+            gix_operation_ms,
+            treesitter_parse_ms,
         }
     }
 
@@ -198,6 +222,22 @@ impl Metrics {
             ],
         );
     }
+
+    #[allow(dead_code)]
+    pub fn record_gix_operation(&self, operation: &str, duration_ms: f64) {
+        self.gix_operation_ms.record(
+            duration_ms,
+            &[KeyValue::new("operation", operation.to_string())],
+        );
+    }
+
+    #[allow(dead_code)]
+    pub fn record_treesitter_parse(&self, language: &str, duration_ms: f64) {
+        self.treesitter_parse_ms.record(
+            duration_ms,
+            &[KeyValue::new("language", language.to_string())],
+        );
+    }
 }
 
 /// Global singleton accessor for the [`Metrics`] instance.
@@ -232,6 +272,8 @@ mod tests {
         metrics.record_files_returned(5.0);
         metrics.record_functions_changed("rust", 3.0);
         metrics.record_truncated("test_tool", "max_files");
+        metrics.record_gix_operation("diff_commits", 15.0);
+        metrics.record_treesitter_parse("rust", 5.0);
     }
 
     #[test]
