@@ -1,8 +1,24 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+const CURSOR_VERSION: u32 = 1;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CursorError {
+    #[error("invalid cursor: {0}")]
+    InvalidEncoding(String),
+
+    #[error("unsupported cursor version {got}, expected {expected}")]
+    UnsupportedVersion { got: u32, expected: u32 },
+
+    #[error("cursor is stale: repository has changed since the cursor was created")]
+    StaleRepository,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PaginationCursor {
+    pub v: u32,
     pub offset: usize,
     pub base_sha: String,
     pub head_sha: String,
@@ -13,7 +29,7 @@ pub fn encode_cursor(cursor: &PaginationCursor) -> String {
     STANDARD.encode(json.as_bytes())
 }
 
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PaginationInfo {
     pub total_files: usize,
     pub page_start: usize,
@@ -29,43 +45,123 @@ pub fn validate_cursor(
     cursor: &PaginationCursor,
     current_base_sha: &str,
     current_head_sha: &str,
-) -> Result<(), String> {
+) -> Result<(), CursorError> {
+    if cursor.v != CURSOR_VERSION {
+        return Err(CursorError::UnsupportedVersion {
+            got: cursor.v,
+            expected: CURSOR_VERSION,
+        });
+    }
     if cursor.base_sha != current_base_sha || cursor.head_sha != current_head_sha {
-        return Err("cursor is stale: repository has changed since the cursor was created".into());
+        return Err(CursorError::StaleRepository);
     }
     Ok(())
 }
 
-pub fn decode_cursor(s: &str) -> Result<PaginationCursor, String> {
+pub fn decode_cursor(s: &str) -> Result<PaginationCursor, CursorError> {
     let bytes = STANDARD
         .decode(s)
-        .map_err(|e| format!("invalid cursor: {e}"))?;
-    let json = String::from_utf8(bytes).map_err(|e| format!("invalid cursor: {e}"))?;
-    serde_json::from_str(&json).map_err(|e| format!("invalid cursor: {e}"))
+        .map_err(|e| CursorError::InvalidEncoding(e.to_string()))?;
+    let json = String::from_utf8(bytes).map_err(|e| CursorError::InvalidEncoding(e.to_string()))?;
+    serde_json::from_str(&json).map_err(|e| CursorError::InvalidEncoding(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn make_cursor(offset: usize, base_sha: &str, head_sha: &str) -> PaginationCursor {
+        PaginationCursor {
+            v: CURSOR_VERSION,
+            offset,
+            base_sha: base_sha.into(),
+            head_sha: head_sha.into(),
+        }
+    }
+
     #[test]
     fn decode_rejects_invalid_base64() {
         let result = decode_cursor("not-valid-base64!!!");
+        assert!(matches!(result, Err(CursorError::InvalidEncoding(_))));
+    }
+
+    #[test]
+    fn decode_rejects_valid_base64_but_invalid_json() {
+        let encoded = STANDARD.encode(b"not json at all");
+        let result = decode_cursor(&encoded);
+        assert!(matches!(result, Err(CursorError::InvalidEncoding(_))));
+    }
+
+    #[test]
+    fn decode_rejects_empty_string() {
+        let result = decode_cursor("");
         assert!(result.is_err());
     }
 
     #[test]
     fn encode_then_decode_round_trips() {
-        let cursor = PaginationCursor {
-            offset: 100,
-            base_sha: "abc123".into(),
-            head_sha: "def456".into(),
-        };
+        let cursor = make_cursor(100, "abc123", "def456");
         let encoded = encode_cursor(&cursor);
         let decoded = decode_cursor(&encoded).unwrap();
+        assert_eq!(decoded.v, CURSOR_VERSION);
         assert_eq!(decoded.offset, 100);
         assert_eq!(decoded.base_sha, "abc123");
         assert_eq!(decoded.head_sha, "def456");
+    }
+
+    #[test]
+    fn encode_then_decode_round_trips_different_values() {
+        let cursor = make_cursor(
+            0,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5",
+        );
+        let encoded = encode_cursor(&cursor);
+        let decoded = decode_cursor(&encoded).unwrap();
+        assert_eq!(decoded.offset, 0);
+        assert_eq!(decoded.base_sha, cursor.base_sha);
+        assert_eq!(decoded.head_sha, cursor.head_sha);
+    }
+
+    #[test]
+    fn validate_cursor_succeeds_when_shas_match() {
+        let cursor = make_cursor(50, "abc", "def");
+        assert!(validate_cursor(&cursor, "abc", "def").is_ok());
+    }
+
+    #[test]
+    fn validate_cursor_fails_when_base_sha_changed() {
+        let cursor = make_cursor(50, "abc", "def");
+        assert!(matches!(
+            validate_cursor(&cursor, "DIFFERENT", "def"),
+            Err(CursorError::StaleRepository)
+        ));
+    }
+
+    #[test]
+    fn validate_cursor_fails_when_head_sha_changed() {
+        let cursor = make_cursor(50, "abc", "def");
+        assert!(matches!(
+            validate_cursor(&cursor, "abc", "DIFFERENT"),
+            Err(CursorError::StaleRepository)
+        ));
+    }
+
+    #[test]
+    fn validate_cursor_rejects_wrong_version() {
+        let cursor = PaginationCursor {
+            v: 99,
+            offset: 0,
+            base_sha: "abc".into(),
+            head_sha: "def".into(),
+        };
+        assert!(matches!(
+            validate_cursor(&cursor, "abc", "def"),
+            Err(CursorError::UnsupportedVersion {
+                got: 99,
+                expected: 1
+            })
+        ));
     }
 
     #[test]
@@ -81,38 +177,6 @@ mod tests {
         assert_eq!(json["page_start"], 0);
         assert_eq!(json["page_size"], 100);
         assert_eq!(json["next_cursor"], "abc");
-    }
-
-    #[test]
-    fn validate_cursor_succeeds_when_shas_match() {
-        let cursor = PaginationCursor {
-            offset: 50,
-            base_sha: "abc".into(),
-            head_sha: "def".into(),
-        };
-        assert!(validate_cursor(&cursor, "abc", "def").is_ok());
-    }
-
-    #[test]
-    fn validate_cursor_fails_when_base_sha_changed() {
-        let cursor = PaginationCursor {
-            offset: 50,
-            base_sha: "abc".into(),
-            head_sha: "def".into(),
-        };
-        let result = validate_cursor(&cursor, "DIFFERENT", "def");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_cursor_fails_when_head_sha_changed() {
-        let cursor = PaginationCursor {
-            offset: 50,
-            base_sha: "abc".into(),
-            head_sha: "def".into(),
-        };
-        let result = validate_cursor(&cursor, "abc", "DIFFERENT");
-        assert!(result.is_err());
     }
 
     #[test]
@@ -143,26 +207,5 @@ mod tests {
         assert_eq!(clamp_page_size(100), 100);
         assert_eq!(clamp_page_size(500), 500);
         assert_eq!(clamp_page_size(1), 1);
-    }
-
-    #[test]
-    fn decode_rejects_valid_base64_but_invalid_json() {
-        let encoded = STANDARD.encode(b"not json at all");
-        let result = decode_cursor(&encoded);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn encode_then_decode_round_trips_different_values() {
-        let cursor = PaginationCursor {
-            offset: 0,
-            base_sha: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".into(),
-            head_sha: "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5".into(),
-        };
-        let encoded = encode_cursor(&cursor);
-        let decoded = decode_cursor(&encoded).unwrap();
-        assert_eq!(decoded.offset, 0);
-        assert_eq!(decoded.base_sha, cursor.base_sha);
-        assert_eq!(decoded.head_sha, cursor.head_sha);
     }
 }
