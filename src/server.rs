@@ -205,7 +205,8 @@ impl GitPrismServer {
                 exclude_patterns: vec![],
                 include_function_analysis: true,
             };
-            let result = build_history(&repo_path, &args.base_ref, &args.head_ref, &options);
+            let result =
+                build_history(&repo_path, &args.base_ref, &args.head_ref, &options, 0, 500);
 
             match &result {
                 Ok(response) => {

@@ -250,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
                 exclude_patterns: vec![],
                 include_function_analysis: true,
             };
-            let history = build_history(&repo_path, base_ref, head_ref, &options)?;
+            let history = build_history(&repo_path, base_ref, head_ref, &options, 0, 500)?;
             println!("{}", serde_json::to_string_pretty(&history)?);
         }
         Commands::Snapshot { range, paths, repo } => {
