@@ -393,4 +393,351 @@ mod tests {
 
         assert_eq!(result.files.len(), 20);
     }
+
+    // --- Gap-closing tests for mutation testing ---
+
+    #[test]
+    fn it_does_not_truncate_at_exactly_max_snapshot_files() {
+        // Kills: replace > with >= at line 22 (MAX_SNAPSHOT_FILES boundary)
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        // Request exactly MAX_SNAPSHOT_FILES (20) paths
+        let paths: Vec<String> = (0..MAX_SNAPSHOT_FILES)
+            .map(|i| format!("file{i}.rs"))
+            .collect();
+        let result = build_snapshots(&path, "HEAD~1", "HEAD", &paths, &options).unwrap();
+
+        assert_eq!(
+            result.files.len(),
+            MAX_SNAPSHOT_FILES,
+            "should include all 20 files when exactly at the limit"
+        );
+    }
+
+    #[test]
+    fn it_truncates_at_21_snapshot_files() {
+        // Confirms > vs >= boundary: 21 files should be truncated to 20
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let paths: Vec<String> = (0..MAX_SNAPSHOT_FILES + 1)
+            .map(|i| format!("file{i}.rs"))
+            .collect();
+        let result = build_snapshots(&path, "HEAD~1", "HEAD", &paths, &options).unwrap();
+
+        assert_eq!(
+            result.files.len(),
+            MAX_SNAPSHOT_FILES,
+            "should truncate to MAX_SNAPSHOT_FILES when given 21 paths"
+        );
+    }
+
+    #[test]
+    fn it_detects_binary_via_before_content_only() {
+        // Kills: replace && with || at line 86, replace > with == / < / >= at line 86
+        // Tests the is_binary detection logic: before has empty content with size > 0
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit: binary file (null bytes)
+        std::fs::write(path.join("img.bin"), b"binary\x00data").unwrap();
+        Command::new("git")
+            .args(["add", "img.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: replace with text
+        std::fs::write(path.join("img.bin"), "now text").unwrap();
+        Command::new("git")
+            .args(["add", "img.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "convert to text"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["img.bin".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        // before is binary (empty content, size > 0), after is text
+        assert!(
+            file.is_binary,
+            "should detect binary from before content even when after is text"
+        );
+        let before = file.before.as_ref().unwrap();
+        assert!(
+            before.content.is_empty(),
+            "binary before content should be empty"
+        );
+        assert!(
+            before.size_bytes > 0,
+            "binary before should have non-zero size"
+        );
+    }
+
+    #[test]
+    fn it_detects_binary_via_after_content_only() {
+        // Kills: replace && with || at line 90, replace > with >= at line 90
+        // Tests is_binary detection via the after side
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit: text file
+        std::fs::write(path.join("data.bin"), "text content").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add text"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: binary content
+        std::fs::write(path.join("data.bin"), b"now\x00binary").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "make binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["data.bin".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(
+            file.is_binary,
+            "should detect binary from after content even when before is text"
+        );
+        let after = file.after.as_ref().unwrap();
+        assert!(
+            after.content.is_empty(),
+            "binary after content should be empty"
+        );
+        assert!(
+            after.size_bytes > 0,
+            "binary after should have non-zero size"
+        );
+        // Confirm before is NOT binary
+        let before = file.before.as_ref().unwrap();
+        assert!(
+            !before.content.is_empty(),
+            "text before should have content"
+        );
+    }
+
+    #[test]
+    fn it_is_not_binary_when_content_is_empty_and_size_is_zero() {
+        // Kills: replace > with == and replace > with >= at line 86 for size_bytes check
+        // A truly empty file (0 bytes) should NOT be detected as binary
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit: non-empty file
+        std::fs::write(path.join("empty.txt"), "something\n").unwrap();
+        Command::new("git")
+            .args(["add", "empty.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: truly empty file (0 bytes)
+        std::fs::write(path.join("empty.txt"), "").unwrap();
+        Command::new("git")
+            .args(["add", "empty.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "make empty"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["empty.txt".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(
+            !file.is_binary,
+            "empty file (0 bytes) should NOT be detected as binary"
+        );
+        let after = file.after.as_ref().unwrap();
+        assert_eq!(after.size_bytes, 0, "empty file should have size 0");
+    }
+
+    #[test]
+    fn it_truncates_at_exact_boundary() {
+        // Kills: replace > with >= at line 115 (build_file_content truncation)
+        let (_dir, path) = create_snapshot_test_repo();
+
+        // "fn main() {\n    println!(\"goodbye\");\n}\n" is 39 bytes
+        // Set max to exactly 39 — should NOT truncate
+        let options_exact = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 39,
+            line_range: None,
+        };
+        let result = build_snapshots(
+            &path,
+            "HEAD~1",
+            "HEAD",
+            &["hello.rs".into()],
+            &options_exact,
+        )
+        .unwrap();
+
+        let after = result.files[0].after.as_ref().unwrap();
+        assert!(
+            !after.truncated,
+            "should NOT truncate when size == max_file_size_bytes"
+        );
+        assert_eq!(after.size_bytes, 39);
+
+        // Set max to 38 — should truncate
+        let options_minus_one = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 38,
+            line_range: None,
+        };
+        let result = build_snapshots(
+            &path,
+            "HEAD~1",
+            "HEAD",
+            &["hello.rs".into()],
+            &options_minus_one,
+        )
+        .unwrap();
+
+        let after = result.files[0].after.as_ref().unwrap();
+        assert!(
+            after.truncated,
+            "should truncate when size > max_file_size_bytes"
+        );
+    }
+
+    #[test]
+    fn it_returns_non_empty_content_for_non_empty_text_file() {
+        // Kills: delete ! at line 132 in build_file_content (empty content check)
+        // The `!` negation matters: if content is NOT empty, push newline
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: Some((1, 1)),
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let after = result.files[0].after.as_ref().unwrap();
+        // Line 1 of hello.rs is "fn main() {"
+        assert!(
+            !after.content.is_empty(),
+            "content for line range should not be empty"
+        );
+        assert!(
+            after.content.ends_with('\n'),
+            "non-empty line-range content should end with newline"
+        );
+    }
 }

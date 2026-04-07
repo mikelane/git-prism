@@ -330,4 +330,108 @@ void nested_func() {
         let imports = analyzer.extract_imports(source).unwrap();
         assert!(imports.is_empty());
     }
+
+    // Kill line-offset mutants (+ with - or *) by checking exact line numbers.
+    #[test]
+    fn it_reports_correct_line_numbers_for_function_definition() {
+        let source = b"// line 1
+// line 2
+// line 3
+void compute(int x) {
+    int y = x + 1;
+    return;
+}
+";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].start_line, 4);
+        assert_eq!(functions[0].end_line, 7);
+    }
+
+    #[test]
+    fn it_reports_correct_line_numbers_for_declaration() {
+        let source = b"// line 1
+// line 2
+void compute(int x);
+";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].start_line, 3);
+        assert_eq!(functions[0].end_line, 3);
+    }
+
+    // Kill "delete match arm declaration" mutant: ensure function declarations
+    // (not definitions) are extracted.
+    #[test]
+    fn it_extracts_function_declaration_without_body() {
+        let source = b"int add(int a, int b);
+void greet(const char* name);
+";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "add");
+        assert_eq!(functions[0].signature, "int add(int a, int b);");
+        assert_eq!(functions[1].name, "greet");
+    }
+
+    // Kill "replace == with != in collect_functions" for declarator.kind() == "function_declarator"
+    #[test]
+    fn it_only_extracts_function_declarators_not_variable_declarations() {
+        let source = b"int x = 42;
+void foo(int a);
+";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "foo");
+    }
+
+    // Kill is_preprocessor_container -> true mutant
+    #[test]
+    fn it_extracts_standalone_function_not_in_preproc() {
+        let source = b"void standalone() {
+    return;
+}
+";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "standalone");
+    }
+
+    // Kill match guard with true for imports: ensure includes inside
+    // preproc_else and preproc_elif are also found (tests more container kinds)
+    #[test]
+    fn it_extracts_include_inside_preproc_else() {
+        let source = b"#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+";
+        let analyzer = CppAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0], "#include <windows.h>");
+        assert_eq!(imports[1], "#include <unistd.h>");
+    }
+
+    // Kill match guard with true for functions in preproc containers
+    #[test]
+    fn it_extracts_function_inside_preproc_else() {
+        let source = b"#ifdef _WIN32
+void win_init() { return; }
+#else
+void unix_init() { return; }
+#endif
+";
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "win_init");
+        assert_eq!(functions[1].name, "unix_init");
+    }
 }

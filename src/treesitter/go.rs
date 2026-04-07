@@ -235,4 +235,44 @@ import (
         let imports = analyzer.extract_imports(source).unwrap();
         assert!(imports.is_empty());
     }
+
+    // Kill line-offset mutants (+ with - or *) for function_declaration
+    #[test]
+    fn it_reports_correct_line_numbers_for_function() {
+        let source = b"package main
+
+// comment line 3
+// comment line 4
+func compute(a int, b int) int {
+    c := a + b
+    return c * 2
+}
+";
+        let analyzer = GoAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].start_line, 5);
+        assert_eq!(functions[0].end_line, 8);
+    }
+
+    // Kill line-offset mutants for method_declaration
+    #[test]
+    fn it_reports_correct_line_numbers_for_method() {
+        let source = b"package main
+
+// line 3
+// line 4
+// line 5
+func (s *Server) Start(port int) error {
+    s.port = port
+    return nil
+}
+";
+        let analyzer = GoAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "Server.Start");
+        assert_eq!(functions[0].start_line, 6);
+        assert_eq!(functions[0].end_line, 9);
+    }
 }

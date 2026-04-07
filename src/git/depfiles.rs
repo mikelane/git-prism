@@ -430,4 +430,113 @@ click = "^8.0"
         assert_eq!(result.added[0].name, "click");
         assert_eq!(result.added[0].new_version.as_deref(), Some(">=8.0"));
     }
+
+    // --- Gap-closing tests for mutation testing ---
+
+    // Kill mutant: line 73 replace == with != in parse_cargo_toml_deps
+    // If [dependencies] == becomes !=, then deps under [dependencies] would NOT be parsed.
+    #[test]
+    fn it_parses_only_dependencies_section() {
+        let content = "[dependencies]\nserde = \"1.0\"\n\n[package]\nname = \"foo\"\n";
+        let deps = parse_cargo_toml_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.get("serde").unwrap(), "1.0");
+    }
+
+    // Kill mutant: line 74 replace == with != / replace || with && in parse_cargo_toml_deps
+    // Test that [dev-dependencies] alone (without [dependencies]) is parsed.
+    #[test]
+    fn it_parses_dev_dependencies_section_alone() {
+        let content = "[dev-dependencies]\ninsta = \"1.30\"\n";
+        let deps = parse_cargo_toml_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.get("insta").unwrap(), "1.30");
+    }
+
+    // Kill mutant: line 74 replace == with != for build-dependencies
+    #[test]
+    fn it_parses_build_dependencies_section_alone() {
+        let content = "[build-dependencies]\ncc = \"1.0\"\n";
+        let deps = parse_cargo_toml_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.get("cc").unwrap(), "1.0");
+    }
+
+    // Kill mutant: line 131 replace || with && in parse_go_mod_deps
+    // Test "require (" (starts_with variant) and "require (" (exact match variant) separately.
+    #[test]
+    fn it_parses_go_mod_require_block_with_space_before_paren() {
+        // This matches trimmed == "require (" but also starts_with("require (")
+        let content =
+            "module example.com/foo\n\ngo 1.21\n\nrequire (\n\tgithub.com/pkg/errors v0.9.1\n)\n";
+        let deps = parse_go_mod_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.get("github.com/pkg/errors").unwrap(), "v0.9.1");
+    }
+
+    // Kill mutant: line 141 delete ! in parse_go_mod_deps
+    // A single-line require without parens: `require github.com/foo v1.0.0`
+    // If the `!` is deleted, lines containing '(' would be accepted as single-line requires.
+    #[test]
+    fn it_parses_go_mod_single_line_require() {
+        let content = "module example.com/foo\n\ngo 1.21\n\nrequire github.com/pkg/errors v0.9.1\n";
+        let deps = parse_go_mod_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.get("github.com/pkg/errors").unwrap(), "v0.9.1");
+    }
+
+    // Also test that a line like "require (" is NOT treated as single-line require
+    // (it should enter block mode, not try to parse "(" as a module path)
+    #[test]
+    fn it_does_not_treat_require_paren_as_single_line_dep() {
+        let content =
+            "module example.com/foo\n\ngo 1.21\n\nrequire (\n\tgithub.com/foo/bar v1.0.0\n)\n";
+        let deps = parse_go_mod_deps(content);
+        // Should find only "github.com/foo/bar", not "(" as a dep name
+        assert_eq!(deps.len(), 1);
+        assert!(deps.contains_key("github.com/foo/bar"));
+        assert!(!deps.contains_key("("));
+    }
+
+    // Kill mutant: line 147 replace >= with < in parse_go_mod_deps
+    // If >= 2 becomes < 2, single-line requires with exactly 2 parts would NOT be parsed.
+    #[test]
+    fn it_parses_go_mod_single_line_require_with_exactly_two_parts() {
+        let content = "module example.com/foo\n\ngo 1.21\n\nrequire github.com/one v2.0.0\n";
+        let deps = parse_go_mod_deps(content);
+        assert_eq!(
+            deps.len(),
+            1,
+            "single-line require with 2 parts must be parsed"
+        );
+        assert_eq!(deps.get("github.com/one").unwrap(), "v2.0.0");
+    }
+
+    // Kill mutant: line 235 replace match guard old_ver != new_ver with true
+    // If the guard becomes `true`, deps with the same version would appear in `changed`.
+    #[test]
+    fn it_does_not_report_unchanged_deps_as_changed() {
+        let before = "[dependencies]\nserde = \"1.0\"\n";
+        let after = "[dependencies]\nserde = \"1.0\"\n";
+        let result = diff_dependencies("Cargo.toml", before, after).unwrap();
+        assert_eq!(
+            result.changed.len(),
+            0,
+            "same version should not appear in changed"
+        );
+        assert_eq!(result.added.len(), 0);
+        assert_eq!(result.removed.len(), 0);
+    }
+
+    // Additional: test compute_dep_diff with a version change to confirm changed works
+    #[test]
+    fn it_reports_changed_dep_when_version_differs() {
+        let before = "[dependencies]\nserde = \"1.0\"\n";
+        let after = "[dependencies]\nserde = \"2.0\"\n";
+        let result = diff_dependencies("Cargo.toml", before, after).unwrap();
+        assert_eq!(result.changed.len(), 1);
+        assert_eq!(result.changed[0].name, "serde");
+        assert_eq!(result.changed[0].old_version.as_deref(), Some("1.0"));
+        assert_eq!(result.changed[0].new_version.as_deref(), Some("2.0"));
+    }
 }
