@@ -134,6 +134,11 @@ pub struct ManifestArgs {
     pub exclude_patterns: Vec<String>,
     #[serde(default = "default_true")]
     pub include_function_analysis: bool,
+    /// Opaque pagination cursor from a previous response.
+    pub cursor: Option<String>,
+    /// Maximum file entries per page (1-500, default 100).
+    #[serde(default = "default_page_size")]
+    pub page_size: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -156,6 +161,11 @@ pub struct HistoryArgs {
     pub base_ref: String,
     pub head_ref: String,
     pub repo_path: Option<String>,
+    /// Opaque pagination cursor from a previous response.
+    pub cursor: Option<String>,
+    /// Maximum commits per page (1-500, default 100).
+    #[serde(default = "default_page_size")]
+    pub page_size: usize,
 }
 
 fn default_true() -> bool {
@@ -164,6 +174,10 @@ fn default_true() -> bool {
 
 fn default_max_file_size() -> usize {
     100_000
+}
+
+fn default_page_size() -> usize {
+    100
 }
 
 // --- History types ---
@@ -486,5 +500,39 @@ mod tests {
         assert!(args.include_after);
         assert_eq!(args.max_file_size_bytes, 100_000);
         assert!(args.line_range.is_none());
+    }
+
+    #[test]
+    fn manifest_args_accepts_pagination_params() {
+        let json =
+            r#"{"base_ref": "main", "head_ref": "HEAD", "cursor": "abc123", "page_size": 50}"#;
+        let args: ManifestArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.cursor.as_deref(), Some("abc123"));
+        assert_eq!(args.page_size, 50);
+    }
+
+    #[test]
+    fn manifest_args_defaults_pagination_when_omitted() {
+        let json = r#"{"base_ref": "main"}"#;
+        let args: ManifestArgs = serde_json::from_str(json).unwrap();
+        assert!(args.cursor.is_none());
+        assert_eq!(args.page_size, 100);
+    }
+
+    #[test]
+    fn history_args_accepts_pagination_params() {
+        let json =
+            r#"{"base_ref": "HEAD~5", "head_ref": "HEAD", "cursor": "xyz", "page_size": 25}"#;
+        let args: HistoryArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.cursor.as_deref(), Some("xyz"));
+        assert_eq!(args.page_size, 25);
+    }
+
+    #[test]
+    fn history_args_defaults_pagination_when_omitted() {
+        let json = r#"{"base_ref": "HEAD~5", "head_ref": "HEAD"}"#;
+        let args: HistoryArgs = serde_json::from_str(json).unwrap();
+        assert!(args.cursor.is_none());
+        assert_eq!(args.page_size, 100);
     }
 }

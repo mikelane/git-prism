@@ -87,14 +87,33 @@ impl GitPrismServer {
                 root_span.record("ref_head", "worktree");
             }
 
+            let page_size = crate::pagination::clamp_page_size(args.page_size);
+            let offset = if let Some(ref cursor_str) = args.cursor {
+                let cursor =
+                    crate::pagination::decode_cursor(cursor_str).map_err(|e| e.to_string())?;
+                // Validate will be done after we resolve refs below
+                cursor.offset
+            } else {
+                0
+            };
+
             let options = ManifestOptions {
                 include_patterns: args.include_patterns,
                 exclude_patterns: args.exclude_patterns,
                 include_function_analysis: args.include_function_analysis,
             };
             let result = match args.head_ref {
-                Some(head) => build_manifest(&repo_path, &args.base_ref, &head, &options, 0, 200),
-                None => build_worktree_manifest(&repo_path, &args.base_ref, &options, 0, 200),
+                Some(head) => build_manifest(
+                    &repo_path,
+                    &args.base_ref,
+                    &head,
+                    &options,
+                    offset,
+                    page_size,
+                ),
+                None => {
+                    build_worktree_manifest(&repo_path, &args.base_ref, &options, offset, page_size)
+                }
             };
 
             match &result {
@@ -200,13 +219,28 @@ impl GitPrismServer {
             );
             let _enter = root_span.enter();
 
+            let page_size = crate::pagination::clamp_page_size(args.page_size);
+            let offset = if let Some(ref cursor_str) = args.cursor {
+                let cursor =
+                    crate::pagination::decode_cursor(cursor_str).map_err(|e| e.to_string())?;
+                cursor.offset
+            } else {
+                0
+            };
+
             let options = ManifestOptions {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
                 include_function_analysis: true,
             };
-            let result =
-                build_history(&repo_path, &args.base_ref, &args.head_ref, &options, 0, 500);
+            let result = build_history(
+                &repo_path,
+                &args.base_ref,
+                &args.head_ref,
+                &options,
+                offset,
+                page_size,
+            );
 
             match &result {
                 Ok(response) => {
