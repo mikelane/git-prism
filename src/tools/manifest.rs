@@ -2340,27 +2340,32 @@ mod tests {
 
     #[test]
     fn it_is_paginating_only_when_total_exceeds_page_size() {
-        let (_dir, path) = create_repo_with_n_files(3);
+        // create_repo_with_go_file produces 2 changed files (main.go + README.md)
+        // with tree-sitter support on main.go, so total_functions_changed is meaningful
+        let (_dir, path) = create_repo_with_go_file();
         let options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
-            include_function_analysis: false,
+            include_function_analysis: true,
         };
 
-        // 3 files, page_size=3 → all fit, no cursor
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
-        assert_eq!(manifest.files.len(), 3);
-        assert!(manifest.pagination.next_cursor.is_none());
-
-        // 3 files, page_size=2 → paginating, cursor present
+        // 2 files, page_size=2 → NOT paginating, total_functions_changed present
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 2).unwrap();
         assert_eq!(manifest.files.len(), 2);
-        assert!(manifest.pagination.next_cursor.is_some());
-
-        // 3 files, page_size=4 → all fit, no cursor
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 4).unwrap();
-        assert_eq!(manifest.files.len(), 3);
         assert!(manifest.pagination.next_cursor.is_none());
+        assert!(
+            manifest.summary.total_functions_changed.is_some(),
+            "should have function count when not paginating"
+        );
+
+        // 2 files, page_size=1 → paginating, total_functions_changed is None
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert!(manifest.pagination.next_cursor.is_some());
+        assert!(
+            manifest.summary.total_functions_changed.is_none(),
+            "should suppress function count when paginating"
+        );
     }
 
     #[test]
@@ -2513,5 +2518,145 @@ mod tests {
             manifest.files.is_empty(),
             "offset at total should return empty"
         );
+    }
+
+    #[test]
+    fn it_worktree_is_paginating_only_when_total_exceeds_page_size() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage 3 new files
+        for i in 0..3 {
+            std::fs::write(path.join(format!("file{i}.txt")), format!("content {i}\n")).unwrap();
+        }
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // 3 staged files, page_size=3 → not paginating, no cursor
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
+        assert_eq!(manifest.files.len(), 3);
+        assert!(manifest.pagination.next_cursor.is_none());
+
+        // page_size=2 → paginating, cursor present
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 2).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.pagination.next_cursor.is_some());
+    }
+
+    #[test]
+    fn it_worktree_counts_summary_correctly_with_pagination() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Commit files that will be modified and deleted
+        std::fs::write(path.join("modify.txt"), "old\n").unwrap();
+        std::fs::write(path.join("delete.txt"), "gone\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage: add new file, modify one, delete one
+        std::fs::write(path.join("added.txt"), "new\n").unwrap();
+        std::fs::write(path.join("modify.txt"), "changed\n").unwrap();
+        std::fs::remove_file(path.join("delete.txt")).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // page_size=1 to force pagination, but summary must reflect all 3 changes
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(manifest.summary.files_added, 1);
+        assert_eq!(manifest.summary.files_modified, 1);
+        assert_eq!(manifest.summary.files_deleted, 1);
+        assert_eq!(manifest.summary.total_files_changed, 3);
+        assert!(manifest.summary.total_lines_added > 0);
+        assert!(manifest.summary.total_lines_removed > 0);
+    }
+
+    #[test]
+    fn it_worktree_returns_exact_page_boundary_files() {
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // offset at last file
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 2, 100).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+
+        // offset exactly at total
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 3, 100).unwrap();
+        assert!(manifest.files.is_empty());
+        assert!(manifest.pagination.next_cursor.is_none());
     }
 }
