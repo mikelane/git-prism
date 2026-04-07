@@ -9,13 +9,14 @@ mod telemetry;
 mod tools;
 mod treesitter;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
+use pagination::decode_cursor;
 use tools::{
-    ManifestOptions, SnapshotOptions, build_history, build_manifest, build_snapshots,
-    build_worktree_manifest,
+    HistoryResponse, ManifestOptions, ManifestResponse, SnapshotOptions, build_history,
+    build_manifest, build_snapshots, build_worktree_manifest,
 };
 
 #[derive(Parser)]
@@ -40,6 +41,9 @@ enum Commands {
         /// Path to the git repository (defaults to current directory)
         #[arg(long)]
         repo: Option<String>,
+        /// Page size for internal pagination (default 500)
+        #[arg(long, default_value_t = 500)]
+        page_size: usize,
     },
     /// Output file snapshots as JSON (CLI mode, no MCP)
     Snapshot {
@@ -59,6 +63,9 @@ enum Commands {
         /// Path to the git repository (defaults to current directory)
         #[arg(long)]
         repo: Option<String>,
+        /// Page size for internal pagination (default 500)
+        #[arg(long, default_value_t = 500)]
+        page_size: usize,
     },
     /// List supported languages for function-level analysis
     Languages,
@@ -96,6 +103,117 @@ fn parse_range(range: &str) -> RefRange<'_> {
     } else {
         RefRange::WorktreeCompare { base: range }
     }
+}
+
+/// Collect all manifest pages into a single combined response.
+///
+/// Loops through pages using the given `page_size` until `next_cursor` is `None`,
+/// accumulating all file entries. Returns a single `ManifestResponse` with the
+/// first page's metadata/summary and all collected files.
+fn collect_all_manifest_pages(
+    repo_path: &Path,
+    base: &str,
+    head: &str,
+    options: &ManifestOptions,
+    page_size: usize,
+) -> anyhow::Result<ManifestResponse> {
+    let page_size = crate::pagination::clamp_page_size(page_size);
+    let mut all_files = Vec::new();
+
+    let first_page = build_manifest(repo_path, base, head, options, 0, page_size)?;
+    all_files.extend(first_page.files);
+
+    let mut next_cursor = first_page.pagination.next_cursor.clone();
+    while let Some(ref cursor_str) = next_cursor {
+        let cursor = decode_cursor(cursor_str)?;
+        let page = build_manifest(repo_path, base, head, options, cursor.offset, page_size)?;
+        all_files.extend(page.files);
+        next_cursor = page.pagination.next_cursor.clone();
+    }
+
+    let total_items = all_files.len();
+    Ok(ManifestResponse {
+        metadata: first_page.metadata,
+        summary: first_page.summary,
+        files: all_files,
+        dependency_changes: first_page.dependency_changes,
+        pagination: pagination::PaginationInfo {
+            total_items,
+            page_start: 0,
+            page_size: total_items,
+            next_cursor: None,
+        },
+    })
+}
+
+/// Collect all manifest pages in worktree mode into a single combined response.
+fn collect_all_worktree_manifest_pages(
+    repo_path: &Path,
+    base: &str,
+    options: &ManifestOptions,
+    page_size: usize,
+) -> anyhow::Result<ManifestResponse> {
+    let page_size = crate::pagination::clamp_page_size(page_size);
+    let mut all_files = Vec::new();
+
+    let first_page = build_worktree_manifest(repo_path, base, options, 0, page_size)?;
+    all_files.extend(first_page.files);
+
+    let mut next_cursor = first_page.pagination.next_cursor.clone();
+    while let Some(ref cursor_str) = next_cursor {
+        let cursor = decode_cursor(cursor_str)?;
+        let page = build_worktree_manifest(repo_path, base, options, cursor.offset, page_size)?;
+        all_files.extend(page.files);
+        next_cursor = page.pagination.next_cursor.clone();
+    }
+
+    let total_items = all_files.len();
+    Ok(ManifestResponse {
+        metadata: first_page.metadata,
+        summary: first_page.summary,
+        files: all_files,
+        dependency_changes: first_page.dependency_changes,
+        pagination: pagination::PaginationInfo {
+            total_items,
+            page_start: 0,
+            page_size: total_items,
+            next_cursor: None,
+        },
+    })
+}
+
+/// Collect all history pages into a single combined response.
+fn collect_all_history_pages(
+    repo_path: &Path,
+    base: &str,
+    head: &str,
+    options: &ManifestOptions,
+    page_size: usize,
+) -> anyhow::Result<HistoryResponse> {
+    let page_size = crate::pagination::clamp_page_size(page_size);
+    let mut all_commits = Vec::new();
+
+    let first_page = build_history(repo_path, base, head, options, 0, page_size)?;
+    all_commits.extend(first_page.commits);
+
+    let mut next_cursor = first_page.pagination.next_cursor.clone();
+    while let Some(ref cursor_str) = next_cursor {
+        let cursor = decode_cursor(cursor_str)?;
+        let page = build_history(repo_path, base, head, options, cursor.offset, page_size)?;
+        all_commits.extend(page.commits);
+        next_cursor = page.pagination.next_cursor.clone();
+    }
+
+    let total_items = all_commits.len();
+    Ok(HistoryResponse {
+        commits: all_commits,
+        pagination: pagination::PaginationInfo {
+            total_items,
+            page_start: 0,
+            page_size: total_items,
+            next_cursor: None,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +324,245 @@ mod tests {
         let result = validate_commit_range(&ref_range, "snapshot");
         assert!(result.is_ok());
     }
+
+    // --- Auto-pagination helper tests ---
+
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    /// Create a repo with many file changes so pagination kicks in with small page sizes.
+    fn create_repo_with_many_files(file_count: usize) -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Base commit
+        std::fs::write(path.join("README.md"), "# base\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base commit"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Add many files in a second commit
+        for i in 0..file_count {
+            std::fs::write(path.join(format!("file_{i}.txt")), format!("content {i}\n")).unwrap();
+        }
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add many files"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    fn create_repo_with_many_commits(commit_count: usize) -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Anchor commit
+        std::fs::write(path.join("README.md"), "# anchor\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "anchor"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        for i in 0..commit_count {
+            std::fs::write(path.join(format!("file_{i}.txt")), format!("content {i}\n")).unwrap();
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            Command::new("git")
+                .args(["commit", "-m", &format!("commit {i}")])
+                .current_dir(&path)
+                .output()
+                .unwrap();
+        }
+
+        (dir, path)
+    }
+
+    #[test]
+    fn collect_all_manifest_pages_returns_all_files_when_single_page() {
+        let (_dir, path) = create_repo_with_many_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 500).unwrap();
+
+        assert_eq!(result.files.len(), 3);
+        assert!(result.pagination.next_cursor.is_none());
+        assert_eq!(result.pagination.total_items, 3);
+    }
+
+    #[test]
+    fn collect_all_manifest_pages_collects_across_multiple_pages() {
+        let (_dir, path) = create_repo_with_many_files(5);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // Use page_size=2, so we need 3 pages for 5 files
+        let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 2).unwrap();
+
+        assert_eq!(result.files.len(), 5);
+        assert!(result.pagination.next_cursor.is_none());
+        assert_eq!(result.pagination.total_items, 5);
+    }
+
+    #[test]
+    fn collect_all_manifest_pages_preserves_metadata_from_first_page() {
+        let (_dir, path) = create_repo_with_many_files(5);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 2).unwrap();
+
+        assert_eq!(result.metadata.base_ref, "HEAD~1");
+        assert_eq!(result.metadata.head_ref, "HEAD");
+        assert!(!result.metadata.base_sha.is_empty());
+        assert!(!result.metadata.head_sha.is_empty());
+    }
+
+    #[test]
+    fn collect_all_manifest_pages_with_page_size_1() {
+        let (_dir, path) = create_repo_with_many_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // page_size=1 forces 3 pages
+        let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 1).unwrap();
+
+        assert_eq!(result.files.len(), 3);
+        assert!(result.pagination.next_cursor.is_none());
+    }
+
+    #[test]
+    fn collect_all_history_pages_returns_all_commits_when_single_page() {
+        let (_dir, path) = create_repo_with_many_commits(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 500).unwrap();
+
+        assert_eq!(result.commits.len(), 3);
+        assert!(result.pagination.next_cursor.is_none());
+        assert_eq!(result.pagination.total_items, 3);
+    }
+
+    #[test]
+    fn collect_all_history_pages_collects_across_multiple_pages() {
+        let (_dir, path) = create_repo_with_many_commits(5);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // page_size=2 forces 3 pages for 5 commits
+        let result = collect_all_history_pages(&path, "HEAD~5", "HEAD", &options, 2).unwrap();
+
+        assert_eq!(result.commits.len(), 5);
+        assert!(result.pagination.next_cursor.is_none());
+        assert_eq!(result.pagination.total_items, 5);
+    }
+
+    #[test]
+    fn collect_all_history_pages_preserves_commit_order() {
+        let (_dir, path) = create_repo_with_many_commits(4);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = collect_all_history_pages(&path, "HEAD~4", "HEAD", &options, 2).unwrap();
+
+        assert_eq!(result.commits.len(), 4);
+        assert_eq!(result.commits[0].metadata.message, "commit 0");
+        assert_eq!(result.commits[1].metadata.message, "commit 1");
+        assert_eq!(result.commits[2].metadata.message, "commit 2");
+        assert_eq!(result.commits[3].metadata.message, "commit 3");
+    }
+
+    #[test]
+    fn collect_all_history_pages_with_page_size_1() {
+        let (_dir, path) = create_repo_with_many_commits(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 1).unwrap();
+
+        assert_eq!(result.commits.len(), 3);
+        assert!(result.pagination.next_cursor.is_none());
+    }
 }
 
 #[tokio::main]
@@ -216,7 +573,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve => {
             server::run_server().await?;
         }
-        Commands::Manifest { range, repo } => {
+        Commands::Manifest {
+            range,
+            repo,
+            page_size,
+        } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
             });
@@ -227,15 +588,19 @@ async fn main() -> anyhow::Result<()> {
             };
             let manifest = match parse_range(&range) {
                 RefRange::CommitRange { base, head } => {
-                    build_manifest(&repo_path, base, head, &options, 0, 200)?
+                    collect_all_manifest_pages(&repo_path, base, head, &options, page_size)?
                 }
                 RefRange::WorktreeCompare { base } => {
-                    build_worktree_manifest(&repo_path, base, &options, 0, 200)?
+                    collect_all_worktree_manifest_pages(&repo_path, base, &options, page_size)?
                 }
             };
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
-        Commands::History { range, repo } => {
+        Commands::History {
+            range,
+            repo,
+            page_size,
+        } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
             });
@@ -250,7 +615,8 @@ async fn main() -> anyhow::Result<()> {
                 exclude_patterns: vec![],
                 include_function_analysis: true,
             };
-            let history = build_history(&repo_path, base_ref, head_ref, &options, 0, 500)?;
+            let history =
+                collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
             println!("{}", serde_json::to_string_pretty(&history)?);
         }
         Commands::Snapshot { range, paths, repo } => {
