@@ -93,14 +93,17 @@ impl GitPrismServer {
                 include_function_analysis: args.include_function_analysis,
             };
             let result = match args.head_ref {
-                Some(head) => build_manifest(&repo_path, &args.base_ref, &head, &options),
-                None => build_worktree_manifest(&repo_path, &args.base_ref, &options),
+                Some(head) => build_manifest(&repo_path, &args.base_ref, &head, &options, 0, 200),
+                None => build_worktree_manifest(&repo_path, &args.base_ref, &options, 0, 200),
             };
 
             match &result {
                 Ok(manifest) => {
                     root_span.record("response_files_count", manifest.files.len() as i64);
-                    root_span.record("response_truncated", manifest.truncated);
+                    root_span.record(
+                        "response_truncated",
+                        manifest.pagination.next_cursor.is_some(),
+                    );
                     // Serialize once for byte counting — also used for metrics outside spawn_blocking.
                     let bytes = serde_json::to_vec(manifest).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
@@ -142,8 +145,8 @@ impl GitPrismServer {
                     }
                 }
 
-                if response.truncated {
-                    metrics.record_truncated(tool_name, "max_files");
+                if response.pagination.next_cursor.is_some() {
+                    metrics.record_truncated(tool_name, "paginated");
                 }
 
                 // Ref pattern classification

@@ -31,7 +31,7 @@ pub fn encode_cursor(cursor: &PaginationCursor) -> String {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PaginationInfo {
-    pub total_files: usize,
+    pub total_items: usize,
     pub page_start: usize,
     pub page_size: usize,
     pub next_cursor: Option<String>,
@@ -167,13 +167,13 @@ mod tests {
     #[test]
     fn pagination_info_serializes_with_cursor() {
         let info = PaginationInfo {
-            total_files: 300,
+            total_items: 300,
             page_start: 0,
             page_size: 100,
             next_cursor: Some("abc".into()),
         };
         let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["total_files"], 300);
+        assert_eq!(json["total_items"], 300);
         assert_eq!(json["page_start"], 0);
         assert_eq!(json["page_size"], 100);
         assert_eq!(json["next_cursor"], "abc");
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn pagination_info_serializes_null_cursor_on_last_page() {
         let info = PaginationInfo {
-            total_files: 50,
+            total_items: 50,
             page_start: 0,
             page_size: 100,
             next_cursor: None,

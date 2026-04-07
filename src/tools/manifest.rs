@@ -7,13 +7,12 @@ use crate::git::depfiles::{diff_dependencies, is_dependency_file};
 use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
+use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
 use crate::tools::types::{
     FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
-    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, TruncationInfo, detect_language,
+    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, detect_language,
 };
 use crate::treesitter::{Function, analyzer_for_extension};
-
-const MAX_FILES: usize = 200;
 
 pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<FunctionChange> {
     let base_map: HashMap<&str, &Function> =
@@ -120,6 +119,8 @@ pub fn build_manifest(
     base_ref: &str,
     head_ref: &str,
     options: &ManifestOptions,
+    offset: usize,
+    page_size: usize,
 ) -> Result<ManifestResponse, ToolError> {
     let reader = RepoReader::open(repo_path)?;
 
@@ -150,36 +151,82 @@ pub fn build_manifest(
         });
     }
 
-    // Truncation
     let total_files = files_to_process.len();
-    let truncated = total_files > MAX_FILES;
-    let truncation_info = if truncated {
-        files_to_process.truncate(MAX_FILES);
-        Some(TruncationInfo {
-            total_files,
-            files_included: MAX_FILES,
-            files_omitted: total_files - MAX_FILES,
-        })
-    } else {
-        None
-    };
+    let is_paginating = total_files > page_size;
 
-    let mut manifest_files = Vec::new();
-    let mut dependency_changes = Vec::new();
-    let mut languages_set = std::collections::HashSet::new();
-    let mut total_functions_changed: Option<usize> = None;
+    // Build summary from ALL files (before pagination)
+    let mut all_languages_set = std::collections::HashSet::new();
+    let mut summary_files_added = 0usize;
+    let mut summary_files_modified = 0usize;
+    let mut summary_files_deleted = 0usize;
+    let mut summary_files_renamed = 0usize;
+    let mut summary_lines_added = 0usize;
+    let mut summary_lines_removed = 0usize;
 
     for file_change in &files_to_process {
+        let language = detect_language(&file_change.path);
+        if language != "unknown" {
+            all_languages_set.insert(language.to_string());
+        }
+        match file_change.change_type {
+            ChangeType::Added => summary_files_added += 1,
+            ChangeType::Modified => summary_files_modified += 1,
+            ChangeType::Deleted => summary_files_deleted += 1,
+            ChangeType::Renamed | ChangeType::Copied => summary_files_renamed += 1,
+        }
+        summary_lines_added += file_change.lines_added;
+        summary_lines_removed += file_change.lines_removed;
+    }
+
+    let mut all_languages_affected: Vec<String> = all_languages_set.into_iter().collect();
+    all_languages_affected.sort();
+
+    // Dependency analysis runs on ALL files (not paginated)
+    let mut dependency_changes = Vec::new();
+    for file_change in &files_to_process {
+        if is_dependency_file(&file_change.path) {
+            let _dep_span = tracing::info_span!("manifest.diff_dependencies").entered();
+            let base_content = match file_change.change_type {
+                ChangeType::Added => String::new(),
+                _ => reader
+                    .read_file_at_ref(base_ref, &file_change.path)
+                    .unwrap_or_default(),
+            };
+
+            let head_content = match file_change.change_type {
+                ChangeType::Deleted => String::new(),
+                _ => reader
+                    .read_file_at_ref(head_ref, &file_change.path)
+                    .unwrap_or_default(),
+            };
+
+            if let Some(dep_diff) =
+                diff_dependencies(&file_change.path, &base_content, &head_content)
+            {
+                dependency_changes.push(dep_diff);
+            }
+        }
+    }
+
+    // Apply pagination: select only the current page of files
+    let page_end = (offset + page_size).min(total_files);
+    let page_files = if offset < total_files {
+        &files_to_process[offset..page_end]
+    } else {
+        &[]
+    };
+
+    // Tree-sitter analysis ONLY on paginated files
+    let mut manifest_files = Vec::new();
+    let mut total_functions_changed: Option<usize> = None;
+
+    for file_change in page_files {
         let language = detect_language(&file_change.path);
         let ext = extension_from_path(&file_change.path);
         let is_generated = {
             let _span = tracing::info_span!("manifest.detect_generated").entered();
             GeneratedFileDetector::is_generated(&file_change.path, None)
         };
-
-        if language != "unknown" {
-            languages_set.insert(language.to_string());
-        }
 
         let _file_span =
             tracing::info_span!("manifest.analyze_file", file.language = language).entered();
@@ -225,15 +272,15 @@ pub fn build_manifest(
                 (base_fns, head_fns, base_imports, head_imports)
             };
 
-            // Span names match the spec tree: treesitter.extract_functions produces
-            // the function change list by diffing base vs head extracted functions.
             let fn_changes = {
                 let _span = tracing::info_span!("treesitter.extract_functions").entered();
                 diff_functions(&base_fns, &head_fns)
             };
 
-            let count = fn_changes.len();
-            *total_functions_changed.get_or_insert(0) += count;
+            if !is_paginating {
+                let count = fn_changes.len();
+                *total_functions_changed.get_or_insert(0) += count;
+            }
 
             let import_change = {
                 let _span = tracing::info_span!("treesitter.extract_imports").entered();
@@ -244,30 +291,6 @@ pub fn build_manifest(
         } else {
             (None, None)
         };
-
-        // Dependency analysis
-        if is_dependency_file(&file_change.path) {
-            let _dep_span = tracing::info_span!("manifest.diff_dependencies").entered();
-            let base_content = match file_change.change_type {
-                ChangeType::Added => String::new(),
-                _ => reader
-                    .read_file_at_ref(base_ref, &file_change.path)
-                    .unwrap_or_default(),
-            };
-
-            let head_content = match file_change.change_type {
-                ChangeType::Deleted => String::new(),
-                _ => reader
-                    .read_file_at_ref(head_ref, &file_change.path)
-                    .unwrap_or_default(),
-            };
-
-            if let Some(dep_diff) =
-                diff_dependencies(&file_change.path, &base_content, &head_content)
-            {
-                dependency_changes.push(dep_diff);
-            }
-        }
 
         manifest_files.push(ManifestFileEntry {
             path: file_change.path.clone(),
@@ -286,31 +309,31 @@ pub fn build_manifest(
         });
     }
 
-    let mut languages_affected: Vec<String> = languages_set.into_iter().collect();
-    languages_affected.sort();
+    let next_cursor = if page_end < total_files {
+        Some(encode_cursor(&PaginationCursor {
+            v: 1,
+            offset: page_end,
+            base_sha: base_commit.sha.clone(),
+            head_sha: head_commit.sha.clone(),
+        }))
+    } else {
+        None
+    };
 
     let summary = ManifestSummary {
-        total_files_changed: manifest_files.len(),
-        files_added: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Added)
-            .count(),
-        files_modified: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Modified)
-            .count(),
-        files_deleted: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Deleted)
-            .count(),
-        files_renamed: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Renamed)
-            .count(),
-        total_lines_added: manifest_files.iter().map(|f| f.lines_added).sum(),
-        total_lines_removed: manifest_files.iter().map(|f| f.lines_removed).sum(),
-        total_functions_changed,
-        languages_affected,
+        total_files_changed: total_files,
+        files_added: summary_files_added,
+        files_modified: summary_files_modified,
+        files_deleted: summary_files_deleted,
+        files_renamed: summary_files_renamed,
+        total_lines_added: summary_lines_added,
+        total_lines_removed: summary_lines_removed,
+        total_functions_changed: if is_paginating {
+            None
+        } else {
+            total_functions_changed
+        },
+        languages_affected: all_languages_affected,
     };
 
     Ok(ManifestResponse {
@@ -326,8 +349,12 @@ pub fn build_manifest(
         summary,
         files: manifest_files,
         dependency_changes,
-        truncated,
-        truncation_info,
+        pagination: PaginationInfo {
+            total_items: total_files,
+            page_start: offset,
+            page_size,
+            next_cursor,
+        },
     })
 }
 
@@ -341,6 +368,8 @@ pub fn build_worktree_manifest(
     repo_path: &Path,
     base_ref: &str,
     options: &ManifestOptions,
+    offset: usize,
+    page_size: usize,
 ) -> Result<ManifestResponse, ToolError> {
     let reader = RepoReader::open(repo_path)?;
     let base_commit = reader.resolve_commit(base_ref)?;
@@ -368,33 +397,54 @@ pub fn build_worktree_manifest(
     }
 
     let total_files = files_to_process.len();
-    let truncated = total_files > MAX_FILES;
-    let truncation_info = if truncated {
-        files_to_process.truncate(MAX_FILES);
-        Some(TruncationInfo {
-            total_files,
-            files_included: MAX_FILES,
-            files_omitted: total_files - MAX_FILES,
-        })
-    } else {
-        None
-    };
+    let is_paginating = total_files > page_size;
 
-    let mut manifest_files = Vec::new();
-    let mut languages_set = std::collections::HashSet::new();
-    let mut total_functions_changed: Option<usize> = None;
+    // Build summary from ALL files (before pagination)
+    let mut all_languages_set = std::collections::HashSet::new();
+    let mut summary_files_added = 0usize;
+    let mut summary_files_modified = 0usize;
+    let mut summary_files_deleted = 0usize;
+    let mut summary_files_renamed = 0usize;
+    let mut summary_lines_added = 0usize;
+    let mut summary_lines_removed = 0usize;
 
     for file_change in &files_to_process {
+        let language = detect_language(&file_change.path);
+        if language != "unknown" {
+            all_languages_set.insert(language.to_string());
+        }
+        match file_change.change_type {
+            ChangeType::Added => summary_files_added += 1,
+            ChangeType::Modified => summary_files_modified += 1,
+            ChangeType::Deleted => summary_files_deleted += 1,
+            ChangeType::Renamed | ChangeType::Copied => summary_files_renamed += 1,
+        }
+        summary_lines_added += file_change.lines_added;
+        summary_lines_removed += file_change.lines_removed;
+    }
+
+    let mut all_languages_affected: Vec<String> = all_languages_set.into_iter().collect();
+    all_languages_affected.sort();
+
+    // Apply pagination: select only the current page of files
+    let page_end = (offset + page_size).min(total_files);
+    let page_files = if offset < total_files {
+        &files_to_process[offset..page_end]
+    } else {
+        &[]
+    };
+
+    // Tree-sitter analysis ONLY on paginated files
+    let mut manifest_files = Vec::new();
+    let mut total_functions_changed: Option<usize> = None;
+
+    for file_change in page_files {
         let language = detect_language(&file_change.path);
         let ext = extension_from_path(&file_change.path);
         let is_generated = {
             let _span = tracing::info_span!("manifest.detect_generated").entered();
             GeneratedFileDetector::is_generated(&file_change.path, None)
         };
-
-        if language != "unknown" {
-            languages_set.insert(language.to_string());
-        }
 
         let _file_span =
             tracing::info_span!("manifest.analyze_file", file.language = language).entered();
@@ -417,7 +467,6 @@ pub fn build_worktree_manifest(
                 },
             };
 
-            // Single treesitter.parse span wrapping all parsing (base+head functions+imports)
             let (base_fns, head_fns, base_imports, head_imports) = {
                 let _parse_span =
                     tracing::info_span!("treesitter.parse", language = language).entered();
@@ -442,14 +491,15 @@ pub fn build_worktree_manifest(
                 (base_fns, head_fns, base_imports, head_imports)
             };
 
-            // Span names match the spec tree: treesitter.extract_functions produces
-            // the function change list by diffing base vs head extracted functions.
             let fn_changes = {
                 let _span = tracing::info_span!("treesitter.extract_functions").entered();
                 diff_functions(&base_fns, &head_fns)
             };
-            let count = fn_changes.len();
-            *total_functions_changed.get_or_insert(0) += count;
+
+            if !is_paginating {
+                let count = fn_changes.len();
+                *total_functions_changed.get_or_insert(0) += count;
+            }
 
             let import_change = {
                 let _span = tracing::info_span!("treesitter.extract_imports").entered();
@@ -478,31 +528,31 @@ pub fn build_worktree_manifest(
         });
     }
 
-    let mut languages_affected: Vec<String> = languages_set.into_iter().collect();
-    languages_affected.sort();
+    let next_cursor = if page_end < total_files {
+        Some(encode_cursor(&PaginationCursor {
+            v: 1,
+            offset: page_end,
+            base_sha: base_commit.sha.clone(),
+            head_sha: "WORKTREE".to_string(),
+        }))
+    } else {
+        None
+    };
 
     let summary = ManifestSummary {
-        total_files_changed: manifest_files.len(),
-        files_added: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Added)
-            .count(),
-        files_modified: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Modified)
-            .count(),
-        files_deleted: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Deleted)
-            .count(),
-        files_renamed: manifest_files
-            .iter()
-            .filter(|f| f.change_type == ChangeType::Renamed)
-            .count(),
-        total_lines_added: manifest_files.iter().map(|f| f.lines_added).sum(),
-        total_lines_removed: manifest_files.iter().map(|f| f.lines_removed).sum(),
-        total_functions_changed,
-        languages_affected,
+        total_files_changed: total_files,
+        files_added: summary_files_added,
+        files_modified: summary_files_modified,
+        files_deleted: summary_files_deleted,
+        files_renamed: summary_files_renamed,
+        total_lines_added: summary_lines_added,
+        total_lines_removed: summary_lines_removed,
+        total_functions_changed: if is_paginating {
+            None
+        } else {
+            total_functions_changed
+        },
+        languages_affected: all_languages_affected,
     };
 
     Ok(ManifestResponse {
@@ -517,11 +567,13 @@ pub fn build_worktree_manifest(
         },
         summary,
         files: manifest_files,
-        // Dependency file diffing requires two committed blobs; worktree mode
-        // doesn't have a committed head blob for comparison.
         dependency_changes: vec![],
-        truncated,
-        truncation_info,
+        pagination: PaginationInfo {
+            total_items: total_files,
+            page_start: offset,
+            page_size,
+            next_cursor,
+        },
     })
 }
 
@@ -756,10 +808,10 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: true,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         assert_eq!(manifest.summary.total_files_changed, 2);
-        assert!(!manifest.truncated);
+        assert!(manifest.pagination.next_cursor.is_none());
 
         let go_file = manifest.files.iter().find(|f| f.path == "main.go").unwrap();
         assert_eq!(go_file.language, "go");
@@ -791,7 +843,7 @@ mod tests {
             exclude_patterns: vec!["*.md".to_string()],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         assert_eq!(manifest.summary.total_files_changed, 1);
         assert_eq!(manifest.files[0].path, "main.go");
@@ -805,7 +857,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         assert_eq!(manifest.summary.total_files_changed, 1);
         assert_eq!(manifest.files[0].path, "main.go");
@@ -819,7 +871,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         for file in &manifest.files {
             assert!(file.functions_changed.is_none());
@@ -993,7 +1045,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: true,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
         // The staged entry should show "staged_fn" (from index), not "disk_fn" (from disk)
         let staged_entry = manifest
@@ -1066,7 +1118,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
         assert!(manifest.summary.total_files_changed > 0);
         let new_file = manifest.files.iter().find(|f| f.path == "new.py").unwrap();
@@ -1133,51 +1185,45 @@ mod tests {
     }
 
     #[test]
-    fn it_does_not_truncate_at_exactly_max_files() {
-        // Kills: replace > with == at line 155, replace > with >= at line 155
-        let (_dir, path) = create_repo_with_n_files(MAX_FILES);
+    fn it_returns_no_cursor_when_files_fit_in_page() {
+        let (_dir, path) = create_repo_with_n_files(5);
         let options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         assert!(
-            !manifest.truncated,
-            "should NOT truncate at exactly MAX_FILES"
+            manifest.pagination.next_cursor.is_none(),
+            "should have no cursor when all files fit in page"
         );
-        assert!(
-            manifest.truncation_info.is_none(),
-            "truncation_info should be None at exactly MAX_FILES"
-        );
-        assert_eq!(manifest.files.len(), MAX_FILES);
+        assert_eq!(manifest.pagination.total_items, 5);
+        assert_eq!(manifest.files.len(), 5);
     }
 
     #[test]
-    fn it_truncates_above_max_files() {
-        // Kills: replace > with == at line 155
-        // Also validates truncation_info math (lines 161)
-        let (_dir, path) = create_repo_with_n_files(MAX_FILES + 1);
+    fn it_paginates_when_files_exceed_page_size() {
+        let (_dir, path) = create_repo_with_n_files(5);
         let options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
 
-        assert!(manifest.truncated, "should truncate above MAX_FILES");
-        let info = manifest
-            .truncation_info
-            .as_ref()
-            .expect("truncation_info should be present");
-        assert_eq!(info.total_files, MAX_FILES + 1);
-        assert_eq!(info.files_included, MAX_FILES);
         assert_eq!(
-            info.files_omitted, 1,
-            "files_omitted should be total_files - MAX_FILES = 1"
+            manifest.files.len(),
+            3,
+            "should return only page_size files"
         );
-        assert_eq!(manifest.files.len(), MAX_FILES);
+        assert_eq!(manifest.pagination.total_items, 5);
+        assert_eq!(manifest.pagination.page_start, 0);
+        assert_eq!(manifest.pagination.page_size, 3);
+        assert!(
+            manifest.pagination.next_cursor.is_some(),
+            "should have cursor when more files remain"
+        );
     }
 
     #[test]
@@ -1189,7 +1235,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         // main.go => "go" should be in languages_affected
         assert!(
@@ -1268,7 +1314,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: true,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         let rs_file = manifest.files.iter().find(|f| f.path == "new.rs").unwrap();
         assert_eq!(rs_file.change_type, ChangeType::Added);
@@ -1336,7 +1382,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: true,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         let rs_file = manifest
             .files
@@ -1406,7 +1452,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: true,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         // Each file has 1 new function => total = 1 + 1 = 2
         // If += were replaced by *=, the first file would set it to 0*1=0 then 0*1=0
@@ -1474,7 +1520,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         // Should have dependency changes showing serde was added
         assert!(
@@ -1546,7 +1592,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         // Should have dependency changes showing serde was removed
         assert!(
@@ -1617,7 +1663,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
         assert_eq!(manifest.summary.total_files_changed, 3);
         assert_eq!(
@@ -1689,7 +1735,7 @@ mod tests {
             exclude_patterns: vec!["*.log".to_string()],
             include_function_analysis: false,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options_exclude).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options_exclude, 0, 200).unwrap();
 
         assert!(
             manifest.files.iter().any(|f| f.path == "keep.txt"),
@@ -1706,7 +1752,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options_include).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options_include, 0, 200).unwrap();
 
         assert!(
             manifest.files.iter().any(|f| f.path == "keep.txt"),
@@ -1772,48 +1818,45 @@ mod tests {
     }
 
     #[test]
-    fn it_worktree_does_not_truncate_at_exactly_max_files() {
-        // Kills: replace > with == at line 371, replace > with >= at line 371
-        let (_dir, path) = create_worktree_repo_with_n_staged_files(MAX_FILES);
+    fn it_worktree_returns_no_cursor_when_files_fit_in_page() {
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(5);
         let options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
         assert!(
-            !manifest.truncated,
-            "worktree should NOT truncate at exactly MAX_FILES"
+            manifest.pagination.next_cursor.is_none(),
+            "worktree should have no cursor when all files fit in page"
         );
-        assert!(manifest.truncation_info.is_none());
-        assert_eq!(manifest.files.len(), MAX_FILES);
+        assert_eq!(manifest.pagination.total_items, 5);
+        assert_eq!(manifest.files.len(), 5);
     }
 
     #[test]
-    fn it_worktree_truncates_above_max_files() {
-        // Kills: replace > with == at line 371
-        // Also validates truncation_info math (lines 377)
-        let (_dir, path) = create_worktree_repo_with_n_staged_files(MAX_FILES + 1);
+    fn it_worktree_paginates_when_files_exceed_page_size() {
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(5);
         let options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
 
-        assert!(
-            manifest.truncated,
-            "worktree should truncate above MAX_FILES"
-        );
-        let info = manifest.truncation_info.as_ref().unwrap();
-        assert_eq!(info.total_files, MAX_FILES + 1);
-        assert_eq!(info.files_included, MAX_FILES);
         assert_eq!(
-            info.files_omitted, 1,
-            "worktree files_omitted should be total - MAX_FILES = 1"
+            manifest.files.len(),
+            3,
+            "should return only page_size files"
         );
-        assert_eq!(manifest.files.len(), MAX_FILES);
+        assert_eq!(manifest.pagination.total_items, 5);
+        assert_eq!(manifest.pagination.page_start, 0);
+        assert_eq!(manifest.pagination.page_size, 3);
+        assert!(
+            manifest.pagination.next_cursor.is_some(),
+            "worktree should have cursor when more files remain"
+        );
     }
 
     #[test]
@@ -1864,7 +1907,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: false,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
         assert!(
             manifest
@@ -1941,7 +1984,7 @@ mod tests {
             exclude_patterns: vec![],
             include_function_analysis: true,
         };
-        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
         // Each file adds 1 function => total = 2
         assert_eq!(
@@ -1982,5 +2025,638 @@ mod tests {
 
         let result = read_worktree_file(&path, "nonexistent.py");
         assert!(result.is_none(), "should return None for missing file");
+    }
+
+    // --- Pagination tests ---
+
+    #[test]
+    fn it_summary_counts_reflect_all_files_on_every_page() {
+        // Summary should always reflect total files, not just the page
+        let (_dir, path) = create_repo_with_n_files(10);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // First page
+        let page1 = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
+        assert_eq!(page1.summary.total_files_changed, 10);
+        assert_eq!(page1.files.len(), 3);
+
+        // Second page
+        let page2 = build_manifest(&path, "HEAD~1", "HEAD", &options, 3, 3).unwrap();
+        assert_eq!(page2.summary.total_files_changed, 10);
+        assert_eq!(page2.files.len(), 3);
+    }
+
+    #[test]
+    fn it_second_page_returns_different_files_than_first() {
+        let (_dir, path) = create_repo_with_n_files(6);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let page1 = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
+        let page2 = build_manifest(&path, "HEAD~1", "HEAD", &options, 3, 3).unwrap();
+
+        let page1_paths: Vec<&str> = page1.files.iter().map(|f| f.path.as_str()).collect();
+        let page2_paths: Vec<&str> = page2.files.iter().map(|f| f.path.as_str()).collect();
+
+        // No overlap
+        for p in &page2_paths {
+            assert!(
+                !page1_paths.contains(p),
+                "page2 file {:?} should not appear in page1",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn it_last_page_has_no_cursor() {
+        let (_dir, path) = create_repo_with_n_files(5);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // Request page starting at offset 3 with page_size 3 => covers files 3,4 (indices)
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 3, 3).unwrap();
+        assert_eq!(
+            manifest.files.len(),
+            2,
+            "last page should have remaining files"
+        );
+        assert!(
+            manifest.pagination.next_cursor.is_none(),
+            "last page should have no cursor"
+        );
+    }
+
+    #[test]
+    fn it_sets_total_functions_changed_to_none_when_paginating() {
+        let (_dir, path) = create_repo_with_go_file();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+
+        // With a page_size of 1 and 2 total files, we are paginating
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert!(
+            manifest.summary.total_functions_changed.is_none(),
+            "total_functions_changed should be None when paginating"
+        );
+    }
+
+    #[test]
+    fn it_total_functions_changed_present_when_not_paginating() {
+        let (_dir, path) = create_repo_with_go_file();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+
+        // page_size 200 with 2 files => no pagination
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+        assert!(
+            manifest.summary.total_functions_changed.is_some(),
+            "total_functions_changed should be present when not paginating"
+        );
+    }
+
+    #[test]
+    fn it_treesitter_only_runs_on_current_page() {
+        // Create repo with 2 Go files so tree-sitter would normally analyze both
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("a.go"), "package main\n\nfunc funcA() {}\n").unwrap();
+        std::fs::write(path.join("b.go"), "package main\n\nfunc funcB() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "a.go", "b.go"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add go files"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec!["*.go".to_string()],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+
+        // Page 1: only first Go file
+        let page1 = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(page1.files.len(), 1);
+        // The file on page 1 should have function analysis
+        assert!(page1.files[0].functions_changed.is_some());
+
+        // Page 2: only second Go file
+        let page2 = build_manifest(&path, "HEAD~1", "HEAD", &options, 1, 1).unwrap();
+        assert_eq!(page2.files.len(), 1);
+        assert!(page2.files[0].functions_changed.is_some());
+
+        // The two pages should have different files
+        assert_ne!(page1.files[0].path, page2.files[0].path);
+    }
+
+    #[test]
+    fn it_worktree_summary_reflects_all_files_when_paginated() {
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(8);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let page1 = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
+        assert_eq!(page1.summary.total_files_changed, 8);
+        assert_eq!(page1.files.len(), 3);
+        assert!(page1.pagination.next_cursor.is_some());
+
+        let page2 = build_worktree_manifest(&path, "HEAD", &options, 3, 3).unwrap();
+        assert_eq!(page2.summary.total_files_changed, 8);
+        assert_eq!(page2.files.len(), 3);
+    }
+
+    #[test]
+    fn it_worktree_last_page_has_no_cursor() {
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(5);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 3, 3).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(
+            manifest.pagination.next_cursor.is_none(),
+            "worktree last page should have no cursor"
+        );
+    }
+
+    #[test]
+    fn it_cursor_encodes_correct_next_offset() {
+        let (_dir, path) = create_repo_with_n_files(10);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
+        let cursor_str = manifest.pagination.next_cursor.as_ref().unwrap();
+        let cursor = crate::pagination::decode_cursor(cursor_str).unwrap();
+        assert_eq!(cursor.offset, 3, "next cursor offset should be page_end");
+        assert_eq!(cursor.v, 1);
+        // SHAs should match the metadata
+        assert_eq!(cursor.base_sha, manifest.metadata.base_sha);
+        assert_eq!(cursor.head_sha, manifest.metadata.head_sha);
+    }
+
+    #[test]
+    fn it_dependency_changes_always_complete_regardless_of_pagination() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Add multiple files including Cargo.toml
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(path.join("a.txt"), "a\n").unwrap();
+        std::fs::write(path.join("b.txt"), "b\n").unwrap();
+        Command::new("git")
+            .args(["add", "Cargo.toml", "a.txt", "b.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add files"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // Even with page_size=1, dependency changes should be present
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert!(
+            !manifest.dependency_changes.is_empty(),
+            "dependency changes should always be complete regardless of pagination"
+        );
+    }
+
+    #[test]
+    fn it_returns_empty_files_when_offset_beyond_total() {
+        let (_dir, path) = create_repo_with_n_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        // The repo has ~2 changed files; offset 999 is way past the end
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 999, 100).unwrap();
+        assert!(manifest.files.is_empty());
+        assert!(manifest.pagination.next_cursor.is_none());
+        // Summary still reflects all files
+        assert!(manifest.summary.total_files_changed > 0);
+    }
+
+    #[test]
+    fn it_is_paginating_only_when_total_exceeds_page_size() {
+        // create_repo_with_go_file produces 2 changed files (main.go + README.md)
+        // with tree-sitter support on main.go, so total_functions_changed is meaningful
+        let (_dir, path) = create_repo_with_go_file();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+
+        // 2 files, page_size=2 → NOT paginating, total_functions_changed present
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 2).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.pagination.next_cursor.is_none());
+        assert!(
+            manifest.summary.total_functions_changed.is_some(),
+            "should have function count when not paginating"
+        );
+
+        // 2 files, page_size=1 → paginating, total_functions_changed is None
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert!(manifest.pagination.next_cursor.is_some());
+        assert!(
+            manifest.summary.total_functions_changed.is_none(),
+            "should suppress function count when paginating"
+        );
+    }
+
+    #[test]
+    fn it_counts_summary_added_modified_deleted_correctly_with_pagination() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // First commit: create files to be modified and deleted
+        std::fs::write(path.join("modify_me.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(path.join("delete_me.rs"), "fn gone() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: add new, modify one, delete one
+        std::fs::write(path.join("added.rs"), "fn new() {}\n").unwrap();
+        std::fs::write(path.join("modify_me.rs"), "fn modified() {}\n").unwrap();
+        std::fs::remove_file(path.join("delete_me.rs")).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "changes"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        // Use a small page to ensure we're paginating but summary is still complete
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(manifest.summary.files_added, 1);
+        assert_eq!(manifest.summary.files_modified, 1);
+        assert_eq!(manifest.summary.files_deleted, 1);
+        assert_eq!(manifest.summary.total_files_changed, 3);
+        assert!(manifest.summary.total_lines_added > 0);
+        assert!(manifest.summary.total_lines_removed > 0);
+    }
+
+    #[test]
+    fn it_uses_empty_base_for_added_dep_file_in_paginated_mode() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("seed.txt"), "seed\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Add a new Cargo.toml (ChangeType::Added)
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"test\"\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add cargo"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        // Dep analysis should show added deps even though page_size=1
+        assert!(
+            !manifest.dependency_changes.is_empty(),
+            "dependency changes should detect added Cargo.toml"
+        );
+        let dep = &manifest.dependency_changes[0];
+        assert!(!dep.added.is_empty(), "should have added dependencies");
+    }
+
+    #[test]
+    fn it_returns_exact_page_boundary_files() {
+        // offset == total_files should return empty; offset == total_files - 1 should return 1
+        let (_dir, path) = create_repo_with_n_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // offset at last file
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 2, 100).unwrap();
+        assert_eq!(manifest.files.len(), 1, "should return the last file");
+
+        // offset exactly at total
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 3, 100).unwrap();
+        assert!(
+            manifest.files.is_empty(),
+            "offset at total should return empty"
+        );
+    }
+
+    #[test]
+    fn it_worktree_is_paginating_only_when_total_exceeds_page_size() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage 3 new files
+        for i in 0..3 {
+            std::fs::write(path.join(format!("file{i}.txt")), format!("content {i}\n")).unwrap();
+        }
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // 3 staged files, page_size=3 → not paginating, no cursor
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
+        assert_eq!(manifest.files.len(), 3);
+        assert!(manifest.pagination.next_cursor.is_none());
+
+        // page_size=2 → paginating, cursor present
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 2).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.pagination.next_cursor.is_some());
+    }
+
+    #[test]
+    fn it_worktree_counts_summary_correctly_with_pagination() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Commit files that will be modified and deleted
+        std::fs::write(path.join("modify.txt"), "old\n").unwrap();
+        std::fs::write(path.join("delete.txt"), "gone\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage: add new file, modify one, delete one
+        std::fs::write(path.join("added.txt"), "new\n").unwrap();
+        std::fs::write(path.join("modify.txt"), "changed\n").unwrap();
+        std::fs::remove_file(path.join("delete.txt")).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // page_size=1 to force pagination, but summary must reflect all 3 changes
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(manifest.summary.files_added, 1);
+        assert_eq!(manifest.summary.files_modified, 1);
+        assert_eq!(manifest.summary.files_deleted, 1);
+        assert_eq!(manifest.summary.total_files_changed, 3);
+        assert!(manifest.summary.total_lines_added > 0);
+        assert!(manifest.summary.total_lines_removed > 0);
+    }
+
+    #[test]
+    fn it_worktree_returns_exact_page_boundary_files() {
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // offset at last file
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 2, 100).unwrap();
+        assert_eq!(manifest.files.len(), 1);
+
+        // offset exactly at total
+        let manifest = build_worktree_manifest(&path, "HEAD", &options, 3, 100).unwrap();
+        assert!(manifest.files.is_empty());
+        assert!(manifest.pagination.next_cursor.is_none());
     }
 }

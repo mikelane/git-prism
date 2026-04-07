@@ -227,10 +227,10 @@ async fn main() -> anyhow::Result<()> {
             };
             let manifest = match parse_range(&range) {
                 RefRange::CommitRange { base, head } => {
-                    build_manifest(&repo_path, base, head, &options)?
+                    build_manifest(&repo_path, base, head, &options, 0, 200)?
                 }
                 RefRange::WorktreeCompare { base } => {
-                    build_worktree_manifest(&repo_path, base, &options)?
+                    build_worktree_manifest(&repo_path, base, &options, 0, 200)?
                 }
             };
             println!("{}", serde_json::to_string_pretty(&manifest)?);
