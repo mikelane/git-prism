@@ -224,6 +224,82 @@ mod tests {
         assert_eq!(classify_error_kind("could not reproduce"), "unknown");
     }
 
+    // Tests to kill || -> && mutants in classify_error_kind.
+    // Each test exercises exactly ONE alternative in each || chain.
+
+    // Line 99: resolve || ref not found || invalid ref
+    #[test]
+    fn it_classifies_resolve_alone_as_ref_not_found() {
+        assert_eq!(classify_error_kind("could not resolve"), "ref_not_found");
+    }
+
+    #[test]
+    fn it_classifies_ref_not_found_alone() {
+        assert_eq!(
+            classify_error_kind("ref not found in repo"),
+            "ref_not_found"
+        );
+    }
+
+    #[test]
+    fn it_classifies_invalid_ref_alone() {
+        assert_eq!(
+            classify_error_kind("invalid ref specified"),
+            "ref_not_found"
+        );
+    }
+
+    // Lines 102-105: repository || repo not found || not a git || open repo
+    #[test]
+    fn it_classifies_repository_alone_as_repo_not_found() {
+        assert_eq!(classify_error_kind("bad repository path"), "repo_not_found");
+    }
+
+    #[test]
+    fn it_classifies_repo_not_found_alone() {
+        assert_eq!(classify_error_kind("repo not found here"), "repo_not_found");
+    }
+
+    #[test]
+    fn it_classifies_not_a_git_alone() {
+        assert_eq!(classify_error_kind("not a git directory"), "repo_not_found");
+    }
+
+    #[test]
+    fn it_classifies_open_repo_alone() {
+        assert_eq!(classify_error_kind("failed to open repo"), "repo_not_found");
+    }
+
+    // Line 110: parse || tree-sitter
+    #[test]
+    fn it_classifies_parse_alone_as_parse_failed() {
+        assert_eq!(classify_error_kind("failed to parse file"), "parse_failed");
+    }
+
+    #[test]
+    fn it_classifies_tree_sitter_alone_as_parse_failed() {
+        assert_eq!(
+            classify_error_kind("tree-sitter error occurred"),
+            "parse_failed"
+        );
+    }
+
+    // Line 112: i/o || io error || permission
+    #[test]
+    fn it_classifies_io_slash_alone_as_io_error() {
+        assert_eq!(classify_error_kind("an i/o failure"), "io_error");
+    }
+
+    #[test]
+    fn it_classifies_io_error_alone() {
+        assert_eq!(classify_error_kind("io error on read"), "io_error");
+    }
+
+    #[test]
+    fn it_classifies_permission_alone_as_io_error() {
+        assert_eq!(classify_error_kind("permission denied"), "io_error");
+    }
+
     #[test]
     fn test_ref_pattern_serializes_to_expected_strings() {
         let all_variants = [

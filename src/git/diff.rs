@@ -619,4 +619,136 @@ mod tests {
         let json = serde_json::to_value(ChangeScope::Committed).unwrap();
         assert_eq!(json, "committed");
     }
+
+    // --- Gap-closing tests for mutation testing ---
+
+    // Kill mutants on binary detection || (lines 126, 172):
+    // When only the OLD side is binary, is_binary should still be true.
+    #[test]
+    fn it_detects_binary_when_only_old_blob_is_binary() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // Commit a binary file
+        std::fs::write(path.join("data.bin"), [0x00, 0x01, 0x02]).unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add binary file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Replace binary with text content (no null bytes)
+        std::fs::write(path.join("data.bin"), "now text\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "replace binary with text"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        let file = diff.files.iter().find(|f| f.path == "data.bin").unwrap();
+        assert!(
+            file.is_binary,
+            "should be binary when old blob contains null bytes"
+        );
+        assert_eq!(file.lines_added, 0);
+        assert_eq!(file.lines_removed, 0);
+    }
+
+    // When only the NEW side is binary, is_binary should still be true.
+    #[test]
+    fn it_detects_binary_when_only_new_blob_is_binary() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // Commit a text file
+        std::fs::write(path.join("data.bin"), "text content\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add text file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Replace with binary content (has null bytes)
+        std::fs::write(path.join("data.bin"), [0x89, 0x50, 0x00, 0x47]).unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "replace text with binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        let file = diff.files.iter().find(|f| f.path == "data.bin").unwrap();
+        assert!(
+            file.is_binary,
+            "should be binary when new blob contains null bytes"
+        );
+        assert_eq!(file.lines_added, 0);
+        assert_eq!(file.lines_removed, 0);
+    }
+
+    // Kill mutants on count_line_changes returning (1,0) or (1,1) instead of real values.
+    // Also kills mutants on LineCounter::process_change (replace - with +, += with *=).
+    #[test]
+    fn it_counts_exact_line_changes_for_modification() {
+        // count_line_changes with known before/after content
+        let old = b"line1\nline2\nline3\n";
+        let new = b"line1\nmodified\nline3\nextra\n";
+        let (added, removed) = count_line_changes(Some(old), Some(new));
+        // line2 -> modified (1 removed, 1 added), plus "extra" added (1 added)
+        assert_eq!(added, 2, "expected 2 lines added");
+        assert_eq!(removed, 1, "expected 1 line removed");
+    }
+
+    #[test]
+    fn it_counts_zero_changes_for_identical_content() {
+        let data = b"same\ncontent\n";
+        let (added, removed) = count_line_changes(Some(data), Some(data));
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn it_counts_only_additions_when_old_is_empty() {
+        let (added, removed) = count_line_changes(Some(b""), Some(b"one\ntwo\n"));
+        assert_eq!(added, 2);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn it_counts_only_removals_when_new_is_empty() {
+        let (added, removed) = count_line_changes(Some(b"one\ntwo\nthree\n"), Some(b""));
+        assert_eq!(added, 0);
+        assert_eq!(removed, 3);
+    }
+
+    #[test]
+    fn it_counts_multiple_removals_and_additions() {
+        let old = b"a\nb\nc\nd\ne\n";
+        let new = b"a\nx\ny\nz\ne\n";
+        let (added, removed) = count_line_changes(Some(old), Some(new));
+        // b,c,d removed (3), x,y,z added (3)
+        assert_eq!(added, 3);
+        assert_eq!(removed, 3);
+    }
 }

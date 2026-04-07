@@ -460,4 +460,23 @@ mod tests {
             "expected suggestion in: {msg}"
         );
     }
+
+    // --- Gap-closing tests for mutation testing ---
+
+    // Kill mutant: line 105 replace commit_timestamp -> Result<String, GitError> with Ok("xyzzy".into())
+    #[test]
+    fn it_returns_real_timestamp_not_placeholder() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let timestamp = reader.commit_timestamp("HEAD").unwrap();
+        assert_ne!(
+            timestamp, "xyzzy",
+            "commit_timestamp must return a real timestamp"
+        );
+        // A real git timestamp contains digits (unix epoch seconds)
+        assert!(
+            timestamp.chars().any(|c| c.is_ascii_digit()),
+            "timestamp should contain digits, got: {timestamp}"
+        );
+    }
 }

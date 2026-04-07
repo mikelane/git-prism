@@ -1072,4 +1072,915 @@ mod tests {
         let new_file = manifest.files.iter().find(|f| f.path == "new.py").unwrap();
         assert_eq!(new_file.change_type, ChangeType::Added);
     }
+
+    // --- Gap-closing tests for mutation testing ---
+
+    /// Helper: create a git repo with N files changed between two commits.
+    fn create_repo_with_n_files(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit with a placeholder
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: add N files
+        for i in 0..n {
+            std::fs::write(path.join(format!("file{i}.txt")), format!("content {i}\n")).unwrap();
+        }
+        let mut add_args = vec!["add".to_string()];
+        for i in 0..n {
+            add_args.push(format!("file{i}.txt"));
+        }
+        Command::new("git")
+            .args(&add_args)
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add files"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn it_does_not_truncate_at_exactly_max_files() {
+        // Kills: replace > with == at line 155, replace > with >= at line 155
+        let (_dir, path) = create_repo_with_n_files(MAX_FILES);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        assert!(
+            !manifest.truncated,
+            "should NOT truncate at exactly MAX_FILES"
+        );
+        assert!(
+            manifest.truncation_info.is_none(),
+            "truncation_info should be None at exactly MAX_FILES"
+        );
+        assert_eq!(manifest.files.len(), MAX_FILES);
+    }
+
+    #[test]
+    fn it_truncates_above_max_files() {
+        // Kills: replace > with == at line 155
+        // Also validates truncation_info math (lines 161)
+        let (_dir, path) = create_repo_with_n_files(MAX_FILES + 1);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        assert!(manifest.truncated, "should truncate above MAX_FILES");
+        let info = manifest
+            .truncation_info
+            .as_ref()
+            .expect("truncation_info should be present");
+        assert_eq!(info.total_files, MAX_FILES + 1);
+        assert_eq!(info.files_included, MAX_FILES);
+        assert_eq!(
+            info.files_omitted, 1,
+            "files_omitted should be total_files - MAX_FILES = 1"
+        );
+        assert_eq!(manifest.files.len(), MAX_FILES);
+    }
+
+    #[test]
+    fn it_counts_known_language_in_languages_affected() {
+        // Kills: replace != with == at line 180 (language detection)
+        let (_dir, path) = create_repo_with_go_file();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // main.go => "go" should be in languages_affected
+        assert!(
+            manifest
+                .summary
+                .languages_affected
+                .contains(&"go".to_string()),
+            "go should be in languages_affected, got: {:?}",
+            manifest.summary.languages_affected
+        );
+        // README.md => "unknown" should NOT be in languages_affected
+        assert!(
+            !manifest
+                .summary
+                .languages_affected
+                .contains(&"unknown".to_string()),
+            "unknown should not be in languages_affected"
+        );
+    }
+
+    #[test]
+    fn it_skips_base_content_for_added_files_in_function_analysis() {
+        // Kills: delete match arm ChangeType::Added at line 194
+        // For an added file, base_content should be None => no base functions => all functions show as Added
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Add a new Rust file with a function
+        std::fs::write(
+            path.join("new.rs"),
+            "fn brand_new() {\n    println!(\"new\");\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "new.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add new rust file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        let rs_file = manifest.files.iter().find(|f| f.path == "new.rs").unwrap();
+        assert_eq!(rs_file.change_type, ChangeType::Added);
+        let fns = rs_file.functions_changed.as_ref().unwrap();
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].name, "brand_new");
+        assert_eq!(fns[0].change_type, FunctionChangeType::Added);
+    }
+
+    #[test]
+    fn it_skips_head_content_for_deleted_files_in_function_analysis() {
+        // Kills: delete match arm ChangeType::Deleted at line 199
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Create a Rust file with a function
+        std::fs::write(
+            path.join("doomed.rs"),
+            "fn doomed_fn() {\n    println!(\"bye\");\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "doomed.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial with function"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Delete the file
+        std::fs::remove_file(path.join("doomed.rs")).unwrap();
+        Command::new("git")
+            .args(["add", "doomed.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete rust file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        let rs_file = manifest
+            .files
+            .iter()
+            .find(|f| f.path == "doomed.rs")
+            .unwrap();
+        assert_eq!(rs_file.change_type, ChangeType::Deleted);
+        let fns = rs_file.functions_changed.as_ref().unwrap();
+        assert_eq!(fns.len(), 1);
+        assert_eq!(fns[0].name, "doomed_fn");
+        assert_eq!(fns[0].change_type, FunctionChangeType::Deleted);
+    }
+
+    #[test]
+    fn it_accumulates_total_functions_changed_across_files() {
+        // Kills: replace += with *= at line 236
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial: two Rust files, each with one function
+        std::fs::write(path.join("a.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(path.join("b.rs"), "fn beta() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "a.rs", "b.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify both files to add one function each
+        std::fs::write(path.join("a.rs"), "fn alpha() {}\nfn alpha2() {}\n").unwrap();
+        std::fs::write(path.join("b.rs"), "fn beta() {}\nfn beta2() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "a.rs", "b.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add functions"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // Each file has 1 new function => total = 1 + 1 = 2
+        // If += were replaced by *=, the first file would set it to 0*1=0 then 0*1=0
+        assert_eq!(
+            manifest.summary.total_functions_changed,
+            Some(2),
+            "total_functions_changed should be sum, not product"
+        );
+    }
+
+    #[test]
+    fn it_uses_empty_base_content_for_added_dep_file() {
+        // Kills: delete match arm ChangeType::Added at line 252 (dep analysis)
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Add a new Cargo.toml (dependency file)
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "Cargo.toml"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add cargo.toml"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // Should have dependency changes showing serde was added
+        assert!(
+            !manifest.dependency_changes.is_empty(),
+            "should detect dependency changes for added Cargo.toml"
+        );
+        let dep = &manifest.dependency_changes[0];
+        assert!(
+            !dep.added.is_empty(),
+            "should show added dependencies for new Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn it_uses_empty_head_content_for_deleted_dep_file() {
+        // Kills: delete match arm ChangeType::Deleted at line 259 (dep analysis)
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Create a Cargo.toml with a dependency
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "Cargo.toml"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial with cargo"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Delete the Cargo.toml
+        std::fs::remove_file(path.join("Cargo.toml")).unwrap();
+        Command::new("git")
+            .args(["add", "Cargo.toml"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete cargo.toml"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // Should have dependency changes showing serde was removed
+        assert!(
+            !manifest.dependency_changes.is_empty(),
+            "should detect dependency changes for deleted Cargo.toml"
+        );
+        let dep = &manifest.dependency_changes[0];
+        assert!(
+            !dep.removed.is_empty(),
+            "should show removed dependencies for deleted Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn it_counts_summary_change_types_correctly() {
+        // Kills: replace == with != at lines 296, 300, 304, 308
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Create files for various operations
+        std::fs::write(path.join("modify.txt"), "original\n").unwrap();
+        std::fs::write(path.join("delete.txt"), "to be deleted\n").unwrap();
+        Command::new("git")
+            .args(["add", "modify.txt", "delete.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify one, delete one, add one
+        std::fs::write(path.join("modify.txt"), "changed\n").unwrap();
+        std::fs::remove_file(path.join("delete.txt")).unwrap();
+        std::fs::write(path.join("added.txt"), "new file\n").unwrap();
+        Command::new("git")
+            .args(["add", "modify.txt", "delete.txt", "added.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "mixed changes"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        assert_eq!(manifest.summary.total_files_changed, 3);
+        assert_eq!(
+            manifest.summary.files_added, 1,
+            "should have exactly 1 added file"
+        );
+        assert_eq!(
+            manifest.summary.files_modified, 1,
+            "should have exactly 1 modified file"
+        );
+        assert_eq!(
+            manifest.summary.files_deleted, 1,
+            "should have exactly 1 deleted file"
+        );
+        assert_eq!(
+            manifest.summary.files_renamed, 0,
+            "should have exactly 0 renamed files"
+        );
+    }
+
+    #[test]
+    fn it_worktree_excludes_patterns_correctly() {
+        // Kills: delete ! at lines 361 and 363 in build_worktree_manifest
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(path.join("drop.log"), "drop\n").unwrap();
+        Command::new("git")
+            .args(["add", "keep.txt", "drop.log"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage changes to both files
+        std::fs::write(path.join("keep.txt"), "keep changed\n").unwrap();
+        std::fs::write(path.join("drop.log"), "drop changed\n").unwrap();
+        Command::new("git")
+            .args(["add", "keep.txt", "drop.log"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // With exclude: *.log should remove drop.log but keep keep.txt
+        let options_exclude = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec!["*.log".to_string()],
+            include_function_analysis: false,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options_exclude).unwrap();
+
+        assert!(
+            manifest.files.iter().any(|f| f.path == "keep.txt"),
+            "keep.txt should be included"
+        );
+        assert!(
+            !manifest.files.iter().any(|f| f.path == "drop.log"),
+            "drop.log should be excluded by pattern"
+        );
+
+        // With include: *.txt should include only keep.txt
+        let options_include = ManifestOptions {
+            include_patterns: vec!["*.txt".to_string()],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options_include).unwrap();
+
+        assert!(
+            manifest.files.iter().any(|f| f.path == "keep.txt"),
+            "keep.txt should be included by pattern"
+        );
+        assert!(
+            !manifest.files.iter().any(|f| f.path == "drop.log"),
+            "drop.log should not match *.txt include pattern"
+        );
+    }
+
+    /// Helper: create a git repo with N staged new files for worktree testing.
+    fn create_worktree_repo_with_n_staged_files(
+        n: usize,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage N new files
+        let mut add_args = vec!["add".to_string()];
+        for i in 0..n {
+            let filename = format!("wt_file{i}.txt");
+            std::fs::write(path.join(&filename), format!("content {i}\n")).unwrap();
+            add_args.push(filename);
+        }
+        Command::new("git")
+            .args(&add_args)
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn it_worktree_does_not_truncate_at_exactly_max_files() {
+        // Kills: replace > with == at line 371, replace > with >= at line 371
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(MAX_FILES);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        assert!(
+            !manifest.truncated,
+            "worktree should NOT truncate at exactly MAX_FILES"
+        );
+        assert!(manifest.truncation_info.is_none());
+        assert_eq!(manifest.files.len(), MAX_FILES);
+    }
+
+    #[test]
+    fn it_worktree_truncates_above_max_files() {
+        // Kills: replace > with == at line 371
+        // Also validates truncation_info math (lines 377)
+        let (_dir, path) = create_worktree_repo_with_n_staged_files(MAX_FILES + 1);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        assert!(
+            manifest.truncated,
+            "worktree should truncate above MAX_FILES"
+        );
+        let info = manifest.truncation_info.as_ref().unwrap();
+        assert_eq!(info.total_files, MAX_FILES + 1);
+        assert_eq!(info.files_included, MAX_FILES);
+        assert_eq!(
+            info.files_omitted, 1,
+            "worktree files_omitted should be total - MAX_FILES = 1"
+        );
+        assert_eq!(manifest.files.len(), MAX_FILES);
+    }
+
+    #[test]
+    fn it_worktree_counts_known_language() {
+        // Kills: replace != with == at line 395
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("init.txt"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "init.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage a Python file
+        std::fs::write(path.join("hello.py"), "print('hi')\n").unwrap();
+        Command::new("git")
+            .args(["add", "hello.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        assert!(
+            manifest
+                .summary
+                .languages_affected
+                .contains(&"python".to_string()),
+            "worktree: python should be in languages_affected"
+        );
+        assert!(
+            !manifest
+                .summary
+                .languages_affected
+                .contains(&"unknown".to_string()),
+            "worktree: unknown should NOT be in languages_affected"
+        );
+    }
+
+    #[test]
+    fn it_worktree_accumulates_total_functions_changed() {
+        // Kills: replace += with *= at line 452
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit with two Python files, each with one function
+        std::fs::write(path.join("a.py"), "def func_a():\n    pass\n").unwrap();
+        std::fs::write(path.join("b.py"), "def func_b():\n    pass\n").unwrap();
+        Command::new("git")
+            .args(["add", "a.py", "b.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage: add one function to each file
+        std::fs::write(
+            path.join("a.py"),
+            "def func_a():\n    pass\n\ndef func_a2():\n    pass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("b.py"),
+            "def func_b():\n    pass\n\ndef func_b2():\n    pass\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "a.py", "b.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_worktree_manifest(&path, "HEAD", &options).unwrap();
+
+        // Each file adds 1 function => total = 2
+        assert_eq!(
+            manifest.summary.total_functions_changed,
+            Some(2),
+            "worktree total_functions_changed should be sum (2), not product"
+        );
+    }
+
+    #[test]
+    fn it_read_worktree_file_returns_file_content() {
+        // Kills: replace read_worktree_file -> Option<String> with None/Some(String::new())/Some("xyzzy".into())
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let content = "def real_content():\n    return 42\n";
+        std::fs::write(path.join("test.py"), content).unwrap();
+
+        let result = read_worktree_file(&path, "test.py");
+        assert!(result.is_some(), "should return Some for existing file");
+        let file_content = result.unwrap();
+        assert_eq!(
+            file_content, content,
+            "should return actual file content, not empty or dummy"
+        );
+        assert!(
+            file_content.contains("real_content"),
+            "should contain actual function name"
+        );
+        assert_ne!(file_content, "", "should not be empty");
+        assert_ne!(file_content, "xyzzy", "should not be dummy value");
+    }
+
+    #[test]
+    fn it_read_worktree_file_returns_none_for_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let result = read_worktree_file(&path, "nonexistent.py");
+        assert!(result.is_none(), "should return None for missing file");
+    }
 }

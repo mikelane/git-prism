@@ -394,4 +394,151 @@ mod tests {
 
         assert!(diff.files.is_empty());
     }
+
+    // --- Gap-closing tests for mutation testing ---
+
+    // Kill mutant: line 109 replace || with && in tree_index_to_file_change (binary detection)
+    // Staged modification where only old blob is binary.
+    #[test]
+    fn it_detects_staged_binary_when_only_old_blob_is_binary() {
+        let (_dir, path) = create_repo_with_one_commit();
+
+        // Commit a binary file
+        std::fs::write(path.join("data.bin"), [0x00, 0x01, 0x02]).unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage a text replacement (no null bytes)
+        std::fs::write(path.join("data.bin"), "now text\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_worktree().unwrap();
+        let file = diff.files.iter().find(|f| f.path == "data.bin").unwrap();
+        assert!(
+            file.is_binary,
+            "staged mod should be binary when old blob has null bytes"
+        );
+        assert_eq!(file.change_scope, ChangeScope::Staged);
+        assert_eq!(file.lines_added, 0);
+        assert_eq!(file.lines_removed, 0);
+    }
+
+    // Kill mutant: line 143 replace || with && in tree_index_to_file_change (Rewrite binary)
+    // Staged modification where only new blob is binary.
+    #[test]
+    fn it_detects_staged_binary_when_only_new_blob_is_binary() {
+        let (_dir, path) = create_repo_with_one_commit();
+
+        // Commit a text file
+        std::fs::write(path.join("data.bin"), "text content\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add text"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Stage a binary replacement (has null bytes)
+        std::fs::write(path.join("data.bin"), [0x89, 0x50, 0x00, 0x47]).unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_worktree().unwrap();
+        let file = diff.files.iter().find(|f| f.path == "data.bin").unwrap();
+        assert!(
+            file.is_binary,
+            "staged mod should be binary when new blob has null bytes"
+        );
+        assert_eq!(file.change_scope, ChangeScope::Staged);
+        assert_eq!(file.lines_added, 0);
+        assert_eq!(file.lines_removed, 0);
+    }
+
+    // Kill mutant: line 222 replace || with && in index_worktree_to_file_change (binary detection)
+    // Unstaged modification where only the new (disk) file is binary.
+    #[test]
+    fn it_detects_unstaged_binary_when_only_disk_file_is_binary() {
+        let (_dir, path) = create_repo_with_one_commit();
+
+        // Commit a text file
+        std::fs::write(path.join("file.dat"), "text\n").unwrap();
+        Command::new("git")
+            .args(["add", "file.dat"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add text file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify on disk with binary content (do NOT stage)
+        std::fs::write(path.join("file.dat"), [0x00, 0xFF, 0x01]).unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_worktree().unwrap();
+        let file = diff.files.iter().find(|f| f.path == "file.dat").unwrap();
+        assert!(
+            file.is_binary,
+            "unstaged mod should be binary when disk file has null bytes"
+        );
+        assert_eq!(file.change_scope, ChangeScope::Unstaged);
+        assert_eq!(file.lines_added, 0);
+        assert_eq!(file.lines_removed, 0);
+    }
+
+    // Unstaged modification where only the old (index) blob is binary.
+    #[test]
+    fn it_detects_unstaged_binary_when_only_index_blob_is_binary() {
+        let (_dir, path) = create_repo_with_one_commit();
+
+        // Commit a binary file
+        std::fs::write(path.join("file.dat"), [0x00, 0x01, 0x02]).unwrap();
+        Command::new("git")
+            .args(["add", "file.dat"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add binary file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify on disk with text content (do NOT stage)
+        std::fs::write(path.join("file.dat"), "now text\n").unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_worktree().unwrap();
+        let file = diff.files.iter().find(|f| f.path == "file.dat").unwrap();
+        assert!(
+            file.is_binary,
+            "unstaged mod should be binary when index blob has null bytes"
+        );
+        assert_eq!(file.change_scope, ChangeScope::Unstaged);
+        assert_eq!(file.lines_added, 0);
+        assert_eq!(file.lines_removed, 0);
+    }
 }

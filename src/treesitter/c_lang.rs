@@ -211,4 +211,101 @@ void hello(void) {
         assert_eq!(functions[0].start_line, 3);
         assert_eq!(functions[0].end_line, 5);
     }
+
+    // Kill line-offset mutants (+ with - or *) by checking exact line numbers
+    // on a multi-line function that does NOT start on line 1.
+    #[test]
+    fn it_reports_correct_line_numbers_for_multiline_function() {
+        let source = b"// comment line 1
+// comment line 2
+// comment line 3
+int compute(int a, int b) {
+    int c = a + b;
+    return c * 2;
+}
+";
+        let analyzer = CAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].start_line, 4);
+        assert_eq!(functions[0].end_line, 7);
+    }
+
+    #[test]
+    fn it_reports_correct_line_numbers_for_declaration() {
+        let source = b"// line 1
+// line 2
+int add(int a, int b);
+";
+        let analyzer = CAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].start_line, 3);
+        assert_eq!(functions[0].end_line, 3);
+    }
+
+    // Kill is_preprocessor_container -> true mutant: a non-preprocessor node
+    // (like a regular function) should still be extracted. If is_preprocessor_container
+    // always returns true, non-matching kinds would recurse instead of falling to _.
+    #[test]
+    fn it_extracts_function_not_inside_ifdef() {
+        let source = b"void standalone(void) {
+    return;
+}
+";
+        let analyzer = CAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "standalone");
+    }
+
+    // Kill match guard is_preprocessor_container(kind) with true for functions:
+    // If guard is always true, ALL non-matching kinds recurse into children
+    // instead of being skipped. We need a function inside #ifdef to ensure
+    // the preprocessor recursion path works correctly.
+    #[test]
+    fn it_extracts_function_inside_ifdef() {
+        let source = b"#ifdef FEATURE_X
+void guarded(int x) {
+    return;
+}
+#endif
+";
+        let analyzer = CAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "guarded");
+    }
+
+    // Kill match guard for imports: if guard always true, includes inside
+    // #ifdef would be incorrectly handled.
+    #[test]
+    fn it_extracts_include_inside_ifdef() {
+        let source = b"#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+";
+        let analyzer = CAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0], "#include <stdio.h>");
+        assert_eq!(imports[1], "#include <windows.h>");
+    }
+
+    // Kill match guard with false: if guard is always false, includes inside
+    // preprocessor blocks would NOT be found.
+    #[test]
+    fn it_extracts_include_inside_nested_preproc() {
+        let source = b"#ifdef PLATFORM
+#ifdef USE_LIB
+#include <special.h>
+#endif
+#endif
+";
+        let analyzer = CAnalyzer;
+        let imports = analyzer.extract_imports(source).unwrap();
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0], "#include <special.h>");
+    }
 }
