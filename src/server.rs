@@ -72,6 +72,8 @@ impl GitPrismServer {
                 repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
                 ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
                 ref_head = tracing::field::Empty,
+                page_number = tracing::field::Empty,
+                page_size = tracing::field::Empty,
                 response_files_count = tracing::field::Empty,
                 response_bytes = tracing::field::Empty,
                 response_truncated = tracing::field::Empty,
@@ -108,6 +110,12 @@ impl GitPrismServer {
             } else {
                 0
             };
+
+            root_span.record("page_number", (offset / page_size) as i64);
+            root_span.record("page_size", page_size as i64);
+            if args.cursor.is_some() {
+                crate::metrics::get().record_pagination_page(tool_name);
+            }
 
             let options = ManifestOptions {
                 include_patterns: args.include_patterns,
@@ -225,6 +233,8 @@ impl GitPrismServer {
                 repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
                 ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
                 ref_head = crate::privacy::normalize_ref_pattern(&args.head_ref).as_str(),
+                page_number = tracing::field::Empty,
+                page_size = tracing::field::Empty,
                 response_files_count = tracing::field::Empty,
                 response_bytes = tracing::field::Empty,
                 response_truncated = tracing::field::Empty,
@@ -251,6 +261,12 @@ impl GitPrismServer {
             } else {
                 0
             };
+
+            root_span.record("page_number", (offset / page_size) as i64);
+            root_span.record("page_size", page_size as i64);
+            if args.cursor.is_some() {
+                crate::metrics::get().record_pagination_page(tool_name);
+            }
 
             let options = ManifestOptions {
                 include_patterns: vec![],

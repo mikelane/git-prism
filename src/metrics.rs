@@ -30,6 +30,7 @@ pub struct Metrics {
     languages_analyzed: Counter<u64>,
     errors_total: Counter<u64>,
     response_truncated: Counter<u64>,
+    pages_requested: Counter<u64>,
 
     // Performance histograms
     tool_duration_ms: Histogram<f64>,
@@ -88,6 +89,11 @@ impl Metrics {
             .with_description("Truncation events")
             .build();
 
+        let pages_requested = meter
+            .u64_counter("git_prism.pagination.pages_requested")
+            .with_description("Paginated requests (cursor-bearing)")
+            .build();
+
         let tool_duration_ms = meter
             .f64_histogram("git_prism.tool.duration_ms")
             .with_description("Tool invocation duration in milliseconds")
@@ -138,6 +144,7 @@ impl Metrics {
             languages_analyzed,
             errors_total,
             response_truncated,
+            pages_requested,
             tool_duration_ms,
             response_tokens_estimated,
             response_bytes,
@@ -223,6 +230,11 @@ impl Metrics {
         );
     }
 
+    pub fn record_pagination_page(&self, tool: &str) {
+        self.pages_requested
+            .add(1, &[KeyValue::new("tool", tool.to_string())]);
+    }
+
     #[allow(dead_code)]
     pub fn record_gix_operation(&self, operation: &str, duration_ms: f64) {
         self.gix_operation_ms.record(
@@ -272,6 +284,7 @@ mod tests {
         metrics.record_files_returned(5.0);
         metrics.record_functions_changed("rust", 3.0);
         metrics.record_truncated("test_tool", "max_files");
+        metrics.record_pagination_page("test_tool");
         metrics.record_gix_operation("diff_commits", 15.0);
         metrics.record_treesitter_parse("rust", 5.0);
     }
@@ -299,6 +312,13 @@ mod tests {
         metrics.record_change_scope("committed");
         metrics.record_change_scope("staged");
         metrics.record_change_scope("unstaged");
+    }
+
+    #[test]
+    fn record_pagination_page_does_not_panic() {
+        let metrics = Metrics::new();
+        metrics.record_pagination_page("get_change_manifest");
+        metrics.record_pagination_page("get_commit_history");
     }
 
     #[test]
