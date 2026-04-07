@@ -367,7 +367,7 @@ mod tests {
             files: vec![],
             dependency_changes: vec![],
             pagination: PaginationInfo {
-                total_files: 1,
+                total_items: 1,
                 page_start: 0,
                 page_size: 200,
                 next_cursor: None,

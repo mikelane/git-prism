@@ -7,12 +7,12 @@ use crate::git::depfiles::{diff_dependencies, is_dependency_file};
 use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
-use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
+use crate::pagination::{encode_cursor, PaginationCursor, PaginationInfo};
 use crate::tools::types::{
-    FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
-    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, detect_language,
+    detect_language, FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry,
+    ManifestMetadata, ManifestOptions, ManifestResponse, ManifestSummary, ToolError,
 };
-use crate::treesitter::{Function, analyzer_for_extension};
+use crate::treesitter::{analyzer_for_extension, Function};
 
 pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<FunctionChange> {
     let base_map: HashMap<&str, &Function> =
@@ -152,7 +152,7 @@ pub fn build_manifest(
     }
 
     let total_files = files_to_process.len();
-    let is_paginating = offset > 0 || total_files > page_size;
+    let is_paginating = total_files > page_size;
 
     // Build summary from ALL files (before pagination)
     let mut all_languages_set = std::collections::HashSet::new();
@@ -350,7 +350,7 @@ pub fn build_manifest(
         files: manifest_files,
         dependency_changes,
         pagination: PaginationInfo {
-            total_files,
+            total_items: total_files,
             page_start: offset,
             page_size,
             next_cursor,
@@ -397,7 +397,7 @@ pub fn build_worktree_manifest(
     }
 
     let total_files = files_to_process.len();
-    let is_paginating = offset > 0 || total_files > page_size;
+    let is_paginating = total_files > page_size;
 
     // Build summary from ALL files (before pagination)
     let mut all_languages_set = std::collections::HashSet::new();
@@ -569,7 +569,7 @@ pub fn build_worktree_manifest(
         files: manifest_files,
         dependency_changes: vec![],
         pagination: PaginationInfo {
-            total_files,
+            total_items: total_files,
             page_start: offset,
             page_size,
             next_cursor,
@@ -1198,7 +1198,7 @@ mod tests {
             manifest.pagination.next_cursor.is_none(),
             "should have no cursor when all files fit in page"
         );
-        assert_eq!(manifest.pagination.total_files, 5);
+        assert_eq!(manifest.pagination.total_items, 5);
         assert_eq!(manifest.files.len(), 5);
     }
 
@@ -1217,7 +1217,7 @@ mod tests {
             3,
             "should return only page_size files"
         );
-        assert_eq!(manifest.pagination.total_files, 5);
+        assert_eq!(manifest.pagination.total_items, 5);
         assert_eq!(manifest.pagination.page_start, 0);
         assert_eq!(manifest.pagination.page_size, 3);
         assert!(
@@ -1831,7 +1831,7 @@ mod tests {
             manifest.pagination.next_cursor.is_none(),
             "worktree should have no cursor when all files fit in page"
         );
-        assert_eq!(manifest.pagination.total_files, 5);
+        assert_eq!(manifest.pagination.total_items, 5);
         assert_eq!(manifest.files.len(), 5);
     }
 
@@ -1850,7 +1850,7 @@ mod tests {
             3,
             "should return only page_size files"
         );
-        assert_eq!(manifest.pagination.total_files, 5);
+        assert_eq!(manifest.pagination.total_items, 5);
         assert_eq!(manifest.pagination.page_start, 0);
         assert_eq!(manifest.pagination.page_size, 3);
         assert!(
@@ -2320,5 +2320,21 @@ mod tests {
             !manifest.dependency_changes.is_empty(),
             "dependency changes should always be complete regardless of pagination"
         );
+    }
+
+    #[test]
+    fn it_returns_empty_files_when_offset_beyond_total() {
+        let (_dir, path) = create_repo_with_n_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        // The repo has ~2 changed files; offset 999 is way past the end
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 999, 100).unwrap();
+        assert!(manifest.files.is_empty());
+        assert!(manifest.pagination.next_cursor.is_none());
+        // Summary still reflects all files
+        assert!(manifest.summary.total_files_changed > 0);
     }
 }
