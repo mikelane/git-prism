@@ -27,7 +27,6 @@ env:
 
 jobs:
   # On PRs: incremental mode — only mutants in changed files.
-  # Fast feedback, typically <10 minutes.
   incremental:
     name: Mutants (incremental)
     if: github.event_name == 'pull_request'
@@ -47,15 +46,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cargo-mutants
+            ~/.cargo/bin/cargo-nextest
             target
           key: ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-
 
-      - name: Install cargo-mutants
+      - name: Install cargo-mutants and nextest
         run: |
           if ! cargo mutants --version 2>/dev/null | grep -q "$CARGO_MUTANTS_VERSION"; then
             cargo install "cargo-mutants@$CARGO_MUTANTS_VERSION"
+          fi
+          if ! cargo nextest --version 2>/dev/null; then
+            cargo install cargo-nextest
           fi
 
       - name: Fetch base branch
@@ -65,7 +68,7 @@ jobs:
         run: git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
 
       - name: Run cargo-mutants on changed files
-        run: cargo mutants --timeout 300 --jobs 4 --in-diff pr.diff
+        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --in-diff pr.diff
 
       - name: Upload mutants output
         if: always()
@@ -74,13 +77,17 @@ jobs:
           name: mutants-incremental
           path: mutants.out/
 
-  # On main push: full suite — all in-scope mutants.
-  # Posts score to step summary. Does not block the merge.
+  # On main push + schedule: full suite split across 4 shards.
+  # Each shard tests ~115 mutants in parallel.
   full:
-    name: Mutants (full suite)
-    if: github.event_name == 'push' || github.event_name == 'schedule'
+    name: Mutants (shard ${{ matrix.shard }})
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     steps:
       - uses: actions/checkout@v6
 
@@ -93,37 +100,59 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/cargo-mutants
+            ~/.cargo/bin/cargo-nextest
             target
           key: ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-mutants-${{ env.CARGO_MUTANTS_VERSION }}-
 
-      - name: Install cargo-mutants
+      - name: Install cargo-mutants and nextest
         run: |
           if ! cargo mutants --version 2>/dev/null | grep -q "$CARGO_MUTANTS_VERSION"; then
             cargo install "cargo-mutants@$CARGO_MUTANTS_VERSION"
           fi
+          if ! cargo nextest --version 2>/dev/null; then
+            cargo install cargo-nextest
+          fi
 
-      - name: Run full mutation testing
-        run: cargo mutants --timeout 300 --jobs 4
+      - name: Run mutation testing (shard ${{ matrix.shard }})
+        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --shard ${{ matrix.shard }}
 
-      - name: Generate summary
+      - name: Upload shard results
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-shard-${{ strategy.job-index }}
+          path: mutants.out/
+
+  # Aggregate shard results and post summary.
+  summary:
+    name: Mutants (summary)
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: full
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-shard-*
+          path: shards/
+
+      - name: Aggregate and generate summary
         run: |
-          if [ -f mutants.out/outcomes.json ]; then
-            python3 - <<'SCRIPT'
-          import json, os, textwrap
+          python3 - <<'SCRIPT'
+          import json, os, glob, textwrap
 
-          with open("mutants.out/outcomes.json") as f:
-              data = json.load(f)
+          killed = survived = unviable = 0
+          for outcomes_file in sorted(glob.glob("shards/*/outcomes.json")):
+              with open(outcomes_file) as f:
+                  data = json.load(f)
+              outcomes = data.get("outcomes", data) if isinstance(data, dict) else data
+              killed += sum(1 for o in outcomes if o.get("summary") in ("CaughtMutant", "Timeout"))
+              survived += sum(1 for o in outcomes if o.get("summary") == "MissedMutant")
+              unviable += sum(1 for o in outcomes if o.get("summary") == "Unviable")
 
-          outcomes = data.get("outcomes", data) if isinstance(data, dict) else data
-
-          killed = sum(1 for o in outcomes if o.get("summary") in ("CaughtMutant", "Timeout"))
-          survived = sum(1 for o in outcomes if o.get("summary") == "MissedMutant")
-          unviable = sum(1 for o in outcomes if o.get("summary") == "Unviable")
           total_testable = killed + survived
-
           if total_testable > 0:
               score = killed / total_testable * 100
               score_str = f"{score:.1f}%"
@@ -148,11 +177,3 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(summary)
           SCRIPT
-          fi
-
-      - name: Upload mutants output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutants-full
-          path: mutants.out/
