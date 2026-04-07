@@ -13,61 +13,13 @@ the pagination implementation lands.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 from behave import given, then, when
 from behave.runner import Context
 
-
-# ---------- Helpers ----------
-
-
-def _init_repo(context: Context) -> str:
-    """Create and init a temporary git repository."""
-    repo_dir = tempfile.mkdtemp()
-    context.cleanup_dirs.append(repo_dir)
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=repo_dir,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=repo_dir,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "commit.gpgsign", "false"],
-        cwd=repo_dir,
-        check=True,
-        capture_output=True,
-    )
-    return repo_dir
-
-
-def _write_file(repo_dir: str, name: str, content: str) -> None:
-    path = Path(repo_dir) / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-
-
-def _commit(repo_dir: str, message: str, files: list[str]) -> None:
-    for f in files:
-        subprocess.run(
-            ["git", "add", f], cwd=repo_dir, check=True, capture_output=True
-        )
-    subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=repo_dir,
-        check=True,
-        capture_output=True,
-    )
+from repo_setup_steps import _commit, _init_repo, _write_file
 
 
 def _send_mcp_tool_call(
@@ -127,9 +79,18 @@ def _send_mcp_tool_call(
 # ---------- Given steps ----------
 
 
+def _disable_gpgsign(repo_dir: str) -> None:
+    """Disable commit signing in a repo (needed in some CI environments)."""
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=repo_dir, check=True, capture_output=True,
+    )
+
+
 @given("a git repository with {count:d} changed files")
 def step_create_repo_with_n_files(context: Context, count: int) -> None:
     repo_dir = _init_repo(context)
+    _disable_gpgsign(repo_dir)
     context.repo_path = repo_dir
 
     # Initial commit with a seed file
@@ -142,12 +103,16 @@ def step_create_repo_with_n_files(context: Context, count: int) -> None:
     subprocess.run(
         ["git", "add", "."], cwd=repo_dir, check=True, capture_output=True
     )
-    _commit(repo_dir, f"add {count} files", ["."])
+    subprocess.run(
+        ["git", "commit", "-m", f"add {count} files"],
+        cwd=repo_dir, check=True, capture_output=True,
+    )
 
 
 @given("a git repository with {count:d} sequential commits")
 def step_create_repo_with_n_commits(context: Context, count: int) -> None:
     repo_dir = _init_repo(context)
+    _disable_gpgsign(repo_dir)
     context.repo_path = repo_dir
 
     # Anchor commit
@@ -180,6 +145,21 @@ def step_get_first_page(context: Context, size: int) -> None:
     )
 
 
+@given("a git repository with {count:d} unstaged changed files")
+def step_create_repo_with_unstaged_files(context: Context, count: int) -> None:
+    repo_dir = _init_repo(context)
+    _disable_gpgsign(repo_dir)
+    context.repo_path = repo_dir
+
+    # Initial commit with a seed file
+    _write_file(repo_dir, "seed.txt", "seed\n")
+    _commit(repo_dir, "initial", ["seed.txt"])
+
+    # Create N unstaged files (not committed)
+    for i in range(count):
+        _write_file(repo_dir, f"file_{i:04d}.txt", f"content {i}\n")
+
+
 @given("a new commit is added to the repository")
 def step_add_commit(context: Context) -> None:
     _write_file(context.repo_path, "new_after_cursor.txt", "new content\n")
@@ -195,6 +175,16 @@ def step_request_manifest_with_page_size(context: Context, size: int) -> None:
         context,
         "get_change_manifest",
         {"base_ref": "HEAD~1", "head_ref": "HEAD", "page_size": size},
+        repo_path=context.repo_path,
+    )
+
+
+@when("the agent requests a working tree manifest with page size {size:d}")
+def step_request_worktree_manifest(context: Context, size: int) -> None:
+    context.result = _send_mcp_tool_call(
+        context,
+        "get_change_manifest",
+        {"base_ref": "HEAD", "page_size": size},
         repo_path=context.repo_path,
     )
 
@@ -393,27 +383,13 @@ def step_summary_total(context: Context, count: int) -> None:
 
 @then("the summary is identical on every page")
 def step_summary_identical_across_pages(context: Context) -> None:
-    # Page through and compare summaries
-    summaries = []
-    cursor = None
-    for _ in range(100):
-        args = {"base_ref": "HEAD~1", "head_ref": "HEAD", "page_size": 50}
-        if cursor:
-            args["cursor"] = cursor
-        result = _send_mcp_tool_call(
-            context,
-            "get_change_manifest",
-            args,
-            repo_path=context.repo_path,
-        )
-        summaries.append(result.get("summary"))
-        cursor = result.get("pagination", {}).get("next_cursor")
-        if cursor is None:
-            break
-
-    assert len(summaries) >= 2, (
-        f"Expected multiple pages to compare summaries, got {len(summaries)}"
+    # Uses context.all_pages populated by "pages through the entire manifest"
+    pages = getattr(context, "all_pages", [])
+    assert len(pages) >= 2, (
+        f"Expected multiple pages to compare summaries, got {len(pages)}. "
+        f"This fails because pagination is not yet implemented."
     )
+    summaries = [p.get("summary") for p in pages]
     for i, s in enumerate(summaries[1:], start=2):
         assert s == summaries[0], (
             f"Summary on page {i} differs from page 1: {s} != {summaries[0]}"

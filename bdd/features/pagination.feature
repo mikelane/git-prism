@@ -31,7 +31,7 @@ Feature: Paginated manifest and history responses
 
   @ISSUE-76 @not_implemented
   Scenario: Summary reflects all files regardless of page
-    When the agent requests a change manifest with page size 50
+    When the agent pages through the entire manifest with page size 50
     Then the summary reports 150 total files changed
     And the summary is identical on every page
 
@@ -82,6 +82,13 @@ Feature: Paginated manifest and history responses
     Given a git repository with 20 sequential commits
     When the agent requests commit history with page size 5
     Then the response contains exactly 5 commits
+    And the response includes a pagination cursor
+
+  @ISSUE-76 @not_implemented
+  Scenario: Working tree mode supports pagination
+    Given a git repository with 150 unstaged changed files
+    When the agent requests a working tree manifest with page size 50
+    Then the response contains exactly 50 files
     And the response includes a pagination cursor
 
   @ISSUE-79 @not_implemented
