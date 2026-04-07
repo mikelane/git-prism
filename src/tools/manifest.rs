@@ -7,12 +7,12 @@ use crate::git::depfiles::{diff_dependencies, is_dependency_file};
 use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
-use crate::pagination::{encode_cursor, PaginationCursor, PaginationInfo};
+use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
 use crate::tools::types::{
-    detect_language, FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry,
-    ManifestMetadata, ManifestOptions, ManifestResponse, ManifestSummary, ToolError,
+    FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
+    ManifestOptions, ManifestResponse, ManifestSummary, ToolError, detect_language,
 };
-use crate::treesitter::{analyzer_for_extension, Function};
+use crate::treesitter::{Function, analyzer_for_extension};
 
 pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<FunctionChange> {
     let base_map: HashMap<&str, &Function> =
