@@ -65,7 +65,7 @@ pub fn build_history(
     };
 
     let pagination = PaginationInfo {
-        total_files: total_commits,
+        total_items: total_commits,
         page_start: offset,
         page_size,
         next_cursor,
@@ -275,7 +275,7 @@ mod tests {
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 0, 10).unwrap();
 
         assert_eq!(history.commits.len(), 3);
-        assert_eq!(history.pagination.total_files, 3);
+        assert_eq!(history.pagination.total_items, 3);
         assert_eq!(history.pagination.page_start, 0);
         assert_eq!(history.pagination.page_size, 10);
         assert!(history.pagination.next_cursor.is_none());
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(history.commits.len(), 2);
         assert_eq!(history.commits[0].metadata.message, "commit one");
         assert_eq!(history.commits[1].metadata.message, "commit two");
-        assert_eq!(history.pagination.total_files, 3);
+        assert_eq!(history.pagination.total_items, 3);
         assert_eq!(history.pagination.page_start, 0);
         assert_eq!(history.pagination.page_size, 2);
         assert!(history.pagination.next_cursor.is_some());
@@ -314,7 +314,7 @@ mod tests {
 
         assert_eq!(history.commits.len(), 1);
         assert_eq!(history.commits[0].metadata.message, "commit three");
-        assert_eq!(history.pagination.total_files, 3);
+        assert_eq!(history.pagination.total_items, 3);
         assert_eq!(history.pagination.page_start, 2);
         assert_eq!(history.pagination.page_size, 2);
         assert!(history.pagination.next_cursor.is_none());

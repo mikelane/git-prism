@@ -460,7 +460,7 @@ mod tests {
                 },
             }],
             pagination: PaginationInfo {
-                total_files: 1,
+                total_items: 1,
                 page_start: 0,
                 page_size: 100,
                 next_cursor: None,
