@@ -117,6 +117,7 @@ fn collect_all_manifest_pages(
     options: &ManifestOptions,
     page_size: usize,
 ) -> anyhow::Result<ManifestResponse> {
+    let page_size = crate::pagination::clamp_page_size(page_size);
     let mut all_files = Vec::new();
 
     let first_page = build_manifest(repo_path, base, head, options, 0, page_size)?;
@@ -152,6 +153,7 @@ fn collect_all_worktree_manifest_pages(
     options: &ManifestOptions,
     page_size: usize,
 ) -> anyhow::Result<ManifestResponse> {
+    let page_size = crate::pagination::clamp_page_size(page_size);
     let mut all_files = Vec::new();
 
     let first_page = build_worktree_manifest(repo_path, base, options, 0, page_size)?;
@@ -188,6 +190,7 @@ fn collect_all_history_pages(
     options: &ManifestOptions,
     page_size: usize,
 ) -> anyhow::Result<HistoryResponse> {
+    let page_size = crate::pagination::clamp_page_size(page_size);
     let mut all_commits = Vec::new();
 
     let first_page = build_history(repo_path, base, head, options, 0, page_size)?;
