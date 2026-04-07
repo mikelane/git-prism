@@ -91,7 +91,19 @@ impl GitPrismServer {
             let offset = if let Some(ref cursor_str) = args.cursor {
                 let cursor =
                     crate::pagination::decode_cursor(cursor_str).map_err(|e| e.to_string())?;
-                // Validate will be done after we resolve refs below
+                // Resolve refs and validate cursor SHAs match
+                let reader =
+                    crate::git::reader::RepoReader::open(&repo_path).map_err(|e| e.to_string())?;
+                let base_sha = reader
+                    .resolve_commit(&args.base_ref)
+                    .map_err(|e| e.to_string())?
+                    .sha;
+                let head_sha = match &args.head_ref {
+                    Some(h) => reader.resolve_commit(h).map_err(|e| e.to_string())?.sha,
+                    None => "WORKTREE".to_string(),
+                };
+                crate::pagination::validate_cursor(&cursor, &base_sha, &head_sha)
+                    .map_err(|e| e.to_string())?;
                 cursor.offset
             } else {
                 0
@@ -223,6 +235,18 @@ impl GitPrismServer {
             let offset = if let Some(ref cursor_str) = args.cursor {
                 let cursor =
                     crate::pagination::decode_cursor(cursor_str).map_err(|e| e.to_string())?;
+                let reader =
+                    crate::git::reader::RepoReader::open(&repo_path).map_err(|e| e.to_string())?;
+                let base_sha = reader
+                    .resolve_commit(&args.base_ref)
+                    .map_err(|e| e.to_string())?
+                    .sha;
+                let head_sha = reader
+                    .resolve_commit(&args.head_ref)
+                    .map_err(|e| e.to_string())?
+                    .sha;
+                crate::pagination::validate_cursor(&cursor, &base_sha, &head_sha)
+                    .map_err(|e| e.to_string())?;
                 cursor.offset
             } else {
                 0
@@ -246,7 +270,10 @@ impl GitPrismServer {
                 Ok(response) => {
                     let total_files: usize = response.commits.iter().map(|c| c.files.len()).sum();
                     root_span.record("response_files_count", total_files as i64);
-                    root_span.record("response_truncated", false);
+                    root_span.record(
+                        "response_truncated",
+                        response.pagination.next_cursor.is_some(),
+                    );
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }
