@@ -186,6 +186,7 @@ pub struct CommitManifest {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HistoryResponse {
     pub commits: Vec<CommitManifest>,
+    pub pagination: PaginationInfo,
 }
 
 // --- Tool options (for internal use) ---
@@ -458,6 +459,12 @@ mod tests {
                     languages_affected: vec![],
                 },
             }],
+            pagination: PaginationInfo {
+                total_files: 1,
+                page_start: 0,
+                page_size: 100,
+                next_cursor: None,
+            },
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["commits"].as_array().unwrap().len(), 1);
