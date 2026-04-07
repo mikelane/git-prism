@@ -2337,4 +2337,181 @@ mod tests {
         // Summary still reflects all files
         assert!(manifest.summary.total_files_changed > 0);
     }
+
+    #[test]
+    fn it_is_paginating_only_when_total_exceeds_page_size() {
+        let (_dir, path) = create_repo_with_n_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // 3 files, page_size=3 → all fit, no cursor
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
+        assert_eq!(manifest.files.len(), 3);
+        assert!(manifest.pagination.next_cursor.is_none());
+
+        // 3 files, page_size=2 → paginating, cursor present
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 2).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.pagination.next_cursor.is_some());
+
+        // 3 files, page_size=4 → all fit, no cursor
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 4).unwrap();
+        assert_eq!(manifest.files.len(), 3);
+        assert!(manifest.pagination.next_cursor.is_none());
+    }
+
+    #[test]
+    fn it_counts_summary_added_modified_deleted_correctly_with_pagination() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // First commit: create files to be modified and deleted
+        std::fs::write(path.join("modify_me.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(path.join("delete_me.rs"), "fn gone() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: add new, modify one, delete one
+        std::fs::write(path.join("added.rs"), "fn new() {}\n").unwrap();
+        std::fs::write(path.join("modify_me.rs"), "fn modified() {}\n").unwrap();
+        std::fs::remove_file(path.join("delete_me.rs")).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "changes"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        // Use a small page to ensure we're paginating but summary is still complete
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        assert_eq!(manifest.summary.files_added, 1);
+        assert_eq!(manifest.summary.files_modified, 1);
+        assert_eq!(manifest.summary.files_deleted, 1);
+        assert_eq!(manifest.summary.total_files_changed, 3);
+        assert!(manifest.summary.total_lines_added > 0);
+        assert!(manifest.summary.total_lines_removed > 0);
+    }
+
+    #[test]
+    fn it_uses_empty_base_for_added_dep_file_in_paginated_mode() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("seed.txt"), "seed\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Add a new Cargo.toml (ChangeType::Added)
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"test\"\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add cargo"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
+        // Dep analysis should show added deps even though page_size=1
+        assert!(
+            !manifest.dependency_changes.is_empty(),
+            "dependency changes should detect added Cargo.toml"
+        );
+        let dep = &manifest.dependency_changes[0];
+        assert!(!dep.added.is_empty(), "should have added dependencies");
+    }
+
+    #[test]
+    fn it_returns_exact_page_boundary_files() {
+        // offset == total_files should return empty; offset == total_files - 1 should return 1
+        let (_dir, path) = create_repo_with_n_files(3);
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+        };
+
+        // offset at last file
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 2, 100).unwrap();
+        assert_eq!(manifest.files.len(), 1, "should return the last file");
+
+        // offset exactly at total
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 3, 100).unwrap();
+        assert!(
+            manifest.files.is_empty(),
+            "offset at total should return empty"
+        );
+    }
 }
