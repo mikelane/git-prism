@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::depfiles::DependencyDiff;
 use crate::git::diff::{ChangeScope, ChangeType};
+use crate::pagination::PaginationInfo;
 
 // --- FunctionChange ---
 
@@ -77,20 +78,12 @@ pub struct ManifestFileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct TruncationInfo {
-    pub total_files: usize,
-    pub files_included: usize,
-    pub files_omitted: usize,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ManifestResponse {
     pub metadata: ManifestMetadata,
     pub summary: ManifestSummary,
     pub files: Vec<ManifestFileEntry>,
     pub dependency_changes: Vec<DependencyDiff>,
-    pub truncated: bool,
-    pub truncation_info: Option<TruncationInfo>,
+    pub pagination: PaginationInfo,
 }
 
 // --- Snapshot types ---
@@ -373,14 +366,18 @@ mod tests {
             },
             files: vec![],
             dependency_changes: vec![],
-            truncated: false,
-            truncation_info: None,
+            pagination: PaginationInfo {
+                total_files: 1,
+                page_start: 0,
+                page_size: 200,
+                next_cursor: None,
+            },
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["metadata"]["base_ref"], "HEAD~1");
         assert_eq!(json["summary"]["total_files_changed"], 1);
         assert!(json["summary"]["total_functions_changed"].is_null());
-        assert_eq!(json["truncated"], false);
+        assert!(json["pagination"]["next_cursor"].is_null());
     }
 
     #[test]

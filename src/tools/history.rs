@@ -24,7 +24,7 @@ pub fn build_history(
             commit_infos[i - 1].sha.clone()
         };
 
-        let manifest = build_manifest(repo_path, &parent_ref, &info.sha, options)?;
+        let manifest = build_manifest(repo_path, &parent_ref, &info.sha, options, 0, 500)?;
 
         commits.push(CommitManifest {
             metadata: CommitMetadata {
