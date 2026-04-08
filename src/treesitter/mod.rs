@@ -7,6 +7,7 @@ pub mod php;
 pub mod python;
 pub mod ruby;
 pub mod rust_lang;
+pub mod swift;
 pub mod typescript;
 
 /// A function extracted from source code by tree-sitter analysis.
@@ -36,6 +37,7 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
         "rs" => Some(Box::new(rust_lang::RustAnalyzer)),
         "java" => Some(Box::new(java::JavaAnalyzer)),
         "php" => Some(Box::new(php::PhpAnalyzer)),
+        "swift" => Some(Box::new(swift::SwiftAnalyzer)),
         "c" | "h" => Some(Box::new(c_lang::CAnalyzer)),
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => Some(Box::new(cpp::CppAnalyzer)),
         "cs" => Some(Box::new(csharp::CSharpAnalyzer)),
@@ -49,7 +51,9 @@ mod tests {
 
     #[test]
     fn registry_returns_some_for_supported_extensions() {
-        for ext in &["go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php", "cs"] {
+        for ext in &[
+            "go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php", "cs", "rb", "swift",
+        ] {
             assert!(
                 analyzer_for_extension(ext).is_some(),
                 "expected Some for extension '{ext}'"

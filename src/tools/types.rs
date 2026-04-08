@@ -241,6 +241,7 @@ pub fn detect_language(path: &str) -> &'static str {
         "rs" => "rust",
         "java" => "java",
         "php" => "php",
+        "swift" => "swift",
         "c" | "h" => "c",
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "cpp",
         "cs" => "csharp",
@@ -295,6 +296,11 @@ mod tests {
     #[test]
     fn it_detects_java_from_nested_path() {
         assert_eq!(detect_language("src/com/example/Main.java"), "java");
+    }
+
+    #[test]
+    fn it_detects_swift_from_swift_extension() {
+        assert_eq!(detect_language("App.swift"), "swift");
     }
 
     #[test]
