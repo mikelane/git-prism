@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-08
+
+### Added
+
+- **Cursor-based pagination** for `get_change_manifest` and `get_commit_history`. Large diffs are no longer silently truncated — agents page through results using opaque cursors. New parameters: `cursor` (continuation token) and `page_size` (1-500, default 100).
+- **OpenTelemetry observability** — opt-in metrics and traces via `GIT_PRISM_OTLP_ENDPOINT`. 14 metrics (request counts, duration histograms, token estimates, error rates) and per-tool trace trees with sub-spans for gix and tree-sitter operations.
+- **Mutation testing CI** — cargo-mutants runs on every PR (incremental) and weekly (full suite) with sharded execution and nextest for faster feedback.
+- **CLI auto-pagination** — `manifest` and `history` commands loop through all pages internally and output complete results. New `--page-size` flag for tuning.
+- Privacy-safe telemetry attributes: repo paths SHA-256 hashed, ref names normalized to bounded enum, commit SHAs restricted to span attributes.
+- Pagination telemetry: `pages_requested` counter, `page_number` and `page_size` span attributes.
+
+### Changed
+
+- **Breaking:** `ManifestResponse` replaces `truncated`/`truncation_info` with `pagination` object (`total_items`, `page_start`, `page_size`, `next_cursor`).
+- **Breaking:** `HistoryResponse` gains `pagination` object.
+- Default manifest page size is 100 files (was 200 hard truncation limit). Agents can request up to 500 per page.
+- Summary always reflects all files regardless of which page is returned.
+- Tree-sitter analysis runs only on the current page's files (performance improvement for large diffs).
+
+### Technical
+
+- New modules: `src/telemetry.rs`, `src/metrics.rs`, `src/privacy.rs`, `src/pagination.rs`
+- `base64` added as direct dependency for cursor encoding
+- OpenTelemetry stack: `tracing`, `tracing-opentelemetry`, `opentelemetry-otlp` (gRPC/tonic)
+- ADRs: mutation testing baseline (#0002), pagination spike (#0003)
+- Test count: 246 → 366 (120 new tests including mutation-testing gap closers)
+- CI: mutation testing workflow with 4-shard parallelism, nextest, copy-target caching
+
 ## [0.2.0] — 2026-04-05
 
 ### Added
@@ -42,5 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.3.0]: https://github.com/mikelane/git-prism/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mikelane/git-prism/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mikelane/git-prism/releases/tag/v0.1.0
