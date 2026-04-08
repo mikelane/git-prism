@@ -654,6 +654,10 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].name, "foo");
         assert_eq!(changes[0].change_type, FunctionChangeType::Added);
+        assert!(
+            changes[0].old_name.is_none(),
+            "Added should not have old_name"
+        );
     }
 
     #[test]
@@ -670,6 +674,10 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].name, "bar");
         assert_eq!(changes[0].change_type, FunctionChangeType::Deleted);
+        assert!(
+            changes[0].old_name.is_none(),
+            "Deleted should not have old_name"
+        );
     }
 
     #[test]
@@ -691,10 +699,14 @@ mod tests {
         let changes = diff_functions(&base, &head);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_type, FunctionChangeType::SignatureChanged);
+        assert!(
+            changes[0].old_name.is_none(),
+            "SignatureChanged should not have old_name"
+        );
     }
 
     #[test]
-    fn it_detects_modified_function_by_line_range() {
+    fn it_detects_modified_function_by_body_hash_change() {
         let base = vec![Function {
             name: "qux".into(),
             signature: "fn qux()".into(),
@@ -712,6 +724,31 @@ mod tests {
         let changes = diff_functions(&base, &head);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_type, FunctionChangeType::Modified);
+        assert!(changes[0].old_name.is_none());
+    }
+
+    #[test]
+    fn line_range_change_alone_does_not_trigger_modified() {
+        // Triangulation: same body_hash + different lines = no change (moved, not modified)
+        let base = vec![Function {
+            name: "qux".into(),
+            signature: "fn qux()".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "same_hash".into(),
+        }];
+        let head = vec![Function {
+            name: "qux".into(),
+            signature: "fn qux()".into(),
+            start_line: 50,
+            end_line: 100,
+            body_hash: "same_hash".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+        assert!(
+            changes.is_empty(),
+            "line range change with same body_hash should NOT produce Modified"
+        );
     }
 
     #[test]
@@ -772,6 +809,10 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].name, "compute");
         assert_eq!(changes[0].change_type, FunctionChangeType::Modified);
+        assert!(
+            changes[0].old_name.is_none(),
+            "Modified should not have old_name"
+        );
     }
 
     #[test]
@@ -939,6 +980,100 @@ mod tests {
                 "non-rename changes should have None old_name"
             );
         }
+    }
+
+    #[test]
+    fn duplicate_body_hash_produces_correct_rename_and_delete_counts() {
+        // 2 deleted functions share the same body_hash, 1 added matches.
+        // Expect: 1 Renamed + 1 Deleted (pairing is greedy/arbitrary, but counts are exact).
+        let base = vec![
+            Function {
+                name: "a".into(),
+                signature: "fn a()".into(),
+                start_line: 1,
+                end_line: 2,
+                body_hash: "stub_hash".into(),
+            },
+            Function {
+                name: "b".into(),
+                signature: "fn b()".into(),
+                start_line: 3,
+                end_line: 4,
+                body_hash: "stub_hash".into(),
+            },
+        ];
+        let head = vec![Function {
+            name: "c".into(),
+            signature: "fn c()".into(),
+            start_line: 1,
+            end_line: 2,
+            body_hash: "stub_hash".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+
+        assert_eq!(changes.len(), 2);
+        let renamed_count = changes
+            .iter()
+            .filter(|c| c.change_type == FunctionChangeType::Renamed)
+            .count();
+        let deleted_count = changes
+            .iter()
+            .filter(|c| c.change_type == FunctionChangeType::Deleted)
+            .count();
+        assert_eq!(renamed_count, 1, "exactly one rename");
+        assert_eq!(deleted_count, 1, "exactly one delete");
+
+        let renamed = changes
+            .iter()
+            .find(|c| c.change_type == FunctionChangeType::Renamed)
+            .unwrap();
+        assert_eq!(renamed.name, "c");
+        assert!(
+            renamed.old_name.as_deref() == Some("a") || renamed.old_name.as_deref() == Some("b"),
+            "old_name should be one of the deleted functions, got {:?}",
+            renamed.old_name
+        );
+    }
+
+    #[test]
+    fn more_added_than_deleted_with_same_hash() {
+        // 1 deleted, 2 added with the same hash → 1 Renamed + 1 Added
+        let base = vec![Function {
+            name: "old".into(),
+            signature: "fn old()".into(),
+            start_line: 1,
+            end_line: 2,
+            body_hash: "stub_hash".into(),
+        }];
+        let head = vec![
+            Function {
+                name: "new_a".into(),
+                signature: "fn new_a()".into(),
+                start_line: 1,
+                end_line: 2,
+                body_hash: "stub_hash".into(),
+            },
+            Function {
+                name: "new_b".into(),
+                signature: "fn new_b()".into(),
+                start_line: 3,
+                end_line: 4,
+                body_hash: "stub_hash".into(),
+            },
+        ];
+        let changes = diff_functions(&base, &head);
+
+        assert_eq!(changes.len(), 2);
+        let renamed_count = changes
+            .iter()
+            .filter(|c| c.change_type == FunctionChangeType::Renamed)
+            .count();
+        let added_count = changes
+            .iter()
+            .filter(|c| c.change_type == FunctionChangeType::Added)
+            .count();
+        assert_eq!(renamed_count, 1, "exactly one rename");
+        assert_eq!(added_count, 1, "exactly one added");
     }
 
     #[test]

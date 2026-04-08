@@ -139,5 +139,10 @@ mod tests {
         assert_eq!(json["signature"], "fn main()");
         assert_eq!(json["start_line"], 1);
         assert_eq!(json["end_line"], 3);
+        // body_hash is internal plumbing — must NOT leak into JSON output
+        assert!(
+            json.get("body_hash").is_none(),
+            "body_hash must be excluded from serialization"
+        );
     }
 }
