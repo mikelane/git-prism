@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-08
+
+### Added
+
+- **PHP** tree-sitter analyzer (`.php`) — functions, class methods, `use` declarations
+- **C#** tree-sitter analyzer (`.cs`) — methods, constructors, `using` directives
+- **Kotlin** tree-sitter analyzer (`.kt`, `.kts`) — functions, methods, extension functions, imports
+- **Ruby** tree-sitter analyzer (`.rb`) — methods, singleton methods, `require`/`require_relative`
+- **Swift** tree-sitter analyzer (`.swift`) — functions, methods, init declarations, imports
+
+Function-level analysis now covers 13 languages (was 8). git-prism supports the top 13 most popular languages on GitHub.
+
+### Changed
+
+- README languages table updated with all 13 languages
+- CLI `languages` command lists all 13 languages
+
 ## [0.3.1] — 2026-04-08
 
 ### Fixed
@@ -80,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.4.0]: https://github.com/mikelane/git-prism/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/mikelane/git-prism/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mikelane/git-prism/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mikelane/git-prism/compare/v0.1.0...v0.2.0

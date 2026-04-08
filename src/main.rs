@@ -642,12 +642,16 @@ async fn main() -> anyhow::Result<()> {
             println!("Supported languages for function-level analysis:");
             println!("  c          (.c, .h)");
             println!("  cpp        (.cpp, .hpp, .cc, .cxx, .hh, .hxx)");
+            println!("  csharp     (.cs)");
             println!("  go         (.go)");
             println!("  java       (.java)");
             println!("  javascript (.js, .jsx)");
             println!("  kotlin     (.kt, .kts)");
+            println!("  php        (.php)");
             println!("  python     (.py)");
+            println!("  ruby       (.rb)");
             println!("  rust       (.rs)");
+            println!("  swift      (.swift)");
             println!("  typescript (.ts, .tsx)");
         }
     }

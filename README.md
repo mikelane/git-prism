@@ -315,12 +315,17 @@ to extract functions, methods, and imports from source code.
 | Language | Extensions | Extracts |
 |----------|------------|----------|
 | C | `.c`, `.h` | functions, declarations, `#include` directives |
-| C++ | `.cpp`, `.hpp` | class/namespace-qualified methods, functions, `#include` directives |
+| C++ | `.cpp`, `.hpp`, `.cc`, `.cxx`, `.hh`, `.hxx` | class/namespace-qualified methods, functions, `#include` directives |
+| C# | `.cs` | methods, constructors, `using` directives |
 | Go | `.go` | functions, methods, imports |
 | Java | `.java` | methods, constructors, imports |
 | JavaScript | `.js`, `.jsx` | functions, arrow functions, methods, imports |
+| Kotlin | `.kt`, `.kts` | functions, methods, extension functions, imports |
+| PHP | `.php` | functions, methods, `use` declarations |
 | Python | `.py` | functions, methods, imports |
+| Ruby | `.rb` | methods, singleton methods, `require`/`require_relative` |
 | Rust | `.rs` | functions, methods, use statements |
+| Swift | `.swift` | functions, methods, init declarations, imports |
 | TypeScript | `.ts`, `.tsx` | functions, arrow functions, methods, imports |
 
 Files in unsupported languages still appear in the manifest with full
