@@ -74,6 +74,7 @@ Histograms use explicit bucket boundaries listed below.
 | `git_prism.manifest.files_returned` | histogram | -- | Number of files in a manifest response. |
 | `git_prism.manifest.functions_changed` | histogram | `language` | Number of changed functions per file. |
 | `git_prism.response.truncated` | counter | `tool`, `reason` | Responses that were truncated. |
+| `git_prism.pagination.pages_requested` | counter | `tool` | Paginated requests (cursor-bearing). |
 
 **Label values:**
 
@@ -135,6 +136,8 @@ Every root `mcp.tool.*` span carries these attributes:
 | `response.tokens_estimated` | Estimated token count. |
 | `response.bytes` | Response size in bytes. |
 | `response.truncated` | Whether the response was truncated (`true`/`false`). |
+| `page_number` | Page number (0-indexed). |
+| `page_size` | Requested page size. |
 
 ---
 
