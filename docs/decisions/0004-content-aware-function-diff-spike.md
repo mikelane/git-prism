@@ -2,7 +2,7 @@
 
 - **Status**: Accepted
 - **Date**: 2026-04-08
-- **Spike issue**: TBD
+- **Spike issue**: #100
 - **Design spec**: `docs/specs/2026-04-08-smarter-function-diffs.md`
 
 ## Context

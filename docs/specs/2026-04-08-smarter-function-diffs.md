@@ -1,6 +1,6 @@
 # Content-Aware Function Diffs
 
-- **Epic**: TBD
+- **Epic**: #100
 - **Status**: Draft
 - **Date**: 2026-04-08
 
