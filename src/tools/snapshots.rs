@@ -19,11 +19,9 @@ pub fn build_snapshots(
 ) -> Result<SnapshotResponse, ToolError> {
     let reader = RepoReader::open(repo_path)?;
 
-    let paths_to_process = if paths.len() > MAX_SNAPSHOT_FILES {
-        &paths[..MAX_SNAPSHOT_FILES]
-    } else {
-        paths
-    };
+    // Exactly MAX_SNAPSHOT_FILES paths produces the full slice either way.
+    #[rustfmt::skip]
+    let paths_to_process = if paths.len() > MAX_SNAPSHOT_FILES { &paths[..MAX_SNAPSHOT_FILES] } else { paths };
 
     let mut files = Vec::new();
     let mut total_chars: usize = 0;

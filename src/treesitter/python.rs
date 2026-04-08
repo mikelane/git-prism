@@ -192,4 +192,26 @@ from typing import List, Optional
         let imports = analyzer.extract_imports(source).unwrap();
         assert!(imports.is_empty());
     }
+
+    // Kill mutants: replace + with * or - in class_definition line number arithmetic (row + 1).
+    // Class at row > 0 ensures row+1 != row*1 and row+1 != row-1.
+    #[test]
+    fn it_reports_correct_line_numbers_for_class_definition() {
+        let source = b"# comment line 1
+# comment line 2
+
+class MyClass:
+    def method(self):
+        pass
+";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "MyClass");
+        assert_eq!(functions[0].start_line, 4);
+        assert_eq!(functions[0].end_line, 6);
+        assert_eq!(functions[1].name, "MyClass.method");
+        assert_eq!(functions[1].start_line, 5);
+        assert_eq!(functions[1].end_line, 6);
+    }
 }

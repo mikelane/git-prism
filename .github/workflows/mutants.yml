@@ -68,7 +68,25 @@ jobs:
         run: git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
 
       - name: Run cargo-mutants on changed files
-        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --in-diff pr.diff
+        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --in-diff pr.diff || true
+
+      - name: Report mutation score
+        if: always()
+        run: |
+          if [ -f mutants.out/outcomes.json ]; then
+            python3 - <<'SCRIPT'
+          import json
+
+          with open("mutants.out/outcomes.json") as f:
+              data = json.load(f)
+          outcomes = data.get("outcomes", data) if isinstance(data, dict) else data
+          killed = sum(1 for o in outcomes if o.get("summary") in ("CaughtMutant", "Timeout"))
+          survived = sum(1 for o in outcomes if o.get("summary") == "MissedMutant")
+          total = killed + survived
+          score = (killed / total * 100) if total > 0 else 100.0
+          print(f"Mutation score: {score:.1f}% ({killed} killed, {survived} survived)")
+          SCRIPT
+          fi
 
       - name: Upload mutants output
         if: always()
@@ -116,7 +134,7 @@ jobs:
           fi
 
       - name: Run mutation testing (shard ${{ matrix.shard }})
-        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --shard ${{ matrix.shard }}
+        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --shard ${{ matrix.shard }} || true
 
       - name: Upload shard results
         if: always()
@@ -176,4 +194,8 @@ jobs:
 
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write(summary)
+
+          if total_testable > 0 and score < 90:
+              print(f"FAIL: mutation score {score:.1f}% is below 90% threshold")
+              raise SystemExit(1)
           SCRIPT

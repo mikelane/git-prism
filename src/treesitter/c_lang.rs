@@ -19,6 +19,8 @@ fn signature_text(source: &[u8], node: &tree_sitter::Node) -> String {
     String::from_utf8_lossy(raw).trim().to_string()
 }
 
+// Non-preprocessor nodes don't contain function/import children in the AST;
+// unconditional recursion produces the same result.
 fn is_preprocessor_container(kind: &str) -> bool {
     matches!(
         kind,
