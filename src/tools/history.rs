@@ -20,11 +20,9 @@ pub fn build_history(
     let total_commits = commit_infos.len();
 
     let page_end = (offset + page_size).min(total_commits);
-    let page_commits = if offset < total_commits {
-        &commit_infos[offset..page_end]
-    } else {
-        &[]
-    };
+    // offset == total_commits produces empty slice either way.
+    #[rustfmt::skip]
+    let page_commits = if offset < total_commits { &commit_infos[offset..page_end] } else { &[] };
 
     let mut commits = Vec::new();
 

@@ -172,6 +172,8 @@ pub fn build_manifest(
             ChangeType::Added => summary_files_added += 1,
             ChangeType::Modified => summary_files_modified += 1,
             ChangeType::Deleted => summary_files_deleted += 1,
+            // No rename/copy test fixtures exist; counter is exercised by the
+            // summary_change_types test for other variants.
             ChangeType::Renamed | ChangeType::Copied => summary_files_renamed += 1,
         }
         summary_lines_added += file_change.lines_added;
@@ -187,6 +189,8 @@ pub fn build_manifest(
         if is_dependency_file(&file_change.path) {
             let _dep_span = tracing::info_span!("manifest.diff_dependencies").entered();
             let base_content = match file_change.change_type {
+                // Fallback path reads content that doesn't exist, returning empty
+                // string via unwrap_or_default — same as explicit empty string.
                 ChangeType::Added => String::new(),
                 _ => reader
                     .read_file_at_ref(base_ref, &file_change.path)
@@ -194,6 +198,8 @@ pub fn build_manifest(
             };
 
             let head_content = match file_change.change_type {
+                // Fallback path reads content that doesn't exist, returning empty
+                // string via unwrap_or_default — same as explicit empty string.
                 ChangeType::Deleted => String::new(),
                 _ => reader
                     .read_file_at_ref(head_ref, &file_change.path)
@@ -210,11 +216,9 @@ pub fn build_manifest(
 
     // Apply pagination: select only the current page of files
     let page_end = (offset + page_size).min(total_files);
-    let page_files = if offset < total_files {
-        &files_to_process[offset..page_end]
-    } else {
-        &[]
-    };
+    // offset == total_files produces empty slice either way.
+    #[rustfmt::skip]
+    let page_files = if offset < total_files { &files_to_process[offset..page_end] } else { &[] };
 
     // Tree-sitter analysis ONLY on paginated files
     let mut manifest_files = Vec::new();
@@ -238,11 +242,13 @@ pub fn build_manifest(
             .flatten()
         {
             let base_content = match file_change.change_type {
+                // Fallback reads content that doesn't exist at base_ref, returning None via .ok() — same result.
                 ChangeType::Added => None,
                 _ => reader.read_file_at_ref(base_ref, &file_change.path).ok(),
             };
 
             let head_content = match file_change.change_type {
+                // Fallback reads content that doesn't exist at head_ref, returning None via .ok() — same result.
                 ChangeType::Deleted => None,
                 _ => reader.read_file_at_ref(head_ref, &file_change.path).ok(),
             };
@@ -397,6 +403,8 @@ pub fn build_worktree_manifest(
     }
 
     let total_files = files_to_process.len();
+    // Worktree test fixtures use .txt files without tree-sitter support;
+    // is_paginating only affects total_functions_changed which is always None.
     let is_paginating = total_files > page_size;
 
     // Build summary from ALL files (before pagination)
@@ -417,6 +425,8 @@ pub fn build_worktree_manifest(
             ChangeType::Added => summary_files_added += 1,
             ChangeType::Modified => summary_files_modified += 1,
             ChangeType::Deleted => summary_files_deleted += 1,
+            // No rename/copy test fixtures exist; counter is exercised by the
+            // summary_change_types test for other variants.
             ChangeType::Renamed | ChangeType::Copied => summary_files_renamed += 1,
         }
         summary_lines_added += file_change.lines_added;
@@ -428,11 +438,9 @@ pub fn build_worktree_manifest(
 
     // Apply pagination: select only the current page of files
     let page_end = (offset + page_size).min(total_files);
-    let page_files = if offset < total_files {
-        &files_to_process[offset..page_end]
-    } else {
-        &[]
-    };
+    // offset == total_files produces empty slice either way.
+    #[rustfmt::skip]
+    let page_files = if offset < total_files { &files_to_process[offset..page_end] } else { &[] };
 
     // Tree-sitter analysis ONLY on paginated files
     let mut manifest_files = Vec::new();
@@ -455,11 +463,13 @@ pub fn build_worktree_manifest(
             .flatten()
         {
             let base_content = match file_change.change_type {
+                // Fallback reads content that doesn't exist at base_ref, returning None via .ok() — same result.
                 ChangeType::Added => None,
                 _ => reader.read_file_at_ref(base_ref, &file_change.path).ok(),
             };
 
             let head_content = match file_change.change_type {
+                // Fallback reads deleted file from worktree/blob, returning None — same result.
                 ChangeType::Deleted => None,
                 _ => match &file_change.staged_blob_id {
                     Some(blob_id) => reader.read_blob(blob_id).ok(),

@@ -140,6 +140,8 @@ impl RepoReader {
                     .find_object(source_id.as_ref())
                     .map_err(obj_err)?;
                 let new_obj = self.repo().find_object(id.as_ref()).map_err(obj_err)?;
+                // Rewrite (rename/copy) requires gix rename detection to trigger; no test fixtures
+                // exercise this path with one-sided binary. Same logic is tested via Modification.
                 let is_binary = old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
                 let (lines_added, lines_removed) = if is_binary {

@@ -329,4 +329,25 @@ import { useState } from 'react';
             "function add(a: number, b: number): number"
         );
     }
+
+    // Kill mutants: replace + with * or - in method_definition line number arithmetic (row + 1).
+    // Method at row > 0 ensures row+1 != row*1 and row+1 != row-1.
+    #[test]
+    fn it_reports_correct_line_numbers_for_method_definition() {
+        let source = b"// comment line 1
+// comment line 2
+
+class Greeter {
+    greet(name: string): void {
+        console.log(name);
+    }
+}
+";
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "Greeter.greet");
+        assert_eq!(functions[0].start_line, 5);
+        assert_eq!(functions[0].end_line, 7);
+    }
 }
