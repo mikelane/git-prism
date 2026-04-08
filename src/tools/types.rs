@@ -237,6 +237,7 @@ pub fn detect_language(path: &str) -> &'static str {
         "py" => "python",
         "ts" | "tsx" => "typescript",
         "js" | "jsx" => "javascript",
+        "rb" => "ruby",
         "rs" => "rust",
         "java" => "java",
         "php" => "php",
