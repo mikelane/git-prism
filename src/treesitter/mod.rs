@@ -2,6 +2,7 @@ pub mod c_lang;
 pub mod cpp;
 pub mod go;
 pub mod java;
+pub mod php;
 pub mod python;
 pub mod rust_lang;
 pub mod typescript;
@@ -31,6 +32,7 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
         "js" | "jsx" => Some(Box::new(typescript::TypeScriptAnalyzer::javascript())),
         "rs" => Some(Box::new(rust_lang::RustAnalyzer)),
         "java" => Some(Box::new(java::JavaAnalyzer)),
+        "php" => Some(Box::new(php::PhpAnalyzer)),
         "c" | "h" => Some(Box::new(c_lang::CAnalyzer)),
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => Some(Box::new(cpp::CppAnalyzer)),
         _ => None,
@@ -43,7 +45,7 @@ mod tests {
 
     #[test]
     fn registry_returns_some_for_supported_extensions() {
-        for ext in &["go", "py", "ts", "tsx", "js", "jsx", "rs", "java"] {
+        for ext in &["go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php"] {
             assert!(
                 analyzer_for_extension(ext).is_some(),
                 "expected Some for extension '{ext}'"

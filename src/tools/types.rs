@@ -239,6 +239,7 @@ pub fn detect_language(path: &str) -> &'static str {
         "js" | "jsx" => "javascript",
         "rs" => "rust",
         "java" => "java",
+        "php" => "php",
         "c" | "h" => "c",
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "cpp",
         _ => "unknown",
