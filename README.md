@@ -69,6 +69,8 @@ Returns structured metadata about what changed between two git refs.
 | `include_patterns` | string[] | `[]` | Glob patterns to include (e.g. `["*.rs", "*.go"]`) |
 | `exclude_patterns` | string[] | `[]` | Glob patterns to exclude (e.g. `["*.lock"]`) |
 | `include_function_analysis` | bool | `true` | Enable tree-sitter function/import analysis |
+| `cursor` | string | `null` | Opaque pagination cursor from a previous response |
+| `page_size` | int | `100` | Max file entries per page (1-500) |
 
 **Example output:**
 
@@ -136,8 +138,12 @@ Returns structured metadata about what changed between two git refs.
       "changed": []
     }
   ],
-  "truncated": false,
-  "truncation_info": null
+  "pagination": {
+    "total_items": 3,
+    "page_start": 0,
+    "page_size": 100,
+    "next_cursor": null
+  }
 }
 ```
 
@@ -205,6 +211,8 @@ each commit separately instead of a single collapsed diff.
 | `base_ref` | string | _(required)_ | Base git ref (exclusive -- commits after this) |
 | `head_ref` | string | _(required)_ | Head git ref (inclusive) |
 | `repo_path` | string | cwd | Path to the git repository |
+| `cursor` | string | `null` | Opaque pagination cursor from a previous response |
+| `page_size` | int | `100` | Max commits per page (1-500) |
 
 **Example output:**
 
@@ -234,7 +242,13 @@ each commit separately instead of a single collapsed diff.
         "total_lines_removed": 0
       }
     }
-  ]
+  ],
+  "pagination": {
+    "total_items": 1,
+    "page_start": 0,
+    "page_size": 100,
+    "next_cursor": null
+  }
 }
 ```
 
@@ -252,6 +266,9 @@ git-prism manifest main..feature-branch --repo /path/to/repo
 # Per-commit history for a range
 git-prism history HEAD~5..HEAD
 
+# Smaller pages for constrained environments
+git-prism manifest main..HEAD --page-size 50
+
 # File snapshots for specific paths
 git-prism snapshot HEAD~3..HEAD --paths src/main.rs src/lib.rs
 
@@ -260,6 +277,8 @@ git-prism languages
 ```
 
 The `manifest`, `snapshot`, and `history` commands output JSON to stdout. The
+`manifest` and `history` commands auto-paginate internally (default page size
+500, configurable with `--page-size`) and always return the complete result. The
 `languages` command outputs plain text.
 
 ## Agent Workflow
@@ -282,6 +301,11 @@ you only need the current state.
 
 This two-step approach keeps token usage low. The manifest is compact metadata;
 snapshots are requested only for files that need inspection.
+
+For large changesets, the manifest may span multiple pages. When `next_cursor`
+is non-null in the response, pass it back as the `cursor` parameter to fetch
+the next page. The `summary` always reflects all files regardless of pagination,
+so you can triage before paging through file entries.
 
 ## Supported Languages
 

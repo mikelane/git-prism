@@ -44,6 +44,7 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 - `src/git/` — Git data access. Wraps `gix`. Returns structured Rust types, never strings.
 - `src/treesitter/` — Function/import extraction. Each language is a self-contained file implementing `LanguageAnalyzer` trait.
 - `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses.
+- `src/pagination.rs` — Cursor encoding, pagination types, validation.
 - `src/server.rs` — MCP server lifecycle (rmcp, stdio).
 - `src/main.rs` — CLI wiring only (clap).
 
@@ -61,7 +62,3 @@ A pre-push hook runs `fmt --check`, `clippy`, and `test` before every push. Mana
 lefthook install
 ```
 Never use `--no-verify` to skip hooks.
-
-## Design Doc
-
-Full JSON schemas for both MCP tools: `@/Users/mikelane/dev/git-prism-architecture.md`
