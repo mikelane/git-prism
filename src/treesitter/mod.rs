@@ -11,6 +11,15 @@ pub mod rust_lang;
 pub mod swift;
 pub mod typescript;
 
+use sha2::{Digest, Sha256};
+
+/// Compute a hex-encoded SHA-256 hash of the given bytes.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 /// A function extracted from source code by tree-sitter analysis.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Function {
@@ -18,6 +27,10 @@ pub struct Function {
     pub signature: String,
     pub start_line: usize,
     pub end_line: usize,
+    /// SHA-256 hash of the function body bytes. Internal use only.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub body_hash: String,
 }
 
 /// Trait for language-specific function and import extraction.
@@ -119,6 +132,7 @@ mod tests {
             signature: "fn main()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "abc123".into(),
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["name"], "main");

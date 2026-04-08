@@ -15,11 +15,14 @@ pub enum FunctionChangeType {
     Modified,
     Deleted,
     SignatureChanged,
+    Renamed,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FunctionChange {
     pub name: String,
+    /// For renames, the original function name. Null otherwise.
+    pub old_name: Option<String>,
     pub change_type: FunctionChangeType,
     pub start_line: usize,
     pub end_line: usize,
@@ -451,6 +454,7 @@ mod tests {
     fn function_change_type_serializes_as_snake_case() {
         let change = FunctionChange {
             name: "foo".into(),
+            old_name: None,
             change_type: FunctionChangeType::SignatureChanged,
             start_line: 1,
             end_line: 5,
@@ -458,6 +462,23 @@ mod tests {
         };
         let json = serde_json::to_value(&change).unwrap();
         assert_eq!(json["change_type"], "signature_changed");
+        assert!(json["old_name"].is_null());
+    }
+
+    #[test]
+    fn renamed_change_type_serializes_with_old_name() {
+        let change = FunctionChange {
+            name: "new_fn".into(),
+            old_name: Some("old_fn".into()),
+            change_type: FunctionChangeType::Renamed,
+            start_line: 1,
+            end_line: 5,
+            signature: "fn new_fn()".into(),
+        };
+        let json = serde_json::to_value(&change).unwrap();
+        assert_eq!(json["change_type"], "renamed");
+        assert_eq!(json["old_name"], "old_fn");
+        assert_eq!(json["name"], "new_fn");
     }
 
     #[test]

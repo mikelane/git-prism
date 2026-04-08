@@ -21,48 +21,92 @@ pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<Funct
         head_fns.iter().map(|f| (f.name.as_str(), f)).collect();
 
     let mut changes = Vec::new();
+    let mut unmatched_added: Vec<&Function> = Vec::new();
+    let mut unmatched_deleted: Vec<&Function> = Vec::new();
 
+    // Step 1: Compare functions that share the same name
     for (name, head_fn) in &head_map {
         match base_map.get(name) {
-            None => changes.push(FunctionChange {
-                name: name.to_string(),
-                change_type: FunctionChangeType::Added,
-                start_line: head_fn.start_line,
-                end_line: head_fn.end_line,
-                signature: head_fn.signature.clone(),
-            }),
+            None => unmatched_added.push(head_fn),
             Some(base_fn) => {
                 if base_fn.signature != head_fn.signature {
                     changes.push(FunctionChange {
                         name: name.to_string(),
+                        old_name: None,
                         change_type: FunctionChangeType::SignatureChanged,
                         start_line: head_fn.start_line,
                         end_line: head_fn.end_line,
                         signature: head_fn.signature.clone(),
                     });
-                } else if base_fn.start_line != head_fn.start_line
-                    || base_fn.end_line != head_fn.end_line
-                {
+                } else if base_fn.body_hash != head_fn.body_hash {
                     changes.push(FunctionChange {
                         name: name.to_string(),
+                        old_name: None,
                         change_type: FunctionChangeType::Modified,
                         start_line: head_fn.start_line,
                         end_line: head_fn.end_line,
                         signature: head_fn.signature.clone(),
                     });
                 }
+                // else: same signature and same body_hash → no change (even if lines moved)
             }
         }
     }
 
+    // Collect functions in base that are not in head
     for (name, base_fn) in &base_map {
         if !head_map.contains_key(name) {
+            unmatched_deleted.push(base_fn);
+        }
+    }
+
+    // Step 2: Rename detection — match unmatched pairs by body_hash
+    let mut deleted_by_hash: HashMap<&str, Vec<&Function>> = HashMap::new();
+    for del_fn in &unmatched_deleted {
+        deleted_by_hash
+            .entry(del_fn.body_hash.as_str())
+            .or_default()
+            .push(del_fn);
+    }
+
+    let mut matched_deleted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for added_fn in &unmatched_added {
+        if let Some(candidates) = deleted_by_hash.get_mut(added_fn.body_hash.as_str())
+            && let Some(del_fn) = candidates.pop()
+        {
             changes.push(FunctionChange {
-                name: name.to_string(),
+                name: added_fn.name.clone(),
+                old_name: Some(del_fn.name.clone()),
+                change_type: FunctionChangeType::Renamed,
+                start_line: added_fn.start_line,
+                end_line: added_fn.end_line,
+                signature: added_fn.signature.clone(),
+            });
+            matched_deleted.insert(del_fn.name.as_str());
+            continue;
+        }
+        // No matching deleted function — plain Added
+        changes.push(FunctionChange {
+            name: added_fn.name.clone(),
+            old_name: None,
+            change_type: FunctionChangeType::Added,
+            start_line: added_fn.start_line,
+            end_line: added_fn.end_line,
+            signature: added_fn.signature.clone(),
+        });
+    }
+
+    // Remaining unmatched deleted functions
+    for del_fn in &unmatched_deleted {
+        if !matched_deleted.contains(del_fn.name.as_str()) {
+            changes.push(FunctionChange {
+                name: del_fn.name.clone(),
+                old_name: None,
                 change_type: FunctionChangeType::Deleted,
-                start_line: base_fn.start_line,
-                end_line: base_fn.end_line,
-                signature: base_fn.signature.clone(),
+                start_line: del_fn.start_line,
+                end_line: del_fn.end_line,
+                signature: del_fn.signature.clone(),
             });
         }
     }
@@ -604,6 +648,7 @@ mod tests {
             signature: "fn foo()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "aaa".into(),
         }];
         let changes = diff_functions(&base, &head);
         assert_eq!(changes.len(), 1);
@@ -618,6 +663,7 @@ mod tests {
             signature: "fn bar()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "bbb".into(),
         }];
         let head = vec![];
         let changes = diff_functions(&base, &head);
@@ -633,12 +679,14 @@ mod tests {
             signature: "fn baz()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "ccc".into(),
         }];
         let head = vec![Function {
             name: "baz".into(),
             signature: "fn baz(x: i32)".into(),
             start_line: 1,
             end_line: 5,
+            body_hash: "ddd".into(),
         }];
         let changes = diff_functions(&base, &head);
         assert_eq!(changes.len(), 1);
@@ -652,12 +700,14 @@ mod tests {
             signature: "fn qux()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "eee".into(),
         }];
         let head = vec![Function {
             name: "qux".into(),
             signature: "fn qux()".into(),
             start_line: 1,
             end_line: 10,
+            body_hash: "fff".into(),
         }];
         let changes = diff_functions(&base, &head);
         assert_eq!(changes.len(), 1);
@@ -671,9 +721,224 @@ mod tests {
             signature: "fn same()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "ggg".into(),
         }];
         let changes = diff_functions(&fns, &fns);
         assert!(changes.is_empty());
+    }
+
+    // --- Content-aware diff tests (body_hash based) ---
+
+    #[test]
+    fn moved_but_unchanged_function_produces_no_change() {
+        let base = vec![Function {
+            name: "foo".into(),
+            signature: "fn foo()".into(),
+            start_line: 1,
+            end_line: 5,
+            body_hash: "same_hash".into(),
+        }];
+        let head = vec![Function {
+            name: "foo".into(),
+            signature: "fn foo()".into(),
+            start_line: 10,
+            end_line: 14,
+            body_hash: "same_hash".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+        assert!(
+            changes.is_empty(),
+            "moved-but-unchanged should produce no change"
+        );
+    }
+
+    #[test]
+    fn body_only_change_detected_as_modified() {
+        let base = vec![Function {
+            name: "compute".into(),
+            signature: "fn compute(x: i32) -> i32".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "hash_v1".into(),
+        }];
+        let head = vec![Function {
+            name: "compute".into(),
+            signature: "fn compute(x: i32) -> i32".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "hash_v2".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "compute");
+        assert_eq!(changes[0].change_type, FunctionChangeType::Modified);
+    }
+
+    #[test]
+    fn rename_detected_by_body_hash() {
+        let base = vec![Function {
+            name: "old_name".into(),
+            signature: "fn old_name(x: i32)".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "shared_hash".into(),
+        }];
+        let head = vec![Function {
+            name: "new_name".into(),
+            signature: "fn new_name(x: i32)".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "shared_hash".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].name, "new_name");
+        assert_eq!(changes[0].change_type, FunctionChangeType::Renamed);
+        assert_eq!(changes[0].old_name.as_deref(), Some("old_name"));
+    }
+
+    #[test]
+    fn rename_plus_body_change_shows_deleted_and_added() {
+        let base = vec![Function {
+            name: "old_name".into(),
+            signature: "fn old_name()".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "hash_a".into(),
+        }];
+        let head = vec![Function {
+            name: "new_name".into(),
+            signature: "fn new_name()".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "hash_b".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+        assert_eq!(changes.len(), 2);
+        let deleted = changes
+            .iter()
+            .find(|c| c.change_type == FunctionChangeType::Deleted)
+            .unwrap();
+        assert_eq!(deleted.name, "old_name");
+        let added = changes
+            .iter()
+            .find(|c| c.change_type == FunctionChangeType::Added)
+            .unwrap();
+        assert_eq!(added.name, "new_name");
+    }
+
+    #[test]
+    fn swapped_functions_produce_no_changes() {
+        let base = vec![
+            Function {
+                name: "foo".into(),
+                signature: "fn foo()".into(),
+                start_line: 1,
+                end_line: 3,
+                body_hash: "hash_foo".into(),
+            },
+            Function {
+                name: "bar".into(),
+                signature: "fn bar()".into(),
+                start_line: 5,
+                end_line: 7,
+                body_hash: "hash_bar".into(),
+            },
+        ];
+        let head = vec![
+            Function {
+                name: "bar".into(),
+                signature: "fn bar()".into(),
+                start_line: 1,
+                end_line: 3,
+                body_hash: "hash_bar".into(),
+            },
+            Function {
+                name: "foo".into(),
+                signature: "fn foo()".into(),
+                start_line: 5,
+                end_line: 7,
+                body_hash: "hash_foo".into(),
+            },
+        ];
+        let changes = diff_functions(&base, &head);
+        assert!(
+            changes.is_empty(),
+            "swapped functions should produce no changes"
+        );
+    }
+
+    #[test]
+    fn multiple_renames_detected() {
+        let base = vec![
+            Function {
+                name: "a".into(),
+                signature: "fn a()".into(),
+                start_line: 1,
+                end_line: 2,
+                body_hash: "hash_x".into(),
+            },
+            Function {
+                name: "b".into(),
+                signature: "fn b()".into(),
+                start_line: 3,
+                end_line: 4,
+                body_hash: "hash_y".into(),
+            },
+        ];
+        let head = vec![
+            Function {
+                name: "c".into(),
+                signature: "fn c()".into(),
+                start_line: 1,
+                end_line: 2,
+                body_hash: "hash_x".into(),
+            },
+            Function {
+                name: "d".into(),
+                signature: "fn d()".into(),
+                start_line: 3,
+                end_line: 4,
+                body_hash: "hash_y".into(),
+            },
+        ];
+        let changes = diff_functions(&base, &head);
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .all(|c| c.change_type == FunctionChangeType::Renamed)
+        );
+        let c_change = changes.iter().find(|c| c.name == "c").unwrap();
+        assert_eq!(c_change.old_name.as_deref(), Some("a"));
+        let d_change = changes.iter().find(|c| c.name == "d").unwrap();
+        assert_eq!(d_change.old_name.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn non_rename_changes_have_null_old_name() {
+        let base = vec![Function {
+            name: "deleted_fn".into(),
+            signature: "fn deleted_fn()".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "xxx".into(),
+        }];
+        let head = vec![Function {
+            name: "added_fn".into(),
+            signature: "fn added_fn()".into(),
+            start_line: 1,
+            end_line: 3,
+            body_hash: "yyy".into(),
+        }];
+        let changes = diff_functions(&base, &head);
+        assert_eq!(changes.len(), 2);
+        for c in &changes {
+            assert!(
+                c.old_name.is_none(),
+                "non-rename changes should have None old_name"
+            );
+        }
     }
 
     #[test]
@@ -701,18 +966,21 @@ mod tests {
                 signature: "fn kept()".into(),
                 start_line: 1,
                 end_line: 3,
+                body_hash: "hhh".into(),
             },
             Function {
                 name: "removed".into(),
                 signature: "fn removed()".into(),
                 start_line: 5,
                 end_line: 7,
+                body_hash: "iii".into(),
             },
             Function {
                 name: "changed_sig".into(),
                 signature: "fn changed_sig()".into(),
                 start_line: 9,
                 end_line: 11,
+                body_hash: "jjj".into(),
             },
         ];
         let head = vec![
@@ -721,18 +989,21 @@ mod tests {
                 signature: "fn kept()".into(),
                 start_line: 1,
                 end_line: 3,
+                body_hash: "hhh".into(),
             },
             Function {
                 name: "added".into(),
                 signature: "fn added()".into(),
                 start_line: 5,
                 end_line: 7,
+                body_hash: "kkk".into(),
             },
             Function {
                 name: "changed_sig".into(),
                 signature: "fn changed_sig(x: i32)".into(),
                 start_line: 9,
                 end_line: 13,
+                body_hash: "lll".into(),
             },
         ];
         let changes = diff_functions(&base, &head);
@@ -899,12 +1170,14 @@ mod tests {
                 signature: "fn zebra()".into(),
                 start_line: 1,
                 end_line: 2,
+                body_hash: "mmm".into(),
             },
             Function {
                 name: "alpha".into(),
                 signature: "fn alpha()".into(),
                 start_line: 3,
                 end_line: 4,
+                body_hash: "nnn".into(),
             },
         ];
         let changes = diff_functions(&base, &head);

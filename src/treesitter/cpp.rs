@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, sha256_hex};
 use tree_sitter::Parser;
 
 pub struct CppAnalyzer;
@@ -86,11 +86,16 @@ fn collect_functions(
                     format!("{}::{}", scope.join("::"), raw_name)
                 };
                 let sig = signature_text(source, &child);
+                let body_hash = {
+                    let body_node = child.child_by_field_name("body").unwrap_or(child);
+                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
+                };
                 functions.push(Function {
                     name: qualified,
                     signature: sig,
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
             }
             "declaration" => {
@@ -104,11 +109,13 @@ fn collect_functions(
                         format!("{}::{}", scope.join("::"), raw_name)
                     };
                     let sig = child.utf8_text(source).unwrap_or("").trim().to_string();
+                    let body_hash = sha256_hex(&source[child.start_byte()..child.end_byte()]);
                     functions.push(Function {
                         name: qualified,
                         signature: sig,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        body_hash,
                     });
                 }
             }
