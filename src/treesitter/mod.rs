@@ -3,6 +3,7 @@ pub mod cpp;
 pub mod csharp;
 pub mod go;
 pub mod java;
+pub mod kotlin;
 pub mod php;
 pub mod python;
 pub mod ruby;
@@ -38,6 +39,7 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
         "java" => Some(Box::new(java::JavaAnalyzer)),
         "php" => Some(Box::new(php::PhpAnalyzer)),
         "swift" => Some(Box::new(swift::SwiftAnalyzer)),
+        "kt" | "kts" => Some(Box::new(kotlin::KotlinAnalyzer)),
         "c" | "h" => Some(Box::new(c_lang::CAnalyzer)),
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => Some(Box::new(cpp::CppAnalyzer)),
         "cs" => Some(Box::new(csharp::CSharpAnalyzer)),
@@ -52,7 +54,8 @@ mod tests {
     #[test]
     fn registry_returns_some_for_supported_extensions() {
         for ext in &[
-            "go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php", "cs", "rb", "swift",
+            "go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php", "cs", "rb", "swift", "kt",
+            "kts",
         ] {
             assert!(
                 analyzer_for_extension(ext).is_some(),
@@ -87,6 +90,16 @@ mod tests {
             analyzer_for_extension("rb").is_some(),
             "expected Some for extension 'rb'"
         );
+    }
+
+    #[test]
+    fn registry_returns_some_for_kotlin_extensions() {
+        for ext in &["kt", "kts"] {
+            assert!(
+                analyzer_for_extension(ext).is_some(),
+                "expected Some for extension '{ext}'"
+            );
+        }
     }
 
     #[test]

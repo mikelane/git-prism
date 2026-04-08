@@ -645,6 +645,7 @@ async fn main() -> anyhow::Result<()> {
             println!("  go         (.go)");
             println!("  java       (.java)");
             println!("  javascript (.js, .jsx)");
+            println!("  kotlin     (.kt, .kts)");
             println!("  python     (.py)");
             println!("  rust       (.rs)");
             println!("  typescript (.ts, .tsx)");
