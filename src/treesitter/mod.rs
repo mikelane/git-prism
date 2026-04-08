@@ -1,5 +1,6 @@
 pub mod c_lang;
 pub mod cpp;
+pub mod csharp;
 pub mod go;
 pub mod java;
 pub mod php;
@@ -35,6 +36,7 @@ pub fn analyzer_for_extension(ext: &str) -> Option<Box<dyn LanguageAnalyzer>> {
         "php" => Some(Box::new(php::PhpAnalyzer)),
         "c" | "h" => Some(Box::new(c_lang::CAnalyzer)),
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => Some(Box::new(cpp::CppAnalyzer)),
+        "cs" => Some(Box::new(csharp::CSharpAnalyzer)),
         _ => None,
     }
 }
@@ -45,7 +47,7 @@ mod tests {
 
     #[test]
     fn registry_returns_some_for_supported_extensions() {
-        for ext in &["go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php"] {
+        for ext in &["go", "py", "ts", "tsx", "js", "jsx", "rs", "java", "php", "cs"] {
             assert!(
                 analyzer_for_extension(ext).is_some(),
                 "expected Some for extension '{ext}'"

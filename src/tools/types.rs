@@ -242,6 +242,7 @@ pub fn detect_language(path: &str) -> &'static str {
         "php" => "php",
         "c" | "h" => "c",
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "cpp",
+        "cs" => "csharp",
         _ => "unknown",
     }
 }
