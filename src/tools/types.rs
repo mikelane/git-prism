@@ -242,6 +242,7 @@ pub fn detect_language(path: &str) -> &'static str {
         "java" => "java",
         "php" => "php",
         "swift" => "swift",
+        "kt" | "kts" => "kotlin",
         "c" | "h" => "c",
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "cpp",
         "cs" => "csharp",
@@ -341,6 +342,16 @@ mod tests {
     #[test]
     fn it_detects_cpp_from_hxx_extension() {
         assert_eq!(detect_language("widget.hxx"), "cpp");
+    }
+
+    #[test]
+    fn it_detects_kotlin_from_kt_extension() {
+        assert_eq!(detect_language("Main.kt"), "kotlin");
+    }
+
+    #[test]
+    fn it_detects_kotlin_from_kts_extension() {
+        assert_eq!(detect_language("build.gradle.kts"), "kotlin");
     }
 
     #[test]

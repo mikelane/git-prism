@@ -675,6 +675,7 @@ version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64",
+ "cc",
  "chrono",
  "clap",
  "gix",
@@ -701,6 +702,7 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-java",
  "tree-sitter-javascript",
+ "tree-sitter-language",
  "tree-sitter-php",
  "tree-sitter-python",
  "tree-sitter-ruby",

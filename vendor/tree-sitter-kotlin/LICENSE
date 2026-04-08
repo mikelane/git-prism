@@ -1,0 +1,7 @@
+The grammar source files in this directory are vendored from the
+tree-sitter-kotlin crate (v0.3.5), licensed under the MIT License.
+
+Repository: https://github.com/fwcd/tree-sitter-kotlin
+
+These files are compiled by build.rs to produce a tree-sitter parser
+compatible with tree-sitter 0.26.x (the upstream crate targets 0.20.x).
