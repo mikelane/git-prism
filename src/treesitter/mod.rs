@@ -20,6 +20,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Hash a function node's body for content-aware diffing.
+///
+/// Tries `child_by_field_name("body")` first; falls back to hashing the
+/// entire node (correct for bodyless constructs like forward declarations).
+pub fn body_hash_for_node(source: &[u8], node: tree_sitter::Node) -> String {
+    let body_node = node.child_by_field_name("body").unwrap_or(node);
+    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
+}
+
 /// A function extracted from source code by tree-sitter analysis.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Function {

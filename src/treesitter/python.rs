@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, sha256_hex};
+use super::{Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct PythonAnalyzer;
@@ -39,10 +39,7 @@ fn extract_functions_from_node(
                     None => fn_name.to_string(),
                 };
                 let signature = signature_text(source, &child);
-                let body_hash = {
-                    let body_node = child.child_by_field_name("body").unwrap_or(child);
-                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
-                };
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
@@ -56,10 +53,7 @@ fn extract_functions_from_node(
                     .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
-                let body_hash = {
-                    let body_node = child.child_by_field_name("body").unwrap_or(child);
-                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
-                };
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name: cls_name.to_string(),
                     signature: signature_text(source, &child),

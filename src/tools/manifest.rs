@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::Utc;
@@ -25,28 +25,22 @@ pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<Funct
     let mut unmatched_deleted: Vec<&Function> = Vec::new();
 
     // Step 1: Compare functions that share the same name
-    for (name, head_fn) in &head_map {
-        match base_map.get(name) {
+    for head_fn in head_map.values() {
+        match base_map.get(head_fn.name.as_str()) {
             None => unmatched_added.push(head_fn),
             Some(base_fn) => {
                 if base_fn.signature != head_fn.signature {
-                    changes.push(FunctionChange {
-                        name: name.to_string(),
-                        old_name: None,
-                        change_type: FunctionChangeType::SignatureChanged,
-                        start_line: head_fn.start_line,
-                        end_line: head_fn.end_line,
-                        signature: head_fn.signature.clone(),
-                    });
+                    changes.push(FunctionChange::from_function(
+                        head_fn,
+                        FunctionChangeType::SignatureChanged,
+                        None,
+                    ));
                 } else if base_fn.body_hash != head_fn.body_hash {
-                    changes.push(FunctionChange {
-                        name: name.to_string(),
-                        old_name: None,
-                        change_type: FunctionChangeType::Modified,
-                        start_line: head_fn.start_line,
-                        end_line: head_fn.end_line,
-                        signature: head_fn.signature.clone(),
-                    });
+                    changes.push(FunctionChange::from_function(
+                        head_fn,
+                        FunctionChangeType::Modified,
+                        None,
+                    ));
                 }
                 // else: same signature and same body_hash → no change (even if lines moved)
             }
@@ -54,8 +48,8 @@ pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<Funct
     }
 
     // Collect functions in base that are not in head
-    for (name, base_fn) in &base_map {
-        if !head_map.contains_key(name) {
+    for base_fn in base_map.values() {
+        if !head_map.contains_key(base_fn.name.as_str()) {
             unmatched_deleted.push(base_fn);
         }
     }
@@ -69,45 +63,35 @@ pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<Funct
             .push(del_fn);
     }
 
-    let mut matched_deleted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut matched_deleted: HashSet<&str> = HashSet::new();
 
     for added_fn in &unmatched_added {
         if let Some(candidates) = deleted_by_hash.get_mut(added_fn.body_hash.as_str())
             && let Some(del_fn) = candidates.pop()
         {
-            changes.push(FunctionChange {
-                name: added_fn.name.clone(),
-                old_name: Some(del_fn.name.clone()),
-                change_type: FunctionChangeType::Renamed,
-                start_line: added_fn.start_line,
-                end_line: added_fn.end_line,
-                signature: added_fn.signature.clone(),
-            });
+            changes.push(FunctionChange::from_function(
+                added_fn,
+                FunctionChangeType::Renamed,
+                Some(del_fn.name.clone()),
+            ));
             matched_deleted.insert(del_fn.name.as_str());
             continue;
         }
-        // No matching deleted function — plain Added
-        changes.push(FunctionChange {
-            name: added_fn.name.clone(),
-            old_name: None,
-            change_type: FunctionChangeType::Added,
-            start_line: added_fn.start_line,
-            end_line: added_fn.end_line,
-            signature: added_fn.signature.clone(),
-        });
+        changes.push(FunctionChange::from_function(
+            added_fn,
+            FunctionChangeType::Added,
+            None,
+        ));
     }
 
     // Remaining unmatched deleted functions
     for del_fn in &unmatched_deleted {
         if !matched_deleted.contains(del_fn.name.as_str()) {
-            changes.push(FunctionChange {
-                name: del_fn.name.clone(),
-                old_name: None,
-                change_type: FunctionChangeType::Deleted,
-                start_line: del_fn.start_line,
-                end_line: del_fn.end_line,
-                signature: del_fn.signature.clone(),
-            });
+            changes.push(FunctionChange::from_function(
+                del_fn,
+                FunctionChangeType::Deleted,
+                None,
+            ));
         }
     }
 

@@ -29,6 +29,24 @@ pub struct FunctionChange {
     pub signature: String,
 }
 
+impl FunctionChange {
+    /// Build a change entry from a [`Function`] reference.
+    pub fn from_function(
+        f: &crate::treesitter::Function,
+        change_type: FunctionChangeType,
+        old_name: Option<String>,
+    ) -> Self {
+        Self {
+            name: f.name.clone(),
+            old_name,
+            change_type,
+            start_line: f.start_line,
+            end_line: f.end_line,
+            signature: f.signature.clone(),
+        }
+    }
+}
+
 // --- ImportChange ---
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

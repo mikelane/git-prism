@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, sha256_hex};
+use super::{Function, LanguageAnalyzer, body_hash_for_node, sha256_hex};
 use tree_sitter::Parser;
 
 pub struct CppAnalyzer;
@@ -86,10 +86,7 @@ fn collect_functions(
                     format!("{}::{}", scope.join("::"), raw_name)
                 };
                 let sig = signature_text(source, &child);
-                let body_hash = {
-                    let body_node = child.child_by_field_name("body").unwrap_or(child);
-                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
-                };
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name: qualified,
                     signature: sig,

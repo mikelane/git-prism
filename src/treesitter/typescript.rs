@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, sha256_hex};
+use super::{Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 #[derive(Debug, Clone, Copy)]
@@ -69,10 +69,7 @@ fn extract_functions_from_node(
                     .unwrap_or("")
                     .to_string();
                 let signature = signature_text(source, &child);
-                let body_hash = {
-                    let body_node = child.child_by_field_name("body").unwrap_or(child);
-                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
-                };
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
@@ -91,10 +88,7 @@ fn extract_functions_from_node(
                     None => method_name.to_string(),
                 };
                 let signature = signature_text(source, &child);
-                let body_hash = {
-                    let body_node = child.child_by_field_name("body").unwrap_or(child);
-                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
-                };
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
@@ -126,11 +120,7 @@ fn extract_functions_from_node(
                                 .unwrap_or("");
                             let arrow_node = value.unwrap();
                             let signature = signature_text(source, &child);
-                            let body_hash = {
-                                let body_node =
-                                    arrow_node.child_by_field_name("body").unwrap_or(arrow_node);
-                                sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
-                            };
+                            let body_hash = body_hash_for_node(source, arrow_node);
                             functions.push(Function {
                                 name: fn_name.to_string(),
                                 signature,
