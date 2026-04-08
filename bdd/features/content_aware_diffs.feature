@@ -1,9 +1,9 @@
-@not_implemented
+@ISSUE-106
 Feature: Content-aware function diffs
 
-  Function change detection should compare function bodies, not line positions.
-  This eliminates false positives from reordering, detects body-only changes,
-  and recognizes renames.
+  The manifest's function change detection accurately reports which functions
+  were actually modified, added, deleted, or renamed — without false positives
+  from reordering and without missing body-only changes.
 
   Rule: Moved-but-unchanged functions are not reported
 
@@ -30,7 +30,7 @@ Feature: Content-aware function diffs
       And the output is valid JSON
       And the file "lib.rs" has a function change "compute" with type "modified"
 
-  Rule: Renames are detected by matching body hashes
+  Rule: Renames are recognized as a single change
 
     Scenario: Renaming a function is reported as a single rename
       Given a git repository where a function is renamed
