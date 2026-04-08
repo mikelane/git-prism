@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-04-08
+
+### Fixed
+
+- Mutation testing CI: incremental PR check is now informational only (reports score, never blocks). The 90% threshold applies only to the full suite on main. Previously, equivalent mutants in small diffs caused false failures.
+
+### Added
+
+- Python and TypeScript tree-sitter tests for class/method line number accuracy.
+
 ## [0.3.0] — 2026-04-08
 
 ### Added
@@ -70,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.3.1]: https://github.com/mikelane/git-prism/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mikelane/git-prism/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mikelane/git-prism/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mikelane/git-prism/releases/tag/v0.1.0
