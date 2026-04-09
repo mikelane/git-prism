@@ -161,6 +161,56 @@ impl RepoReader {
         Ok(commits)
     }
 
+    #[allow(dead_code)]
+    pub fn list_files_at_ref(&self, refspec: &str) -> Result<Vec<String>, GitError> {
+        let _span = tracing::info_span!("git.list_files").entered();
+        let commit = self.peel_to_commit(refspec)?;
+        let tree = commit
+            .tree()
+            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+
+        let mut files = Vec::new();
+        Self::walk_tree(&self.repo, &tree, String::new(), &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn walk_tree(
+        repo: &gix::Repository,
+        tree: &gix::Tree<'_>,
+        prefix: String,
+        files: &mut Vec<String>,
+    ) -> Result<(), GitError> {
+        for entry_ref in tree.iter() {
+            let entry = entry_ref.map_err(|e| GitError::ReadObject(e.to_string()))?;
+            let name = entry.filename().to_string();
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let mode = entry.mode();
+            if mode.is_tree() {
+                let obj = entry
+                    .object()
+                    .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                let sub_tree = obj
+                    .try_into_tree()
+                    .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                // Borrow workaround: pass repo explicitly
+                let sub_tree_ref = repo
+                    .find_object(sub_tree.id)
+                    .map_err(|e| GitError::ReadObject(e.to_string()))?
+                    .try_into_tree()
+                    .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                Self::walk_tree(repo, &sub_tree_ref, path, files)?;
+            } else if mode.is_blob() {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn peel_to_commit(&self, refspec: &str) -> Result<gix::Commit<'_>, GitError> {
         let rev = self
             .repo
@@ -478,5 +528,30 @@ mod tests {
             timestamp.chars().any(|c| c.is_ascii_digit()),
             "timestamp should contain digits, got: {timestamp}"
         );
+    }
+
+    #[test]
+    fn it_lists_files_at_ref() {
+        let (_dir, path) = create_test_repo();
+
+        // Add a nested file
+        std::fs::create_dir_all(path.join("src")).unwrap();
+        std::fs::write(path.join("src/main.rs"), "fn main() {}").unwrap();
+        Command::new("git")
+            .args(["add", "src/main.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add source file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let files = reader.list_files_at_ref("HEAD").unwrap();
+        assert!(files.contains(&"README.md".to_string()));
+        assert!(files.contains(&"src/main.rs".to_string()));
+        assert_eq!(files.len(), 2);
     }
 }

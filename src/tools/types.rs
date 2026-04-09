@@ -224,6 +224,53 @@ pub struct HistoryResponse {
     pub pagination: PaginationInfo,
 }
 
+// --- FunctionContext types ---
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CallerEntry {
+    pub file: String,
+    pub line: usize,
+    pub caller: String,
+    pub is_test: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CalleeEntry {
+    pub callee: String,
+    pub line: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FunctionContextEntry {
+    pub name: String,
+    pub file: String,
+    pub change_type: FunctionChangeType,
+    pub callers: Vec<CallerEntry>,
+    pub callees: Vec<CalleeEntry>,
+    pub test_references: Vec<CallerEntry>,
+    pub caller_count: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ContextMetadata {
+    pub base_ref: String,
+    pub head_ref: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FunctionContextResponse {
+    pub metadata: ContextMetadata,
+    pub functions: Vec<FunctionContextEntry>,
+}
+
 // --- Tool options (for internal use) ---
 
 #[derive(Debug, Clone)]
