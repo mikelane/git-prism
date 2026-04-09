@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, sha256_hex};
 use tree_sitter::Parser;
 use tree_sitter_language::LanguageFn;
 
@@ -80,11 +80,24 @@ fn extract_methods_from_body(
                 if let Some(fname) = function_name(source, &child) {
                     let qualified = format!("{qualifier}.{fname}");
                     let signature = signature_text(source, &child);
+                    let body_hash = {
+                        let body_node = child
+                            .child_by_field_name("body")
+                            .or_else(|| {
+                                let mut bc = child.walk();
+                                child
+                                    .children(&mut bc)
+                                    .find(|c| c.kind() == "function_body")
+                            })
+                            .unwrap_or(child);
+                        sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
+                    };
                     functions.push(Function {
                         name: qualified,
                         signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        body_hash,
                     });
                 }
             }
@@ -102,12 +115,21 @@ fn extract_methods_from_body(
                         .trim()
                         .to_string()
                 };
+                let body_hash = {
+                    let mut sc2 = child.walk();
+                    let body_node = child
+                        .children(&mut sc2)
+                        .find(|c| c.kind() == "statements" || c.kind() == "{")
+                        .unwrap_or(child);
+                    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
+                };
                 let name = format!("{qualifier}.constructor");
                 functions.push(Function {
                     name,
                     signature,
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
             }
             _ => {}
@@ -205,11 +227,24 @@ impl LanguageAnalyzer for KotlinAnalyzer {
                 "function_declaration" => {
                     if let Some(name) = function_name(source, &child) {
                         let signature = signature_text(source, &child);
+                        let body_hash = {
+                            let body_node = child
+                                .child_by_field_name("body")
+                                .or_else(|| {
+                                    let mut bc = child.walk();
+                                    child
+                                        .children(&mut bc)
+                                        .find(|c| c.kind() == "function_body")
+                                })
+                                .unwrap_or(child);
+                            sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
+                        };
                         functions.push(Function {
                             name,
                             signature,
                             start_line: child.start_position().row + 1,
                             end_line: child.end_position().row + 1,
+                            body_hash,
                         });
                     }
                 }

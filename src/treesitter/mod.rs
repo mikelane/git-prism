@@ -11,6 +11,24 @@ pub mod rust_lang;
 pub mod swift;
 pub mod typescript;
 
+use sha2::{Digest, Sha256};
+
+/// Compute a hex-encoded SHA-256 hash of the given bytes.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Hash a function node's body for content-aware diffing.
+///
+/// Tries `child_by_field_name("body")` first; falls back to hashing the
+/// entire node (correct for bodyless constructs like forward declarations).
+pub fn body_hash_for_node(source: &[u8], node: tree_sitter::Node) -> String {
+    let body_node = node.child_by_field_name("body").unwrap_or(node);
+    sha256_hex(&source[body_node.start_byte()..body_node.end_byte()])
+}
+
 /// A function extracted from source code by tree-sitter analysis.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct Function {
@@ -18,6 +36,10 @@ pub struct Function {
     pub signature: String,
     pub start_line: usize,
     pub end_line: usize,
+    /// SHA-256 hash of the function body bytes. Internal use only.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub body_hash: String,
 }
 
 /// Trait for language-specific function and import extraction.
@@ -119,11 +141,17 @@ mod tests {
             signature: "fn main()".into(),
             start_line: 1,
             end_line: 3,
+            body_hash: "abc123".into(),
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["name"], "main");
         assert_eq!(json["signature"], "fn main()");
         assert_eq!(json["start_line"], 1);
         assert_eq!(json["end_line"], 3);
+        // body_hash is internal plumbing — must NOT leak into JSON output
+        assert!(
+            json.get("body_hash").is_none(),
+            "body_hash must be excluded from serialization"
+        );
     }
 }

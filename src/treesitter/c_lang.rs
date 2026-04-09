@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, body_hash_for_node, sha256_hex};
 use tree_sitter::Parser;
 
 pub struct CAnalyzer;
@@ -40,11 +40,13 @@ fn collect_functions(node: &tree_sitter::Node, source: &[u8], functions: &mut Ve
                     .unwrap_or("")
                     .to_string();
                 let signature = signature_text(source, &child);
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
             }
             "declaration" => {
@@ -57,11 +59,13 @@ fn collect_functions(node: &tree_sitter::Node, source: &[u8], functions: &mut Ve
                         .unwrap_or("")
                         .to_string();
                     let signature = child.utf8_text(source).unwrap_or("").trim().to_string();
+                    let body_hash = sha256_hex(&source[child.start_byte()..child.end_byte()]);
                     functions.push(Function {
                         name,
                         signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        body_hash,
                     });
                 }
             }

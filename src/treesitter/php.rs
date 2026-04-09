@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct PhpAnalyzer;
@@ -43,11 +43,13 @@ fn extract_methods_from_class(
                 .unwrap_or("");
             let name = format!("{class_name}.{method_name}");
             let signature = signature_text(source, &child);
+            let body_hash = body_hash_for_node(source, child);
             functions.push(Function {
                 name,
                 signature,
                 start_line: child.start_position().row + 1,
                 end_line: child.end_position().row + 1,
+                body_hash,
             });
         }
     }
@@ -74,11 +76,13 @@ impl LanguageAnalyzer for PhpAnalyzer {
                         .unwrap_or("")
                         .to_string();
                     let signature = signature_text(source, &child);
+                    let body_hash = body_hash_for_node(source, child);
                     functions.push(Function {
                         name,
                         signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        body_hash,
                     });
                 }
                 "class_declaration" => {

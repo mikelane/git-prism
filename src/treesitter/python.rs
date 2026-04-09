@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct PythonAnalyzer;
@@ -39,11 +39,13 @@ fn extract_functions_from_node(
                     None => fn_name.to_string(),
                 };
                 let signature = signature_text(source, &child);
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
             }
             "class_definition" => {
@@ -51,11 +53,13 @@ fn extract_functions_from_node(
                     .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name: cls_name.to_string(),
                     signature: signature_text(source, &child),
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
                 if let Some(body) = child.child_by_field_name("body") {
                     extract_functions_from_node(source, &body, Some(cls_name), functions);

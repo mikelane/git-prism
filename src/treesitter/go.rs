@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct GoAnalyzer;
@@ -86,11 +86,13 @@ impl LanguageAnalyzer for GoAnalyzer {
                         .unwrap_or("")
                         .to_string();
                     let signature = signature_text(source, &child);
+                    let body_hash = body_hash_for_node(source, child);
                     functions.push(Function {
                         name,
                         signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        body_hash,
                     });
                 }
                 "method_declaration" => {
@@ -101,11 +103,13 @@ impl LanguageAnalyzer for GoAnalyzer {
                     let receiver_type = extract_receiver_type(source, &child);
                     let name = format!("{receiver_type}.{method_name}");
                     let signature = signature_text(source, &child);
+                    let body_hash = body_hash_for_node(source, child);
                     functions.push(Function {
                         name,
                         signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
+                        body_hash,
                     });
                 }
                 _ => {}

@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer};
+use super::{Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 #[derive(Debug, Clone, Copy)]
@@ -69,11 +69,13 @@ fn extract_functions_from_node(
                     .unwrap_or("")
                     .to_string();
                 let signature = signature_text(source, &child);
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
             }
             "method_definition" => {
@@ -86,11 +88,13 @@ fn extract_functions_from_node(
                     None => method_name.to_string(),
                 };
                 let signature = signature_text(source, &child);
+                let body_hash = body_hash_for_node(source, child);
                 functions.push(Function {
                     name,
                     signature,
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
+                    body_hash,
                 });
             }
             "class_declaration" => {
@@ -116,11 +120,13 @@ fn extract_functions_from_node(
                                 .unwrap_or("");
                             let arrow_node = value.unwrap();
                             let signature = signature_text(source, &child);
+                            let body_hash = body_hash_for_node(source, arrow_node);
                             functions.push(Function {
                                 name: fn_name.to_string(),
                                 signature,
                                 start_line: child.start_position().row + 1,
                                 end_line: arrow_node.end_position().row + 1,
+                                body_hash,
                             });
                         }
                     }
