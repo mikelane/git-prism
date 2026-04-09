@@ -58,6 +58,94 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 3. Register extension in `src/treesitter/mod.rs` registry
 4. Add table-driven tests with known source snippets
 
+## Epic SDLC
+
+Epic structure is a strict pipeline with enforced gates. Every epic follows this sequence — no skipping steps.
+
+### Epic Issue Structure
+
+Every epic issue must contain these sections in order:
+
+1. **Goal** — one paragraph stating what and why
+2. **Context** — the problem being solved and why it matters now
+3. **Scope** — what's included, plus explicit "Out of scope" subsection when relevant
+4. **Design Documents** — links to specs/ADRs (when they exist)
+5. **Acceptance Criteria** — checkbox list of verifiable conditions
+6. **Child Issues** — ordered checklist of implementation issues
+7. **Dependency Order** — ASCII dependency graph showing the build sequence
+
+Label the issue with `epic`.
+
+### The Pipeline
+
+```
+Spike (optional) → BDD Bootstrap → Implementation Issues → Capstone Demo
+```
+
+Each arrow is a **real GitHub blocking dependency** set via the Dependencies API — not markdown text saying "blocked by." If you write "BLOCKED BY #42" in the issue body but don't call the API, it doesn't count.
+
+### The Rules
+
+1. **Spike first if the problem space is unknown.** The spike lives on a `spike/<topic>` branch that is never merged. Its only deliverable is an ADR in `docs/decisions/NNNN-short-title.md`. The prototype code is disposable — the ADR is the artifact. No TDD during spikes.
+
+2. **BDD Bootstrap blocks everything.** Before any implementation begins, write ALL Gherkin scenarios for the epic using a real cucumber framework (`behave`, `cucumber-js`) in a **different language than production code**. Tag each scenario with `@ISSUE-XX` pointing to the implementation issue that will make it pass. Step definitions must attempt real operations and fail with assertion errors — not `raise NotImplementedError` or `pass`. The tests must run and fail (RED).
+
+3. **Implementation issues reference their scenarios.** Each issue's body includes the specific `@ISSUE-XX` Gherkin scenarios it must make pass. First commit on the branch removes `@not_implemented` from those scenarios (proving RED). Then make them GREEN. Use TDD internally for unit tests.
+
+4. **Capstone demo is mandatory.** It's a narrated `.mp4` video proving the epic works end-to-end. Not screenshots, not GIFs. It's blocked by ALL implementation issues. The epic isn't done without it.
+
+### Child Issue Decomposition
+
+Child issues follow this consistent ordering:
+
+```
+Spike (optional)
+  └→ BDD Bootstrap
+      └→ Core types / trait methods
+          ├→ Implementation batch 1
+          ├→ Implementation batch 2
+          └→ Implementation batch 3
+              └→ Tool handler / wiring
+                  ├→ Telemetry
+                  └→ Documentation
+                      └→ Capstone demo + release
+```
+
+### Setting Up Dependencies
+
+```shell
+# Get the internal ID (not the issue number) of the blocker
+BLOCKER_ID=$(gh api repos/OWNER/REPO/issues/100 --jq '.id')
+
+# Set blocked-by relationship
+echo "{\"issue_id\": $BLOCKER_ID}" | \
+  gh api repos/OWNER/REPO/issues/101/dependencies/blocked_by \
+  --method POST --input -
+```
+
+You must also add child issues to the epic as **sub-issues**. Sub-issues and blocked-by are separate concepts — you need both.
+
+### What Agents Get Wrong
+
+- Writing Gherkin after code (defeats the purpose — it must block implementation)
+- Using the same language for BDD and production (you'll import internals and test implementation, not behavior)
+- Setting up sub-issues but forgetting blocked-by relationships
+- Claiming "tests pass" without the capstone demo
+- Promoting spike code to production because "it mostly works"
+
+### Verification
+
+Before any implementation agent starts work on issue `#XX`, check that its blockers are actually closed:
+
+```shell
+gh api repos/OWNER/REPO/issues/XX/dependencies/blocked_by \
+  --jq '.[].number' | while read b; do
+    gh issue view "$b" --repo OWNER/REPO --json state -q .state
+  done
+```
+
+Don't trust memory or issue titles. Check the API.
+
 ## Git Hooks (lefthook)
 
 A pre-push hook runs `fmt --check`, `clippy`, and `test` before every push. Managed by [lefthook](https://github.com/evilmartians/lefthook) via `lefthook.yml`. After cloning:
