@@ -1,6 +1,6 @@
 [package]
 name = "git-prism"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Agent-optimized git data MCP server — structured change manifests and full file snapshots for LLM agents"
 license = "Apache-2.0"

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-04-09
+
+### Added
+
+- **`get_function_context` tool.** New MCP tool and CLI subcommand (`git-prism context HEAD~1..HEAD`) that returns callers, callees, and test references for each changed function. Agents no longer need to grep through the codebase to find who calls a modified function or which tests cover it.
+- **Call extraction across all 13 languages.** New `extract_calls()` method on `LanguageAnalyzer` with language-specific node kinds: Rust (`call_expression` + `macro_invocation`), Python (`call`), Go/TS/JS/C/C++ (`call_expression`), Java (`method_invocation`), PHP (`function_call_expression` + `member_call_expression`), C# (`invocation_expression`), Ruby (`call`), Swift/Kotlin (`call_expression` + `navigation_expression`).
+- `CallSite` struct with callee name, line number, method-call flag, and optional receiver.
+- `RepoReader::list_files_at_ref()` for walking git trees to discover caller files.
+- Test file detection via path conventions (e.g., `/tests/`, `_test.go`, `.test.ts`).
+- Tracing spans for context operations: `context.build`, `context.get_manifest`, `context.scan_files`, `context.match_callers`, `context.extract_callees`.
+- 15 BDD scenarios for function context (callers, callees, test references, unsupported languages, multi-language extraction, CLI validation).
+- ADR 0005: call-site extraction spike findings.
+- 51 new unit tests (496 total).
+
+### Changed
+
+- Agent Workflow in README updated from two-step (manifest -> snapshots) to three-step (manifest -> context -> snapshots).
+- CLAUDE.md documents call extraction conventions, `extract_calls()` pattern, and `context` subcommand.
+
 ## [0.5.0] — 2026-04-09
 
 ### Added
