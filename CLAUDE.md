@@ -19,7 +19,7 @@ cargo build --release          # release build
 
 ## Conventions
 
-- **TDD is mandatory.** Red-green-refactor. Write a failing test before writing production code.
+- **TDD is mandatory.** See the TDD section below for the full rules.
 - **Error handling:** `thiserror` for library error types in modules, `anyhow` for application-level errors in `main.rs`.
 - **Snapshot tests:** Use `insta` crate. Snapshot files live next to the source in `snapshots/` directories. Update with `cargo insta review`.
 - **Integration tests:** Build real git repos in temp dirs. Test helpers may use `git` CLI for repo setup (gix's write API is impractical for test fixtures). Production code must use `gix` only — never shell out to `git` CLI in non-test code.
@@ -57,6 +57,30 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 2. Create `src/treesitter/<lang>.rs` implementing `LanguageAnalyzer`
 3. Register extension in `src/treesitter/mod.rs` registry
 4. Add table-driven tests with known source snippets
+
+## TDD
+
+### The Three Laws
+
+1. You may not write any production code unless it is to make a failing test pass.
+2. You may not write any more test code than is required to make a test fail (and compilation errors count as test failures).
+3. You may only write as much production code as necessary to make a failing test pass.
+
+### The Cycle
+
+**Red → Green → Triangulate → Refactor.**
+
+- **Red:** Write one test that fails. Stop as soon as it fails (including compile failures).
+- **Green:** Write the minimum production code to make that test pass. Hardcoded returns are fine at this stage.
+- **Triangulate:** Write a second (or third) test case with different inputs that breaks a hardcoded or overly specific implementation, forcing you to generalize toward the real algorithm. Don't generalize on the first green — let the tests push you there.
+- **Refactor:** Clean up duplication in both test and production code while all tests stay green. This is the only step where you change code without changing behavior.
+
+### Unit Test Rules
+
+- **Hermetic and deterministic.** No network, no filesystem, no shared mutable state, no system clock. Every run produces the same result regardless of environment or execution order.
+- **Test behavior via public methods only.** Do not test private functions, internal state, or implementation details. If you feel the need to test a private method, that's a signal to extract it into its own type with a public API.
+- **Let tests drive abstractions.** If testing is hard, the design needs to change — not the test. Use test difficulty as feedback on your API surface.
+- **No flaky tests.** A test that fails intermittently is worse than no test. If you see flakiness, fix the root cause immediately — do not retry, do not ignore.
 
 ## Epic SDLC
 
