@@ -15,8 +15,8 @@ use clap::{Parser, Subcommand};
 
 use pagination::decode_cursor;
 use tools::{
-    HistoryResponse, ManifestOptions, ManifestResponse, SnapshotOptions, build_history,
-    build_manifest, build_snapshots, build_worktree_manifest,
+    HistoryResponse, ManifestOptions, ManifestResponse, SnapshotOptions, build_function_context,
+    build_history, build_manifest, build_snapshots, build_worktree_manifest,
 };
 
 #[derive(Parser)]
@@ -66,6 +66,14 @@ enum Commands {
         /// Page size for internal pagination (default 500)
         #[arg(long, default_value_t = 500)]
         page_size: usize,
+    },
+    /// Output function context (callers, callees, test references) as JSON
+    Context {
+        /// Git ref range, e.g. "HEAD~1..HEAD"
+        range: String,
+        /// Path to the git repository (defaults to current directory)
+        #[arg(long)]
+        repo: Option<String>,
     },
     /// List supported languages for function-level analysis
     Languages,
@@ -637,6 +645,19 @@ async fn main() -> anyhow::Result<()> {
             };
             let snapshots = build_snapshots(&repo_path, base_ref, head_ref, &paths, &options)?;
             println!("{}", serde_json::to_string_pretty(&snapshots)?);
+        }
+        Commands::Context { range, repo } => {
+            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine current directory")
+            });
+            let ref_range = parse_range(&range);
+            validate_commit_range(&ref_range, "context")?;
+            let (base_ref, head_ref) = match ref_range {
+                RefRange::CommitRange { base, head } => (base, head),
+                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
+            };
+            let context = build_function_context(&repo_path, base_ref, head_ref)?;
+            println!("{}", serde_json::to_string_pretty(&context)?);
         }
         Commands::Languages => {
             println!("Supported languages for function-level analysis:");

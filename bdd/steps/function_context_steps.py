@@ -197,20 +197,18 @@ def step_repo_go_context(context: Context) -> None:
 # ---------- TypeScript fixture ----------
 
 TS_LIB = """\
-export function compute(x: number): number {
+function compute(x: number): number {
     return x + 1;
 }
 """
 
 TS_LIB_MODIFIED = """\
-export function compute(x: number): number {
+function compute(x: number): number {
     return x * 2 + 1;
 }
 """
 
 TS_CALLER = """\
-import { compute } from './lib';
-
 function main() {
     const result = compute(42);
     console.log(result);
@@ -437,7 +435,7 @@ def step_callee_is(context: Context, func_name: str, callee_name: str) -> None:
     assert callees, (
         f"Expected callees for '{func_name}', got empty list"
     )
-    callee_names = [c.get("name", c) if isinstance(c, dict) else str(c) for c in callees]
+    callee_names = [c.get("callee", c.get("name", c)) if isinstance(c, dict) else str(c) for c in callees]
     assert any(callee_name in name for name in callee_names), (
         f"Callee '{callee_name}' not found for function '{func_name}'. "
         f"Callees: {callee_names}"

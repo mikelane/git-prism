@@ -161,7 +161,6 @@ impl RepoReader {
         Ok(commits)
     }
 
-    #[allow(dead_code)]
     pub fn list_files_at_ref(&self, refspec: &str) -> Result<Vec<String>, GitError> {
         let _span = tracing::info_span!("git.list_files").entered();
         let commit = self.peel_to_commit(refspec)?;

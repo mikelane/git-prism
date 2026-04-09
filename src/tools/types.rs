@@ -226,7 +226,6 @@ pub struct HistoryResponse {
 
 // --- FunctionContext types ---
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CallerEntry {
     pub file: String,
@@ -235,14 +234,12 @@ pub struct CallerEntry {
     pub is_test: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CalleeEntry {
     pub callee: String,
     pub line: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FunctionContextEntry {
     pub name: String,
@@ -254,7 +251,6 @@ pub struct FunctionContextEntry {
     pub caller_count: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ContextMetadata {
     pub base_ref: String,
@@ -264,7 +260,6 @@ pub struct ContextMetadata {
     pub generated_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FunctionContextResponse {
     pub metadata: ContextMetadata,

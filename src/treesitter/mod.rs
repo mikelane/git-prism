@@ -43,7 +43,6 @@ pub struct Function {
 }
 
 /// A function call site extracted from source code by tree-sitter analysis.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct CallSite {
     /// The full callee expression (e.g., "foo", "self.bar", "pkg::func").
@@ -60,7 +59,6 @@ pub struct CallSite {
 pub trait LanguageAnalyzer {
     fn extract_functions(&self, source: &[u8]) -> anyhow::Result<Vec<Function>>;
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>>;
-    #[allow(dead_code)]
     fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
         let _ = source;
         Ok(vec![])
