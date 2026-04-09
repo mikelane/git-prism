@@ -62,7 +62,7 @@ fn compute(x: i32) -> i32 {
 }
 """
 
-RUST_RENAME_BEFORE = """\
+RUST_SINGLE_FUNCTION = """\
 fn old_name(x: i32) -> i32 {
     x + 1
 }
@@ -70,12 +70,6 @@ fn old_name(x: i32) -> i32 {
 
 RUST_RENAME_AFTER = """\
 fn new_name(x: i32) -> i32 {
-    x + 1
-}
-"""
-
-RUST_RENAME_AND_MODIFY_BEFORE = """\
-fn old_name(x: i32) -> i32 {
     x + 1
 }
 """
@@ -123,7 +117,7 @@ def step_repo_body_change(context: Context) -> None:
 def step_repo_rename(context: Context) -> None:
     """Two commits: second renames a function without changing its body."""
     repo_dir = _init_repo(context)
-    _write_file(repo_dir, "lib.rs", RUST_RENAME_BEFORE)
+    _write_file(repo_dir, "lib.rs", RUST_SINGLE_FUNCTION)
     _commit(repo_dir, "initial function", ["lib.rs"])
     _write_file(repo_dir, "lib.rs", RUST_RENAME_AFTER)
     _commit(repo_dir, "rename function", ["lib.rs"])
@@ -133,7 +127,7 @@ def step_repo_rename(context: Context) -> None:
 def step_repo_rename_and_modify(context: Context) -> None:
     """Two commits: second renames AND changes the body of a function."""
     repo_dir = _init_repo(context)
-    _write_file(repo_dir, "lib.rs", RUST_RENAME_AND_MODIFY_BEFORE)
+    _write_file(repo_dir, "lib.rs", RUST_SINGLE_FUNCTION)
     _commit(repo_dir, "initial function", ["lib.rs"])
     _write_file(repo_dir, "lib.rs", RUST_RENAME_AND_MODIFY_AFTER)
     _commit(repo_dir, "rename and modify function", ["lib.rs"])

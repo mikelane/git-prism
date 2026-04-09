@@ -100,10 +100,8 @@ pub fn diff_functions(base_fns: &[Function], head_fns: &[Function]) -> Vec<Funct
 }
 
 pub fn diff_imports(base_imports: &[String], head_imports: &[String]) -> ImportChange {
-    let base_set: std::collections::HashSet<&str> =
-        base_imports.iter().map(|s| s.as_str()).collect();
-    let head_set: std::collections::HashSet<&str> =
-        head_imports.iter().map(|s| s.as_str()).collect();
+    let base_set: HashSet<&str> = base_imports.iter().map(|s| s.as_str()).collect();
+    let head_set: HashSet<&str> = head_imports.iter().map(|s| s.as_str()).collect();
 
     let mut added: Vec<String> = head_set
         .difference(&base_set)
