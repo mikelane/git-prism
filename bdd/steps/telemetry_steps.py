@@ -155,7 +155,7 @@ def _get_collector(context: Context) -> MockOtlpCollector:
 
 
 def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
-    """Send a minimal JSON-RPC 'initialize' message over stdin."""
+    """Send the MCP initialize handshake (request + notification) over stdin."""
     request = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -166,8 +166,13 @@ def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
             "clientInfo": {"name": "bdd-telemetry-tests", "version": "0.0.0"},
         },
     }
+    initialized_notification = {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    }
     assert proc.stdin is not None
     proc.stdin.write(json.dumps(request) + "\n")
+    proc.stdin.write(json.dumps(initialized_notification) + "\n")
     proc.stdin.flush()
 
 
@@ -177,7 +182,12 @@ def _send_tool_call(
     arguments: dict[str, Any],
     call_id: int = 2,
 ) -> None:
-    """Send a JSON-RPC tools/call request over stdin."""
+    """Send a JSON-RPC tools/call request, wait for the response, then shut down.
+
+    Closes stdin after reading the response to trigger a clean server shutdown
+    (which flushes the TelemetryGuard). Waits for the process to exit so all
+    OTLP exports complete before assertions run.
+    """
     request = {
         "jsonrpc": "2.0",
         "id": call_id,
@@ -185,8 +195,26 @@ def _send_tool_call(
         "params": {"name": tool_name, "arguments": arguments},
     }
     assert proc.stdin is not None
+    assert proc.stdout is not None
     proc.stdin.write(json.dumps(request) + "\n")
     proc.stdin.flush()
+
+    # Read the tool response (blocks until the server writes it).
+    # The initialize response was already written but not consumed;
+    # read and discard it, then read the tool response.
+    proc.stdout.readline()  # initialize response
+    proc.stdout.readline()  # tool call response
+
+    # Close stdin to signal EOF → server shuts down → TelemetryGuard flushes.
+    proc.stdin.close()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+    # Give the OTLP exporter a moment to deliver to the collector.
+    time.sleep(0.5)
 
 
 def _spawn_server(
@@ -309,6 +337,9 @@ def step_start_server_init_only(context: Context) -> None:
     endpoint = getattr(context, "telemetry_endpoint", None)
     proc = _spawn_server(context, endpoint=endpoint)
     _send_mcp_initialize(proc)
+    # Read the initialize response so it doesn't block the pipe.
+    assert proc.stdout is not None
+    proc.stdout.readline()
 
 
 @when(
@@ -350,7 +381,20 @@ def step_start_server_and_call_tool_invalid_ref(
 
 @when("I wait {seconds:d} seconds for any exports")
 def step_wait(context: Context, seconds: int) -> None:
-    time.sleep(seconds)
+    # Close stdin on all server procs to trigger shutdown → telemetry flush.
+    for proc in getattr(context, "server_procs", []):
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    # Give the OTLP exporter time to deliver.
+    time.sleep(1)
 
 
 # ---------- Assertions: metrics ----------

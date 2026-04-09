@@ -156,9 +156,11 @@ mod tests {
     // because they mutate shared process state; the mutex serializes access
     // so no concurrent mutation occurs.
     unsafe fn clear_telemetry_env() {
-        std::env::remove_var(ENV_OTLP_ENDPOINT);
-        std::env::remove_var(ENV_SERVICE_NAME);
-        std::env::remove_var(ENV_SERVICE_VERSION);
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+            std::env::remove_var(ENV_SERVICE_NAME);
+            std::env::remove_var(ENV_SERVICE_VERSION);
+        }
     }
 
     #[test]

@@ -42,6 +42,10 @@ def _send_mcp_tool_call(
             "clientInfo": {"name": "bdd-pagination-tests", "version": "0.0.0"},
         },
     }
+    initialized_notification = {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    }
     tool_call = {
         "jsonrpc": "2.0",
         "id": 2,
@@ -49,7 +53,11 @@ def _send_mcp_tool_call(
         "params": {"name": tool_name, "arguments": arguments},
     }
 
-    input_data = json.dumps(request) + "\n" + json.dumps(tool_call) + "\n"
+    input_data = (
+        json.dumps(request) + "\n"
+        + json.dumps(initialized_notification) + "\n"
+        + json.dumps(tool_call) + "\n"
+    )
 
     proc = subprocess.run(
         [context.binary_path, "serve"],
@@ -67,7 +75,16 @@ def _send_mcp_tool_call(
 
     response = json.loads(lines[1])
     if "result" in response:
-        content = response["result"].get("content", [])
+        result = response["result"]
+        # MCP tool errors set isError=true and return plain text, not JSON.
+        if result.get("isError"):
+            text = ""
+            for item in result.get("content", []):
+                if item.get("type") == "text":
+                    text = item["text"]
+                    break
+            return {"error": text}
+        content = result.get("content", [])
         for item in content:
             if item.get("type") == "text":
                 return json.loads(item["text"])
@@ -137,6 +154,7 @@ def step_get_first_page(context: Context, size: int) -> None:
     )
     context.first_page = result
     context.first_page_files = [f["path"] for f in result.get("files", [])]
+    context.page_size = size
     context.cursor = result.get("pagination", {}).get("next_cursor")
     assert context.cursor is not None, (
         f"Expected a pagination cursor on the first page but got none. "
@@ -151,13 +169,20 @@ def step_create_repo_with_unstaged_files(context: Context, count: int) -> None:
     _disable_gpgsign(repo_dir)
     context.repo_path = repo_dir
 
-    # Initial commit with a seed file
-    _write_file(repo_dir, "seed.txt", "seed\n")
-    _commit(repo_dir, "initial", ["seed.txt"])
-
-    # Create N unstaged files (not committed)
+    # Initial commit: create N files
     for i in range(count):
-        _write_file(repo_dir, f"file_{i:04d}.txt", f"content {i}\n")
+        _write_file(repo_dir, f"file_{i:04d}.txt", f"original {i}\n")
+    subprocess.run(
+        ["git", "add", "."], cwd=repo_dir, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", f"add {count} files"],
+        cwd=repo_dir, check=True, capture_output=True,
+    )
+
+    # Modify all N files on disk without staging (unstaged changes)
+    for i in range(count):
+        _write_file(repo_dir, f"file_{i:04d}.txt", f"modified {i}\n")
 
 
 @given("a new commit is added to the repository")
@@ -191,6 +216,7 @@ def step_request_worktree_manifest(context: Context, size: int) -> None:
 
 @when("the agent requests the next page using the cursor")
 def step_request_next_page(context: Context) -> None:
+    page_size = getattr(context, "page_size", 50)
     context.result = _send_mcp_tool_call(
         context,
         "get_change_manifest",
@@ -198,6 +224,7 @@ def step_request_next_page(context: Context) -> None:
             "base_ref": "HEAD~1",
             "head_ref": "HEAD",
             "cursor": context.cursor,
+            "page_size": page_size,
         },
         repo_path=context.repo_path,
     )
@@ -333,9 +360,9 @@ def step_response_has_no_cursor(context: Context) -> None:
 @then("the pagination shows {count:d} total files")
 def step_pagination_shows_total(context: Context, count: int) -> None:
     pagination = context.result.get("pagination", {})
-    total = pagination.get("total_files")
+    total = pagination.get("total_items")
     assert total == count, (
-        f"Expected pagination.total_files={count}, got {total}. "
+        f"Expected pagination.total_items={count}, got {total}. "
         f"Pagination object: {pagination}"
     )
 
