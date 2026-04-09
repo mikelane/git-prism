@@ -205,9 +205,9 @@ mod tests {
 
     #[test]
     fn default_extract_calls_returns_empty() {
-        // Any analyzer should compile and return empty calls by default
-        let analyzer = rust_lang::RustAnalyzer;
-        let source = b"fn main() { foo(); }";
+        // Use an analyzer that hasn't overridden extract_calls yet
+        let analyzer = java::JavaAnalyzer;
+        let source = b"public class Foo { void bar() { baz(); } }";
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(
             calls.is_empty(),
