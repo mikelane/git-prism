@@ -24,6 +24,7 @@ cargo build --release          # release build
 - **Snapshot tests:** Use `insta` crate. Snapshot files live next to the source in `snapshots/` directories. Update with `cargo insta review`.
 - **Integration tests:** Build real git repos in temp dirs. Test helpers may use `git` CLI for repo setup (gix's write API is impractical for test fixtures). Production code must use `gix` only — never shell out to `git` CLI in non-test code.
 - **Tree-sitter nullability:** `functions_changed` is `null` (not empty array) when no grammar exists for a language. `None` in Rust → `null` in JSON. The distinction matters.
+- **Function diffing is content-aware.** `diff_functions()` compares functions by body hash (SHA-256), not line position. Moved-but-unchanged functions are suppressed. Renames detected by matching unmatched deleted/added pairs with identical body hashes. Use `body_hash_for_node()` in analyzers, `FunctionChange::from_function()` to construct changes.
 - **All public types** derive `Serialize` and relevant `schemars::JsonSchema` for MCP tool schemas.
 
 ## Key Dependencies
@@ -31,6 +32,7 @@ cargo build --release          # release build
 - **`rmcp` 1.3** — MCP SDK. Tools defined with `#[tool_router]` and `#[tool]` proc macros. Stdio transport.
 - **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`). Do not use `git2` or shell out to `git`.
 - **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
+- **`sha2` 0.10** — SHA-256 hashing for function body content (content-aware diffs) and repo path privacy.
 - **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `history`, `languages`.
 
 ## Working Tree Mode

@@ -111,6 +111,7 @@ Returns structured metadata about what changed between two git refs.
       "functions_changed": [
         {
           "name": "HandleRequest",
+          "old_name": null,
           "change_type": "signature_changed",
           "start_line": 15,
           "end_line": 42,
@@ -118,7 +119,8 @@ Returns structured metadata about what changed between two git refs.
         },
         {
           "name": "validateInput",
-          "change_type": "added",
+          "old_name": "checkInput",
+          "change_type": "renamed",
           "start_line": 44,
           "end_line": 58,
           "signature": "func validateInput(req *Request) error"
@@ -331,6 +333,22 @@ to extract functions, methods, and imports from source code.
 Files in unsupported languages still appear in the manifest with full
 line/size/change-type metadata -- `functions_changed` is `null` (not an empty
 array) to distinguish "no grammar available" from "analyzed, nothing changed."
+
+### Content-Aware Function Diffing
+
+Function changes are detected by comparing SHA-256 hashes of function body
+content, not line positions. This means:
+
+- **Reordered functions** (moved but not modified) produce no change entries,
+  eliminating false positives that waste agent attention.
+- **Body-only changes** (same signature, different implementation) are detected
+  as `modified`, even when line numbers don't shift.
+- **Renamed functions** are detected when an unmatched added function shares a
+  body hash with an unmatched deleted function. These produce a single `renamed`
+  entry with `old_name` populated, instead of separate `deleted` + `added`.
+
+The `change_type` values for functions are: `added`, `modified`, `deleted`,
+`signature_changed`, `renamed`.
 
 ## Dependency File Tracking
 
