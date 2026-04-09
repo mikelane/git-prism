@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct CSharpAnalyzer;
@@ -83,6 +83,46 @@ impl LanguageAnalyzer for CSharpAnalyzer {
         visit_node(source, &root, &mut functions);
 
         Ok(functions)
+    }
+
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse C# source"))?;
+
+        let mut calls = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "invocation_expression"
+                && let Some(expr) = node.child(0)
+            {
+                let callee = expr.utf8_text(source).unwrap_or("").to_string();
+                let (is_method_call, receiver) = match expr.kind() {
+                    "member_access_expression" => {
+                        let recv = expr
+                            .child_by_field_name("expression")
+                            .and_then(|n| n.utf8_text(source).ok())
+                            .map(|s| s.to_string());
+                        (true, recv)
+                    }
+                    _ => (false, None),
+                };
+                calls.push(CallSite {
+                    callee,
+                    line: node.start_position().row + 1,
+                    is_method_call,
+                    receiver,
+                });
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        calls.sort_by_key(|c| c.line);
+        Ok(calls)
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -307,5 +347,31 @@ public class Foo {}
                 .signature
                 .contains("public int Add(int a, int b)")
         );
+    }
+
+    #[test]
+    fn extracts_invocation_expressions() {
+        let source = br#"class Example {
+    void Process() {
+        int x = Calculate(input);
+        Console.WriteLine(x);
+        helper.DoWork();
+    }
+}
+"#;
+        let analyzer = CSharpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"Calculate"));
+        assert!(callees.contains(&"Console.WriteLine"));
+        assert!(callees.contains(&"helper.DoWork"));
+    }
+
+    #[test]
+    fn empty_file_returns_no_calls() {
+        let source = b"";
+        let analyzer = CSharpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert!(calls.is_empty());
     }
 }

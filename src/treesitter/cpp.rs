@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, body_hash_for_node, sha256_hex};
+use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node, sha256_hex};
 use tree_sitter::Parser;
 
 pub struct CppAnalyzer;
@@ -149,6 +149,46 @@ impl LanguageAnalyzer for CppAnalyzer {
         let mut functions = Vec::new();
         collect_functions(&tree.root_node(), source, &[], &mut functions);
         Ok(functions)
+    }
+
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse C++ source"))?;
+
+        let mut calls = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "call_expression"
+                && let Some(func) = node.child_by_field_name("function")
+            {
+                let callee = func.utf8_text(source).unwrap_or("").to_string();
+                let (is_method_call, receiver) = match func.kind() {
+                    "field_expression" => {
+                        let recv = func
+                            .child_by_field_name("argument")
+                            .and_then(|n| n.utf8_text(source).ok())
+                            .map(|s| s.to_string());
+                        (true, recv)
+                    }
+                    _ => (false, None),
+                };
+                calls.push(CallSite {
+                    callee,
+                    line: node.start_position().row + 1,
+                    is_method_call,
+                    receiver,
+                });
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        calls.sort_by_key(|c| c.line);
+        Ok(calls)
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -439,5 +479,28 @@ void unix_init() { return; }
         assert_eq!(functions.len(), 2);
         assert_eq!(functions[0].name, "win_init");
         assert_eq!(functions[1].name, "unix_init");
+    }
+
+    #[test]
+    fn extracts_function_and_method_calls() {
+        let source = br#"void process() {
+    int x = calculate(input);
+    v.push_back(42);
+    auto result = std::make_unique<Foo>(x);
+}
+"#;
+        let analyzer = CppAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"calculate"));
+        assert!(callees.contains(&"v.push_back"));
+    }
+
+    #[test]
+    fn empty_file_returns_no_calls() {
+        let source = b"";
+        let analyzer = CppAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert!(calls.is_empty());
     }
 }

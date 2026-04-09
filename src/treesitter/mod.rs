@@ -202,16 +202,4 @@ mod tests {
         assert_eq!(json["is_method_call"], true);
         assert_eq!(json["receiver"], "server");
     }
-
-    #[test]
-    fn default_extract_calls_returns_empty() {
-        // Use an analyzer that hasn't overridden extract_calls yet
-        let analyzer = java::JavaAnalyzer;
-        let source = b"public class Foo { void bar() { baz(); } }";
-        let calls = analyzer.extract_calls(source).unwrap();
-        assert!(
-            calls.is_empty(),
-            "default extract_calls should return empty vec"
-        );
-    }
 }

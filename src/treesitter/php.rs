@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct PhpAnalyzer;
@@ -93,6 +93,59 @@ impl LanguageAnalyzer for PhpAnalyzer {
         }
 
         Ok(functions)
+    }
+
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse PHP source"))?;
+
+        let mut calls = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            match node.kind() {
+                "function_call_expression" => {
+                    if let Some(func) = node.child_by_field_name("function") {
+                        let callee = func.utf8_text(source).unwrap_or("").to_string();
+                        calls.push(CallSite {
+                            callee,
+                            line: node.start_position().row + 1,
+                            is_method_call: false,
+                            receiver: None,
+                        });
+                    }
+                }
+                "member_call_expression" => {
+                    let name = node
+                        .child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .unwrap_or("");
+                    let recv = node
+                        .child_by_field_name("object")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .map(|s| s.to_string());
+                    let callee = match &recv {
+                        Some(r) => format!("{r}.{name}"),
+                        None => name.to_string(),
+                    };
+                    calls.push(CallSite {
+                        callee,
+                        line: node.start_position().row + 1,
+                        is_method_call: true,
+                        receiver: recv,
+                    });
+                }
+                _ => {}
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        calls.sort_by_key(|c| c.line);
+        Ok(calls)
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -330,5 +383,30 @@ class Service {
         assert_eq!(functions[1].name, "Service.process");
         assert_eq!(functions[1].start_line, 8);
         assert_eq!(functions[1].end_line, 10);
+    }
+
+    #[test]
+    fn extracts_function_and_method_calls() {
+        let source = br#"<?php
+function process() {
+    $x = calculate($input);
+    $obj->doWork();
+    array_map(fn($v) => $v * 2, $arr);
+}
+"#;
+        let analyzer = PhpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"calculate"));
+        assert!(callees.contains(&"$obj.doWork"));
+        assert!(callees.contains(&"array_map"));
+    }
+
+    #[test]
+    fn empty_php_returns_no_calls() {
+        let source = b"<?php\n";
+        let analyzer = PhpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert!(calls.is_empty());
     }
 }
