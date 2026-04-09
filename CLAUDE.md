@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Agent-optimized git data MCP server. Three tools: `get_change_manifest` (structured metadata about what changed), `get_file_snapshots` (complete before/after file content), and `get_commit_history` (per-commit manifests for a range). Replaces human-oriented diffs with structured JSON for LLM agents.
+Agent-optimized git data MCP server. Four tools: `get_change_manifest` (structured metadata about what changed), `get_file_snapshots` (complete before/after file content), `get_commit_history` (per-commit manifests for a range), and `get_function_context` (callers, callees, and test references for changed functions). Replaces human-oriented diffs with structured JSON for LLM agents.
 
 Supports both commit-to-commit comparison (`main..HEAD`) and working tree comparison (`HEAD` alone), which shows staged and unstaged changes vs a base ref.
 
@@ -25,6 +25,7 @@ cargo build --release          # release build
 - **Integration tests:** Build real git repos in temp dirs. Test helpers may use `git` CLI for repo setup (gix's write API is impractical for test fixtures). Production code must use `gix` only — never shell out to `git` CLI in non-test code.
 - **Tree-sitter nullability:** `functions_changed` is `null` (not empty array) when no grammar exists for a language. `None` in Rust → `null` in JSON. The distinction matters.
 - **Function diffing is content-aware.** `diff_functions()` compares functions by body hash (SHA-256), not line position. Moved-but-unchanged functions are suppressed. Renames detected by matching unmatched deleted/added pairs with identical body hashes. Use `body_hash_for_node()` in analyzers, `FunctionChange::from_function()` to construct changes.
+- **Call extraction:** `extract_calls()` on `LanguageAnalyzer` returns `Vec<CallSite>` with callee name, line number, method-call flag, and optional receiver. Each language has its own call node kinds (Rust: `call_expression`+`macro_invocation`, Python: `call`, Go/TS/C/C++: `call_expression`, Java: `method_invocation`, PHP: `function_call_expression`+`member_call_expression`, C#: `invocation_expression`, Ruby: `call`, Swift/Kotlin: `call_expression`+`navigation_expression`). Caller matching uses leaf name comparison.
 - **All public types** derive `Serialize` and relevant `schemars::JsonSchema` for MCP tool schemas.
 
 ## Key Dependencies
@@ -33,7 +34,7 @@ cargo build --release          # release build
 - **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`). Do not use `git2` or shell out to `git`.
 - **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
 - **`sha2` 0.10** — SHA-256 hashing for function body content (content-aware diffs) and repo path privacy.
-- **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `history`, `languages`.
+- **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `history`, `context`, `languages`.
 
 ## Working Tree Mode
 
@@ -45,7 +46,7 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 
 - `src/git/` — Git data access. Wraps `gix`. Returns structured Rust types, never strings.
 - `src/treesitter/` — Function/import extraction. Each language is a self-contained file implementing `LanguageAnalyzer` trait.
-- `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses.
+- `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses. `context.rs` handles function context (callers/callees/test references).
 - `src/pagination.rs` — Cursor encoding, pagination types, validation.
 - `src/server.rs` — MCP server lifecycle (rmcp, stdio).
 - `src/main.rs` — CLI wiring only (clap).

@@ -1,8 +1,9 @@
 # git-prism
 
-Agent-optimized git data for LLM agents. Three MCP tools that replace human-oriented
+Agent-optimized git data for LLM agents. Four MCP tools that replace human-oriented
 diffs with structured JSON -- function-level granularity, import tracking,
-dependency changes, complete file snapshots, and per-commit history.
+dependency changes, complete file snapshots, per-commit history, and function
+context (callers, callees, test references).
 
 ## The Problem
 
@@ -254,6 +255,52 @@ each commit separately instead of a single collapsed diff.
 }
 ```
 
+### `get_function_context`
+
+Returns callers, callees, and test references for each function that changed
+between two refs. Answers "what calls this function?" and "what does this
+function call?" without the agent having to grep.
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `base_ref` | string | _(required)_ | Base git ref |
+| `head_ref` | string | _(required)_ | Head git ref |
+| `repo_path` | string | cwd | Path to the git repository |
+
+**Example output:**
+
+```json
+{
+  "metadata": {
+    "base_ref": "HEAD~1",
+    "head_ref": "HEAD",
+    "base_sha": "a1b2c3d4",
+    "head_sha": "f6e5d4c3",
+    "generated_at": "2026-04-09T12:00:00Z"
+  },
+  "functions": [
+    {
+      "name": "validate_input",
+      "file": "src/validation.rs",
+      "change_type": "modified",
+      "callers": [
+        { "file": "src/handler.rs", "line": 42, "caller": "handle_request", "is_test": false }
+      ],
+      "callees": [
+        { "callee": "check_length", "line": 15 },
+        { "callee": "check_format", "line": 18 }
+      ],
+      "test_references": [
+        { "file": "tests/test_validation.rs", "line": 10, "caller": "test_validate_empty", "is_test": true }
+      ],
+      "caller_count": 2
+    }
+  ]
+}
+```
+
 ## CLI Usage
 
 git-prism also works as a standalone CLI for scripting and debugging:
@@ -274,18 +321,21 @@ git-prism manifest main..HEAD --page-size 50
 # File snapshots for specific paths
 git-prism snapshot HEAD~3..HEAD --paths src/main.rs src/lib.rs
 
+# Function context (callers, callees, test references)
+git-prism context HEAD~1..HEAD
+
 # List supported languages
 git-prism languages
 ```
 
-The `manifest`, `snapshot`, and `history` commands output JSON to stdout. The
-`manifest` and `history` commands auto-paginate internally (default page size
-500, configurable with `--page-size`) and always return the complete result. The
-`languages` command outputs plain text.
+The `manifest`, `snapshot`, `history`, and `context` commands output JSON to
+stdout. The `manifest` and `history` commands auto-paginate internally (default
+page size 500, configurable with `--page-size`) and always return the complete
+result. The `languages` command outputs plain text.
 
 ## Agent Workflow
 
-The typical agent pattern is two calls -- triage, then deep dive:
+The typical agent pattern is three calls -- triage, blast radius, then deep dive:
 
 **Step 1: Triage with `get_change_manifest`**
 
@@ -294,15 +344,23 @@ file counts, line counts, and affected languages. The per-file entries tell you
 which functions changed signatures, which imports were added, and whether files
 are generated (safe to skip).
 
-**Step 2: Deep dive with `get_file_snapshots`**
+**Step 2: Blast radius with `get_function_context`**
 
-Once you know which files matter, request full snapshots of just those files.
-You get complete before/after content -- no reconstructing files from diff hunks.
-Use `line_range` to focus on specific sections and `include_before: false` when
-you only need the current state.
+For the changed functions identified in step 1, request function context. This
+tells you which other files call each changed function, what each changed
+function calls, and which test files reference it. The agent never has to grep
+through the codebase to find callers or guess which tests to check.
 
-This two-step approach keeps token usage low. The manifest is compact metadata;
-snapshots are requested only for files that need inspection.
+**Step 3: Deep dive with `get_file_snapshots`**
+
+Once you know which files and callers matter, request full snapshots of the
+highest-impact files. You get complete before/after content -- no reconstructing
+files from diff hunks. Use `line_range` to focus on specific sections and
+`include_before: false` when you only need the current state.
+
+This three-step approach keeps token usage low. The manifest is compact metadata;
+context identifies the blast radius without reading file content; snapshots are
+requested only for files that need inspection.
 
 For large changesets, the manifest may span multiple pages. When `next_cursor`
 is non-null in the response, pass it back as the `cursor` parameter to fetch
@@ -312,7 +370,7 @@ so you can triage before paging through file entries.
 ## Supported Languages
 
 Function-level analysis uses [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
-to extract functions, methods, and imports from source code.
+to extract functions, methods, imports, and call sites from source code.
 
 | Language | Extensions | Extracts |
 |----------|------------|----------|

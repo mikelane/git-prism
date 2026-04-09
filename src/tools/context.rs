@@ -46,17 +46,28 @@ pub fn build_function_context(
     base_ref: &str,
     head_ref: &str,
 ) -> Result<FunctionContextResponse, ToolError> {
+    let _root_span = tracing::info_span!(
+        "context.build",
+        functions_changed = tracing::field::Empty,
+        files_scanned = tracing::field::Empty,
+        total_callers_found = tracing::field::Empty,
+    )
+    .entered();
+
     let reader = RepoReader::open(repo_path)?;
     let base_commit = reader.resolve_commit(base_ref)?;
     let head_commit = reader.resolve_commit(head_ref)?;
 
     // Step 1: Get the manifest to find changed functions
+    let _manifest_span = tracing::info_span!("context.get_manifest").entered();
     let options = ManifestOptions {
         include_patterns: vec![],
         exclude_patterns: vec![],
         include_function_analysis: true,
     };
     let manifest = build_manifest(repo_path, base_ref, head_ref, &options, 0, 10_000)?;
+
+    drop(_manifest_span);
 
     // Collect changed functions with their file paths
     let mut changed_functions: Vec<(String, String, FunctionChangeType)> = Vec::new();
@@ -76,6 +87,8 @@ pub fn build_function_context(
     let all_files = reader.list_files_at_ref(head_ref)?;
 
     // Step 3: For each file with a supported language, parse and extract calls
+    let _scan_span =
+        tracing::info_span!("context.scan_files", file_count = all_files.len()).entered();
     let mut file_calls: Vec<(
         String,
         Vec<crate::treesitter::CallSite>,
@@ -98,7 +111,10 @@ pub fn build_function_context(
         }
     }
 
+    drop(_scan_span);
+
     // Step 4: Build context for each changed function
+    let _match_span = tracing::info_span!("context.match_callers").entered();
     let mut function_entries: Vec<FunctionContextEntry> = Vec::new();
 
     for (func_name, func_file, change_type) in &changed_functions {
@@ -148,6 +164,13 @@ pub fn build_function_context(
         });
     }
 
+    drop(_match_span);
+
+    let total_callers: usize = function_entries.iter().map(|f| f.caller_count).sum();
+    _root_span.record("functions_changed", function_entries.len() as i64);
+    _root_span.record("files_scanned", file_calls.len() as i64);
+    _root_span.record("total_callers_found", total_callers as i64);
+
     Ok(FunctionContextResponse {
         metadata: ContextMetadata {
             base_ref: base_ref.to_string(),
@@ -167,6 +190,7 @@ fn extract_callees_for_function(
     file_path: &str,
     func_name: &str,
 ) -> Vec<CalleeEntry> {
+    let _span = tracing::info_span!("context.extract_callees").entered();
     let ext = extension_from_path(file_path);
     let analyzer = match analyzer_for_extension(ext) {
         Some(a) => a,
