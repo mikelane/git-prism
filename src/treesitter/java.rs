@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct JavaAnalyzer;
@@ -72,6 +72,44 @@ impl LanguageAnalyzer for JavaAnalyzer {
         }
 
         Ok(functions)
+    }
+
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse Java source"))?;
+
+        let mut calls = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "method_invocation" {
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source).ok())
+                    .unwrap_or("");
+                let (callee, is_method_call, receiver) =
+                    if let Some(obj) = node.child_by_field_name("object") {
+                        let obj_text = obj.utf8_text(source).unwrap_or("").to_string();
+                        (format!("{obj_text}.{name}"), true, Some(obj_text))
+                    } else {
+                        (name.to_string(), false, None)
+                    };
+                calls.push(CallSite {
+                    callee,
+                    line: node.start_position().row + 1,
+                    is_method_call,
+                    receiver,
+                });
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        calls.sort_by_key(|c| c.line);
+        Ok(calls)
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -255,5 +293,31 @@ public class Foo {}
         let analyzer = JavaAnalyzer;
         let imports = analyzer.extract_imports(source).unwrap();
         assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn extracts_method_invocations() {
+        let source = br#"public class Example {
+    public void process() {
+        int x = calculate(input);
+        System.out.println(x);
+        helper.doWork();
+    }
+}
+"#;
+        let analyzer = JavaAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"calculate"));
+        assert!(callees.contains(&"System.out.println"));
+        assert!(callees.contains(&"helper.doWork"));
+    }
+
+    #[test]
+    fn empty_file_returns_no_calls() {
+        let source = b"public class Foo {}";
+        let analyzer = JavaAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert!(calls.is_empty());
     }
 }

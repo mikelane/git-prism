@@ -22,6 +22,7 @@ pub fn hash_repo_path(path: &Path) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefPattern {
+    #[allow(dead_code)] // Constructed only in tests; exists for schema completeness
     Worktree,
     SingleCommit,
     RangeDoubleDot,

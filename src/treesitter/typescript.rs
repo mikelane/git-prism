@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 #[derive(Debug, Clone, Copy)]
@@ -147,6 +147,46 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
         let mut functions = Vec::new();
         extract_functions_from_node(source, &root, None, &mut functions);
         Ok(functions)
+    }
+
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let mut parser = self.create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse source"))?;
+
+        let mut calls = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "call_expression"
+                && let Some(func) = node.child_by_field_name("function")
+            {
+                let callee = func.utf8_text(source).unwrap_or("").to_string();
+                let (is_method_call, receiver) = match func.kind() {
+                    "member_expression" => {
+                        let recv = func
+                            .child_by_field_name("object")
+                            .and_then(|n| n.utf8_text(source).ok())
+                            .map(|s| s.to_string());
+                        (true, recv)
+                    }
+                    _ => (false, None),
+                };
+                calls.push(CallSite {
+                    callee,
+                    line: node.start_position().row + 1,
+                    is_method_call,
+                    receiver,
+                });
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        calls.sort_by_key(|c| c.line);
+        Ok(calls)
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -355,5 +395,86 @@ class Greeter {
         assert_eq!(functions[0].name, "Greeter.greet");
         assert_eq!(functions[0].start_line, 5);
         assert_eq!(functions[0].end_line, 7);
+    }
+
+    #[test]
+    fn extracts_simple_calls() {
+        let source = br#"function main() {
+    const x = foo();
+    const y = bar(x);
+    baz(x, y);
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert_eq!(callees, vec!["foo", "bar", "baz"]);
+        assert!(calls.iter().all(|c| !c.is_method_call));
+    }
+
+    #[test]
+    fn extracts_method_calls() {
+        let source = br#"function process(server: Server) {
+    server.start();
+    server.handleRequest();
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert_eq!(callees, vec!["server.start", "server.handleRequest"]);
+        assert!(calls.iter().all(|c| c.is_method_call));
+        assert_eq!(calls[0].receiver.as_deref(), Some("server"));
+    }
+
+    #[test]
+    fn extracts_console_log() {
+        let source = br#"function example() {
+    console.log("hello");
+    Array.from([1, 2]);
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"console.log"));
+        assert!(callees.contains(&"Array.from"));
+    }
+
+    #[test]
+    fn extracts_calls_inside_callbacks() {
+        let source = br#"function example() {
+    setTimeout(() => {
+        doWork();
+    }, 1000);
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"setTimeout"));
+        assert!(callees.contains(&"doWork"));
+    }
+
+    #[test]
+    fn javascript_extracts_calls() {
+        let source = br#"function main() {
+    const result = calculate(input);
+    console.log(result);
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::javascript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"calculate"));
+        assert!(callees.contains(&"console.log"));
+    }
+
+    #[test]
+    fn empty_file_returns_no_calls() {
+        let source = b"";
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert!(calls.is_empty());
     }
 }

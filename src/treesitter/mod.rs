@@ -42,10 +42,27 @@ pub struct Function {
     pub body_hash: String,
 }
 
+/// A function call site extracted from source code by tree-sitter analysis.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct CallSite {
+    /// The full callee expression (e.g., "foo", "self.bar", "pkg::func").
+    pub callee: String,
+    /// 1-indexed line number where the call occurs.
+    pub line: usize,
+    /// Whether this is a method call (has a receiver).
+    pub is_method_call: bool,
+    /// The receiver expression, if this is a method call (e.g., "self", "server").
+    pub receiver: Option<String>,
+}
+
 /// Trait for language-specific function and import extraction.
 pub trait LanguageAnalyzer {
     fn extract_functions(&self, source: &[u8]) -> anyhow::Result<Vec<Function>>;
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>>;
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let _ = source;
+        Ok(vec![])
+    }
 }
 
 /// Returns the analyzer for a file extension, or None if unsupported.
@@ -153,5 +170,34 @@ mod tests {
             json.get("body_hash").is_none(),
             "body_hash must be excluded from serialization"
         );
+    }
+
+    #[test]
+    fn callsite_serializes_to_json() {
+        let cs = CallSite {
+            callee: "foo".into(),
+            line: 10,
+            is_method_call: false,
+            receiver: None,
+        };
+        let json = serde_json::to_value(&cs).unwrap();
+        assert_eq!(json["callee"], "foo");
+        assert_eq!(json["line"], 10);
+        assert_eq!(json["is_method_call"], false);
+        assert!(json["receiver"].is_null());
+    }
+
+    #[test]
+    fn callsite_with_receiver_serializes() {
+        let cs = CallSite {
+            callee: "server.start".into(),
+            line: 5,
+            is_method_call: true,
+            receiver: Some("server".into()),
+        };
+        let json = serde_json::to_value(&cs).unwrap();
+        assert_eq!(json["callee"], "server.start");
+        assert_eq!(json["is_method_call"], true);
+        assert_eq!(json["receiver"], "server");
     }
 }

@@ -1,4 +1,4 @@
-use super::{Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct SwiftAnalyzer;
@@ -106,6 +106,46 @@ impl LanguageAnalyzer for SwiftAnalyzer {
         }
 
         Ok(functions)
+    }
+
+    fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
+        let mut parser = create_parser();
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("Failed to parse Swift source"))?;
+
+        let mut calls = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "call_expression"
+                && let Some(func) = node.child(0)
+            {
+                let callee = func.utf8_text(source).unwrap_or("").to_string();
+                let (is_method_call, receiver) = match func.kind() {
+                    "navigation_expression" => {
+                        let recv = func
+                            .child(0)
+                            .and_then(|n| n.utf8_text(source).ok())
+                            .map(|s| s.to_string());
+                        (true, recv)
+                    }
+                    _ => (false, None),
+                };
+                calls.push(CallSite {
+                    callee,
+                    line: node.start_position().row + 1,
+                    is_method_call,
+                    receiver,
+                });
+            }
+            for i in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(i as u32) {
+                    stack.push(child);
+                }
+            }
+        }
+        calls.sort_by_key(|c| c.line);
+        Ok(calls)
     }
 
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>> {
@@ -314,5 +354,28 @@ class Service {
         assert_eq!(functions[1].name, "Service.stop");
         assert_eq!(functions[1].start_line, 8);
         assert_eq!(functions[1].end_line, 10);
+    }
+
+    #[test]
+    fn extracts_function_calls() {
+        let source = br#"func process() {
+    let x = calculate(input: 42)
+    print(x)
+    obj.doWork()
+}
+"#;
+        let analyzer = SwiftAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"calculate"));
+        assert!(callees.contains(&"print"));
+    }
+
+    #[test]
+    fn empty_file_returns_no_calls() {
+        let source = b"";
+        let analyzer = SwiftAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert!(calls.is_empty());
     }
 }
