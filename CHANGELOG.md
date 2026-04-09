@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-04-09
+
+### Added
+
+- **Content-aware function diffs.** `diff_functions()` now compares functions by SHA-256 body hash instead of line position. Three improvements over v0.4:
+  - **Reorder suppression** — functions that moved but didn't change no longer produce false `modified` entries.
+  - **Body-only detection** — functions whose implementation changed (but signature didn't) are now detected as `modified`, even when line numbers are stable.
+  - **Rename detection** — when a deleted function and an added function share the same body hash, they're reported as a single `renamed` entry with `old_name` populated instead of separate `deleted` + `added`.
+- New `renamed` variant in `functions_changed[].change_type`.
+- New `old_name` field on function change entries (null for non-renames).
+- `body_hash_for_node()` helper for tree-sitter analyzers.
+- `FunctionChange::from_function()` constructor for building change entries.
+- 4 integration tests with real git repos covering reorder, body change, rename, and rename+modify scenarios.
+- 5 BDD scenarios for content-aware diffs.
+
+### Changed
+
+- `modified` in `functions_changed` now means the function body changed (was: line positions changed). This is a semantic change — fewer false positives, more true positives.
+- All 13 language analyzers compute body hashes during tree-sitter extraction.
+- CLAUDE.md and README.md updated with content-aware diffing documentation.
+
 ## [0.4.0] — 2026-04-08
 
 ### Added
