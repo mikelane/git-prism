@@ -1278,6 +1278,322 @@ mod tests {
         assert!(manifest.summary.total_functions_changed.is_none());
     }
 
+    // --- Integration tests: content-aware function diffs with real git repos ---
+
+    /// Helper: create a repo with two commits where the second reorders functions.
+    fn create_repo_with_reordered_functions() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Base: two functions in order
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n\nfn farewell(name: &str) -> String {\n    format!(\"Goodbye, {}!\", name)\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Head: same two functions, swapped order
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn farewell(name: &str) -> String {\n    format!(\"Goodbye, {}!\", name)\n}\n\nfn greet(name: &str) -> String {\n    format!(\"Hello, {}!\", name)\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "swap order"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn reordered_functions_produce_zero_function_changes() {
+        let (_dir, path) = create_repo_with_reordered_functions();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        let rs_file = manifest.files.iter().find(|f| f.path == "lib.rs").unwrap();
+        let fns = rs_file.functions_changed.as_ref().unwrap();
+        assert!(
+            fns.is_empty(),
+            "reordered functions should produce no changes, got: {fns:?}"
+        );
+    }
+
+    /// Helper: create a repo where the second commit changes a function body only.
+    fn create_repo_with_body_change() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn compute(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Change only the body, keep signature identical
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn compute(x: i32) -> i32 {\n    x * 2 + 1\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "change body"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn body_only_change_detected_in_real_repo() {
+        let (_dir, path) = create_repo_with_body_change();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        let rs_file = manifest.files.iter().find(|f| f.path == "lib.rs").unwrap();
+        let fns = rs_file.functions_changed.as_ref().unwrap();
+        assert_eq!(fns.len(), 1, "exactly one function change expected");
+        assert_eq!(fns[0].name, "compute");
+        assert_eq!(fns[0].change_type, FunctionChangeType::Modified);
+        assert!(fns[0].old_name.is_none());
+    }
+
+    /// Helper: create a repo where the second commit renames a function.
+    fn create_repo_with_rename() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn old_name(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Same body, different name
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn new_name(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "rename function"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn rename_detected_in_real_repo() {
+        let (_dir, path) = create_repo_with_rename();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        let rs_file = manifest.files.iter().find(|f| f.path == "lib.rs").unwrap();
+        let fns = rs_file.functions_changed.as_ref().unwrap();
+        assert_eq!(fns.len(), 1, "expected single rename, got: {fns:?}");
+        assert_eq!(fns[0].name, "new_name");
+        assert_eq!(fns[0].change_type, FunctionChangeType::Renamed);
+        assert_eq!(fns[0].old_name.as_deref(), Some("old_name"));
+    }
+
+    /// Helper: create a repo where the second commit renames AND modifies a function.
+    fn create_repo_with_rename_and_modify() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn old_name(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Different name AND different body
+        std::fs::write(
+            path.join("lib.rs"),
+            "fn new_name(x: i32) -> i32 {\n    x * 2 + 1\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "lib.rs"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "rename and modify"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn rename_plus_modify_shows_deleted_and_added_in_real_repo() {
+        let (_dir, path) = create_repo_with_rename_and_modify();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        let rs_file = manifest.files.iter().find(|f| f.path == "lib.rs").unwrap();
+        let fns = rs_file.functions_changed.as_ref().unwrap();
+        assert_eq!(fns.len(), 2, "expected deleted + added, got: {fns:?}");
+
+        let deleted = fns
+            .iter()
+            .find(|f| f.change_type == FunctionChangeType::Deleted);
+        assert!(deleted.is_some(), "expected a Deleted change");
+        assert_eq!(deleted.unwrap().name, "old_name");
+
+        let added = fns
+            .iter()
+            .find(|f| f.change_type == FunctionChangeType::Added);
+        assert!(added.is_some(), "expected an Added change");
+        assert_eq!(added.unwrap().name, "new_name");
+    }
+
     #[test]
     fn it_sorts_function_changes_by_name() {
         let base = vec![];
