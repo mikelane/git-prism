@@ -354,4 +354,22 @@ class MyClass:
         assert_eq!(functions[0].name, "Foo");
         assert_eq!(functions[1].name, "Foo.bar");
     }
+
+    #[test]
+    fn extracts_async_decorated_function() {
+        let source = b"@app.get(\"/\")\nasync def index():\n    return {\"ok\": True}\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "index");
+    }
+
+    #[test]
+    fn extracts_decorated_class() {
+        let source = b"@dataclass\nclass Point:\n    x: int\n    y: int\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "Point");
+    }
 }

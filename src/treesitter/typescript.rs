@@ -518,4 +518,16 @@ class Greeter {
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "Calculator.add");
     }
+
+    #[test]
+    fn extracts_export_const_arrow_function() {
+        let source = br#"export const add = (a: number, b: number): number => {
+    return a + b;
+};
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "add");
+    }
 }
