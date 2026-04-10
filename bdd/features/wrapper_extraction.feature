@@ -33,7 +33,7 @@ Feature: Wrapper-pattern function extraction
       When I run "git-prism manifest HEAD~1..HEAD"
       Then the exit code is 0
       And the output is valid JSON
-      And the file "calculator.ts" has a function change "multiply" with type "added"
+      And the file "calculator.ts" has a function change "Calculator.multiply" with type "added"
 
   # ---------------------------------------------------------------
   Rule: Python decorated functions are detected

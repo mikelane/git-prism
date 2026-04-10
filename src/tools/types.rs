@@ -256,10 +256,47 @@ pub struct FunctionContextEntry {
     pub name: String,
     pub file: String,
     pub change_type: FunctionChangeType,
+    pub blast_radius: BlastRadius,
     pub callers: Vec<CallerEntry>,
     pub callees: Vec<CalleeEntry>,
     pub test_references: Vec<CallerEntry>,
     pub caller_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BlastRadius {
+    pub production_callers: usize,
+    pub test_callers: usize,
+    pub has_tests: bool,
+    pub risk: RiskLevel,
+}
+
+impl BlastRadius {
+    pub fn compute(production_callers: usize, test_callers: usize) -> Self {
+        let has_tests = test_callers > 0;
+        let risk = match (production_callers, has_tests) {
+            (0, _) => RiskLevel::None,
+            (1..=2, true) => RiskLevel::Low,
+            (1..=2, false) => RiskLevel::Medium,
+            (_, true) => RiskLevel::Medium,
+            (_, false) => RiskLevel::High,
+        };
+        Self {
+            production_callers,
+            test_callers,
+            has_tests,
+            risk,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -646,5 +683,65 @@ mod tests {
         let args: HistoryArgs = serde_json::from_str(json).unwrap();
         assert!(args.cursor.is_none());
         assert_eq!(args.page_size, 100);
+    }
+
+    #[test]
+    fn blast_radius_zero_callers_is_none_risk() {
+        let br = BlastRadius::compute(0, 0);
+        assert_eq!(br.risk, RiskLevel::None);
+        assert!(!br.has_tests);
+    }
+
+    #[test]
+    fn blast_radius_zero_production_with_tests_is_none_risk() {
+        let br = BlastRadius::compute(0, 3);
+        assert_eq!(br.risk, RiskLevel::None);
+        assert!(br.has_tests);
+    }
+
+    #[test]
+    fn blast_radius_low_callers_with_tests_is_low() {
+        let br = BlastRadius::compute(2, 1);
+        assert_eq!(br.risk, RiskLevel::Low);
+        assert!(br.has_tests);
+    }
+
+    #[test]
+    fn blast_radius_low_callers_no_tests_is_medium() {
+        let br = BlastRadius::compute(1, 0);
+        assert_eq!(br.risk, RiskLevel::Medium);
+        assert!(!br.has_tests);
+    }
+
+    #[test]
+    fn blast_radius_many_callers_with_tests_is_medium() {
+        let br = BlastRadius::compute(5, 2);
+        assert_eq!(br.risk, RiskLevel::Medium);
+        assert!(br.has_tests);
+    }
+
+    #[test]
+    fn blast_radius_many_callers_no_tests_is_high() {
+        let br = BlastRadius::compute(10, 0);
+        assert_eq!(br.risk, RiskLevel::High);
+        assert!(!br.has_tests);
+    }
+
+    #[test]
+    fn blast_radius_serializes_risk_as_snake_case() {
+        let br = BlastRadius::compute(5, 0);
+        let json = serde_json::to_value(&br).unwrap();
+        assert_eq!(json["risk"], "high");
+        assert_eq!(json["production_callers"], 5);
+        assert_eq!(json["test_callers"], 0);
+        assert_eq!(json["has_tests"], false);
+    }
+
+    #[test]
+    fn blast_radius_boundary_at_three_callers() {
+        let low = BlastRadius::compute(2, 1);
+        let medium = BlastRadius::compute(3, 1);
+        assert_eq!(low.risk, RiskLevel::Low);
+        assert_eq!(medium.risk, RiskLevel::Medium);
     }
 }

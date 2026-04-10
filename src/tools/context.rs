@@ -5,8 +5,8 @@ use chrono::Utc;
 use crate::git::reader::RepoReader;
 use crate::tools::manifest::build_manifest;
 use crate::tools::types::{
-    CalleeEntry, CallerEntry, ContextMetadata, FunctionChangeType, FunctionContextEntry,
-    FunctionContextResponse, ManifestOptions, ToolError,
+    BlastRadius, CalleeEntry, CallerEntry, ContextMetadata, FunctionChangeType,
+    FunctionContextEntry, FunctionContextResponse, ManifestOptions, ToolError,
 };
 use crate::treesitter::analyzer_for_extension;
 
@@ -152,11 +152,13 @@ pub fn build_function_context(
         }
 
         let caller_count = callers.len() + test_references.len();
+        let blast_radius = BlastRadius::compute(callers.len(), test_references.len());
 
         function_entries.push(FunctionContextEntry {
             name: func_name.clone(),
             file: func_file.clone(),
             change_type: change_type.clone(),
+            blast_radius,
             callers,
             callees,
             test_references,
