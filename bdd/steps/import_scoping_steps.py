@@ -31,7 +31,7 @@ pub fn compute(x: i32) -> i32 {
 """
 
 RUST_IMPORTER = """\
-use lib::compute;
+use crate::lib::compute;
 
 fn caller() {
     let result = compute(42);
