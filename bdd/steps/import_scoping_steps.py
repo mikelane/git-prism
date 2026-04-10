@@ -273,6 +273,148 @@ def step_c_fallback(context: Context) -> None:
     _commit(repo_dir, "modify compute", ["lib.c"])
 
 
+# ---------- Rust pub use re-export fixture ----------
+
+RUST_REEXPORT_CARGO_TOML = """\
+[package]
+name = "reexport_test"
+version = "0.1.0"
+edition = "2021"
+"""
+
+RUST_REEXPORT_LIB = """\
+pub mod inner;
+pub mod caller;
+
+pub use inner::compute;
+"""
+
+RUST_REEXPORT_INNER_INITIAL = """\
+pub fn compute(x: i32) -> i32 {
+    x + 1
+}
+"""
+
+RUST_REEXPORT_INNER_MODIFIED = """\
+pub fn compute(x: i32) -> i32 {
+    x * 2 + 1
+}
+"""
+
+# caller.rs uses the re-exported path via `pub use crate::inner::compute`
+# to exercise both the pub use match AND the actual caller behavior.
+RUST_REEXPORT_CALLER = """\
+pub use crate::inner::compute;
+
+pub fn run() {
+    let result = compute(42);
+}
+"""
+
+
+@given("a Rust repo where a file pub-re-exports the changed function")
+def step_rust_pub_use(context: Context) -> None:
+    """Rust repo: inner.rs's compute() is re-exported and called via pub use."""
+    repo_dir = _init_repo(context)
+    _write_file(repo_dir, "Cargo.toml", RUST_REEXPORT_CARGO_TOML)
+    _write_file(repo_dir, "src/lib.rs", RUST_REEXPORT_LIB)
+    _write_file(repo_dir, "src/inner.rs", RUST_REEXPORT_INNER_INITIAL)
+    _write_file(repo_dir, "src/caller.rs", RUST_REEXPORT_CALLER)
+    _commit(
+        repo_dir,
+        "initial",
+        ["Cargo.toml", "src/lib.rs", "src/inner.rs", "src/caller.rs"],
+    )
+    _write_file(repo_dir, "src/inner.rs", RUST_REEXPORT_INNER_MODIFIED)
+    _commit(repo_dir, "modify compute", ["src/inner.rs"])
+
+
+# ---------- Rust integration test via extern crate name ----------
+
+RUST_INTEG_CARGO_TOML = """\
+[package]
+name = "integ_test_crate"
+version = "0.1.0"
+edition = "2021"
+"""
+
+RUST_INTEG_LIB_INITIAL = """\
+pub fn compute(x: i32) -> i32 {
+    x + 1
+}
+"""
+
+RUST_INTEG_LIB_MODIFIED = """\
+pub fn compute(x: i32) -> i32 {
+    x * 2 + 1
+}
+"""
+
+RUST_INTEG_TEST = """\
+use integ_test_crate::compute;
+
+#[test]
+fn it_computes() {
+    let result = compute(1);
+    assert_eq!(result, 3);
+}
+"""
+
+
+@given("a Rust repo with an integration test that uses the extern crate name")
+def step_rust_integration_test(context: Context) -> None:
+    """Rust repo: tests/it.rs uses `use integ_test_crate::compute;`."""
+    repo_dir = _init_repo(context)
+    _write_file(repo_dir, "Cargo.toml", RUST_INTEG_CARGO_TOML)
+    _write_file(repo_dir, "src/lib.rs", RUST_INTEG_LIB_INITIAL)
+    _write_file(repo_dir, "tests/it.rs", RUST_INTEG_TEST)
+    _commit(
+        repo_dir,
+        "initial",
+        ["Cargo.toml", "src/lib.rs", "tests/it.rs"],
+    )
+    _write_file(repo_dir, "src/lib.rs", RUST_INTEG_LIB_MODIFIED)
+    _commit(repo_dir, "modify compute", ["src/lib.rs"])
+
+
+# ---------- Python relative import fixture ----------
+
+PY_PKG_INIT = ""
+
+PY_PKG_LIB_INITIAL = """\
+def compute(x):
+    return x + 1
+"""
+
+PY_PKG_LIB_MODIFIED = """\
+def compute(x):
+    return x * 2 + 1
+"""
+
+PY_PKG_SIBLING = """\
+from . import lib
+
+def caller():
+    return lib.compute(42)
+"""
+
+
+@given("a Python repo where a sibling uses a relative import")
+def step_python_relative_import(context: Context) -> None:
+    """Python pkg/lib.py changed; pkg/sibling.py uses `from . import lib`."""
+    repo_dir = _init_repo(context)
+    _write_file(repo_dir, "pkg/__init__.py", PY_PKG_INIT)
+    _write_file(repo_dir, "pkg/lib.py", PY_PKG_LIB_INITIAL)
+    _write_file(repo_dir, "pkg/sibling.py", PY_PKG_SIBLING)
+    _commit(
+        repo_dir,
+        "initial",
+        ["pkg/__init__.py", "pkg/lib.py", "pkg/sibling.py"],
+    )
+    _write_file(repo_dir, "pkg/lib.py", PY_PKG_LIB_MODIFIED)
+    _commit(repo_dir, "modify compute", ["pkg/lib.py"])
+
+
 # ---------- Assertion steps ----------
 
 
@@ -311,4 +453,23 @@ def step_has_n_callers(context: Context, func_name: str, count: int) -> None:
     assert len(callers) >= count, (
         f"Expected at least {count} caller(s) for '{func_name}', "
         f"got {len(callers)}: {callers}"
+    )
+
+
+@then('the function "{func_name}" has scoping_mode "{mode}"')
+def step_has_scoping_mode(context: Context, func_name: str, mode: str) -> None:
+    """Assert the function entry has the expected scoping_mode value."""
+    data = _ensure_json_parsed(context)
+    functions = data.get("functions", [])
+    for entry in functions:
+        if entry.get("name") == func_name:
+            actual = entry.get("scoping_mode")
+            assert actual == mode, (
+                f"Expected scoping_mode={mode!r} for '{func_name}', "
+                f"got {actual!r}. Full entry: {entry}"
+            )
+            return
+    raise AssertionError(
+        f"No context entry for function '{func_name}'. "
+        f"Available: {[e.get('name') for e in functions]}"
     )
