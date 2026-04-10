@@ -285,6 +285,12 @@ function call?" without the agent having to grep.
       "name": "validate_input",
       "file": "src/validation.rs",
       "change_type": "modified",
+      "blast_radius": {
+        "production_callers": 1,
+        "test_callers": 1,
+        "has_tests": true,
+        "risk": "low"
+      },
       "callers": [
         { "file": "src/handler.rs", "line": 42, "caller": "handle_request", "is_test": false }
       ],
@@ -348,8 +354,11 @@ are generated (safe to skip).
 
 For the changed functions identified in step 1, request function context. This
 tells you which other files call each changed function, what each changed
-function calls, and which test files reference it. The agent never has to grep
-through the codebase to find callers or guess which tests to check.
+function calls, and which test files reference it. Each function includes a
+`blast_radius` object with a `risk` level (`none`, `low`, `medium`, `high`)
+computed from production caller count and test coverage -- sort by risk to
+review the highest-impact changes first. The agent never has to grep through
+the codebase to find callers or guess which tests to check.
 
 **Step 3: Deep dive with `get_file_snapshots`**
 
@@ -375,18 +384,18 @@ to extract functions, methods, imports, and call sites from source code.
 | Language | Extensions | Extracts |
 |----------|------------|----------|
 | C | `.c`, `.h` | functions, declarations, `#include` directives |
-| C++ | `.cpp`, `.hpp`, `.cc`, `.cxx`, `.hh`, `.hxx` | class/namespace-qualified methods, functions, `#include` directives |
+| C++ | `.cpp`, `.hpp`, `.cc`, `.cxx`, `.hh`, `.hxx` | class/namespace-qualified methods, functions, `extern "C"` blocks, `#include` directives |
 | C# | `.cs` | methods, constructors, `using` directives |
 | Go | `.go` | functions, methods, imports |
 | Java | `.java` | methods, constructors, imports |
-| JavaScript | `.js`, `.jsx` | functions, arrow functions, methods, imports |
+| JavaScript | `.js`, `.jsx` | functions, exported functions, arrow functions, methods, imports |
 | Kotlin | `.kt`, `.kts` | functions, methods, extension functions, imports |
 | PHP | `.php` | functions, methods, `use` declarations |
-| Python | `.py` | functions, methods, imports |
+| Python | `.py` | functions, decorated functions, methods, imports |
 | Ruby | `.rb` | methods, singleton methods, `require`/`require_relative` |
 | Rust | `.rs` | functions, methods, use statements |
 | Swift | `.swift` | functions, methods, init declarations, imports |
-| TypeScript | `.ts`, `.tsx` | functions, arrow functions, methods, imports |
+| TypeScript | `.ts`, `.tsx` | functions, exported functions, arrow functions, methods, imports |
 
 Files in unsupported languages still appear in the manifest with full
 line/size/change-type metadata -- `functions_changed` is `null` (not an empty
