@@ -45,6 +45,7 @@ Feature: Blast radius scoring for function context
       Then the exit code is 0
       And the output is valid JSON
       And the function "calculate" has blast_radius with has_tests true
+      And the function "calculate" has blast_radius risk "low"
 
     @ISSUE-133
     Scenario: function with callers but no tests has higher risk

@@ -281,6 +281,7 @@ pub struct BlastRadius {
 }
 
 impl BlastRadius {
+    #[must_use]
     pub fn compute(production_callers: usize, test_callers: usize) -> Self {
         let has_tests = test_callers > 0;
         let risk = match (production_callers, has_tests) {
