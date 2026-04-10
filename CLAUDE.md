@@ -17,6 +17,21 @@ cargo test                     # unit + integration tests
 cargo build --release          # release build
 ```
 
+## Pull Request Workflow
+
+When you finish work on a branch — whether that's an epic, a feature, a
+bugfix, or a docs update — create a pull request as the final step. This is
+part of the normal completion workflow, not something that requires explicit
+authorization per task. The PR is how work gets reviewed and merged; pushing
+to a branch without opening a PR leaves the work stranded.
+
+Rules:
+- One PR per logical unit of work (typically per epic or per feature)
+- Stack dependent PRs (e.g., epic B on top of epic A) when work naturally builds
+- Use descriptive titles and bodies that explain the why, not just the what
+- Link to closed issues with `Closes #NN` syntax
+- Never force-push to main or an already-reviewed PR without explicit permission
+
 ## Conventions
 
 - **TDD is mandatory.** See the TDD section below for the full rules.
