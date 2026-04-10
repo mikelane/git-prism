@@ -116,6 +116,13 @@ fn collect_functions(
                     });
                 }
             }
+            "linkage_specification" => {
+                if let Some(body) = child.child_by_field_name("body") {
+                    collect_functions(&body, source, scope, functions);
+                } else {
+                    collect_functions(&child, source, scope, functions);
+                }
+            }
             kind if is_preprocessor_container(kind) => {
                 collect_functions(&child, source, scope, functions);
             }
@@ -502,5 +509,26 @@ void unix_init() { return; }
         let analyzer = CppAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn extracts_functions_inside_extern_c() {
+        let source = br#"extern "C" {
+
+void ffi_init() {
+    printf("init\n");
+}
+
+void ffi_cleanup() {
+    printf("cleanup\n");
+}
+
+}
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "ffi_init");
+        assert_eq!(functions[1].name, "ffi_cleanup");
     }
 }
