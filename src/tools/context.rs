@@ -3,6 +3,7 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::git::reader::RepoReader;
+use crate::tools::import_scope;
 use crate::tools::manifest::build_manifest;
 use crate::tools::types::{
     BlastRadius, CalleeEntry, CallerEntry, ContextMetadata, FunctionChangeType,
@@ -86,7 +87,20 @@ pub fn build_function_context(
     // Step 2: List all files in the repo at head_ref for caller scanning
     let all_files = reader.list_files_at_ref(head_ref)?;
 
-    // Step 3: For each file with a supported language, parse and extract calls
+    // Step 2a: Infer module paths for changed files
+    let changed_file_paths: Vec<&str> = changed_functions
+        .iter()
+        .map(|(_, p, _)| p.as_str())
+        .collect();
+    let changed_modules: Vec<(&str, Option<String>)> = changed_file_paths
+        .iter()
+        .map(|p| {
+            let ext = extension_from_path(p);
+            (*p, import_scope::infer_module_path(p, ext))
+        })
+        .collect();
+
+    // Step 3: Import-scoped scan — only full-parse files that reference changed modules
     let _scan_span =
         tracing::info_span!("context.scan_files", file_count = all_files.len()).entered();
     let mut file_calls: Vec<(
@@ -96,9 +110,49 @@ pub fn build_function_context(
     )> = Vec::new();
     for file_path in &all_files {
         let ext = extension_from_path(file_path);
-        if let Some(analyzer) = analyzer_for_extension(ext)
-            && let Ok(content) = reader.read_file_at_ref(head_ref, file_path)
-        {
+        let analyzer = match analyzer_for_extension(ext) {
+            Some(a) => a,
+            None => continue,
+        };
+        let content = match reader.read_file_at_ref(head_ref, file_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Check if this file should be scanned via import scoping
+        let is_changed_file = changed_file_paths.contains(&file_path.as_str());
+        let should_scan = if is_changed_file {
+            // Always scan the changed file itself (for same-file callers)
+            true
+        } else if !import_scope::supports_import_scoping(ext) {
+            // Unsupported language: fall back to full scan
+            true
+        } else {
+            // Go uses same-package semantics: same-directory files can
+            // call each other without explicit imports
+            let is_same_pkg = ext == "go"
+                && changed_file_paths
+                    .iter()
+                    .any(|cf| import_scope::same_directory(cf, file_path));
+            if is_same_pkg {
+                true
+            } else {
+                // Lightweight import extraction to check relationship
+                let imports = analyzer
+                    .extract_imports(content.as_bytes())
+                    .unwrap_or_default();
+                changed_modules.iter().any(|(changed_path, module_path)| {
+                    if let Some(mp) = module_path {
+                        let changed_ext = extension_from_path(changed_path);
+                        import_scope::imports_reference_module(&imports, mp, file_path, changed_ext)
+                    } else {
+                        false
+                    }
+                })
+            }
+        };
+
+        if should_scan {
             let calls = analyzer
                 .extract_calls(content.as_bytes())
                 .unwrap_or_default();
@@ -283,12 +337,12 @@ mod tests {
         ).unwrap();
         std::fs::write(
             path.join("src/main.rs"),
-            "fn main() {\n    let result = calculate(42);\n}\n",
+            "use crate::lib::calculate;\n\nfn main() {\n    let result = calculate(42);\n}\n",
         )
         .unwrap();
         std::fs::write(
             path.join("tests/test_lib.rs"),
-            "fn test_calculate() {\n    let result = calculate(1);\n}\n",
+            "use crate::lib::calculate;\n\nfn test_calculate() {\n    let result = calculate(1);\n}\n",
         )
         .unwrap();
 

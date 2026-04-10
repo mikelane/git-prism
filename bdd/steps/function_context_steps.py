@@ -50,7 +50,7 @@ pub fn unused_func() -> bool {
 """
 
 RUST_MAIN = """\
-use lib::calculate;
+use crate::lib::calculate;
 
 fn main() {
     let result = calculate(42);
@@ -59,9 +59,11 @@ fn main() {
 """
 
 RUST_TEST = """\
+use crate::lib::calculate;
+
 #[cfg(test)]
 mod tests {
-    use super::calculate;
+    use super::*;
 
     #[test]
     fn test_calculate() {
@@ -197,18 +199,20 @@ def step_repo_go_context(context: Context) -> None:
 # ---------- TypeScript fixture ----------
 
 TS_LIB = """\
-function compute(x: number): number {
+export function compute(x: number): number {
     return x + 1;
 }
 """
 
 TS_LIB_MODIFIED = """\
-function compute(x: number): number {
+export function compute(x: number): number {
     return x * 2 + 1;
 }
 """
 
 TS_CALLER = """\
+import { compute } from './lib';
+
 function main() {
     const result = compute(42);
     console.log(result);
