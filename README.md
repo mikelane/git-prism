@@ -296,6 +296,7 @@ large repos. Unsupported languages fall back to full-repo scanning.
         "has_tests": true,
         "risk": "low"
       },
+      "scoping_mode": "scoped",
       "callers": [
         { "file": "src/handler.rs", "line": 42, "caller": "handle_request", "is_test": false }
       ],
@@ -311,6 +312,12 @@ large repos. Unsupported languages fall back to full-repo scanning.
   ]
 }
 ```
+
+The `scoping_mode` field indicates how the caller scan was performed: `"scoped"`
+means import-based filtering was used (more precise but may miss callers that
+use unusual import patterns), while `"fallback"` means the scan parsed every
+file in the repo (authoritative but slower). Use this to decide whether a
+zero-caller result is definitive or potentially incomplete.
 
 ## CLI Usage
 

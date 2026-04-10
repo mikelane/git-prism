@@ -3,11 +3,11 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::git::reader::RepoReader;
-use crate::tools::import_scope;
+use crate::tools::import_scope::{self, RepoContext};
 use crate::tools::manifest::build_manifest;
 use crate::tools::types::{
     BlastRadius, CalleeEntry, CallerEntry, ContextMetadata, FunctionChangeType,
-    FunctionContextEntry, FunctionContextResponse, ManifestOptions, ToolError,
+    FunctionContextEntry, FunctionContextResponse, ManifestOptions, ScopingMode, ToolError,
 };
 use crate::treesitter::analyzer_for_extension;
 
@@ -87,16 +87,25 @@ pub fn build_function_context(
     // Step 2: List all files in the repo at head_ref for caller scanning
     let all_files = reader.list_files_at_ref(head_ref)?;
 
-    // Step 2a: Infer module paths for changed files
-    let changed_file_paths: Vec<&str> = changed_functions
+    // Load repo-level context (Cargo.toml crate name, go.mod module path) so
+    // Rust integration tests and Go imports match correctly.
+    let repo_ctx = RepoContext::load(repo_path);
+
+    // Infer module paths for changed files
+    let changed_file_paths: std::collections::HashSet<&str> = changed_functions
         .iter()
         .map(|(_, p, _)| p.as_str())
         .collect();
-    let changed_modules: Vec<(&str, Option<String>)> = changed_file_paths
+    let changed_modules: Vec<(&str, Option<String>, bool)> = changed_functions
         .iter()
+        .map(|(_, p, _)| p.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .map(|p| {
             let ext = extension_from_path(p);
-            (*p, import_scope::infer_module_path(p, ext))
+            let module = import_scope::infer_module_path(p, ext, &repo_ctx);
+            let supports = import_scope::supports_import_scoping(ext);
+            (p, module, supports)
         })
         .collect();
 
@@ -120,12 +129,20 @@ pub fn build_function_context(
         };
 
         // Check if this file should be scanned via import scoping
-        let is_changed_file = changed_file_paths.contains(&file_path.as_str());
+        let is_changed_file = changed_file_paths.contains(file_path.as_str());
+        // If ANY changed file is in a language that doesn't support scoping,
+        // OR has no inferred module, we must fall back for that file — so this
+        // file must be scanned to cover that case.
+        let any_changed_needs_fallback = changed_modules
+            .iter()
+            .any(|(_, module, supports)| !*supports || module.is_none());
+
         let should_scan = if is_changed_file {
             // Always scan the changed file itself (for same-file callers)
             true
-        } else if !import_scope::supports_import_scoping(ext) {
-            // Unsupported language: fall back to full scan
+        } else if !import_scope::supports_import_scoping(ext) || any_changed_needs_fallback {
+            // Unsupported scanning language, or fallback required for some
+            // changed file: full scan
             true
         } else {
             // Go uses same-package semantics: same-directory files can
@@ -141,10 +158,11 @@ pub fn build_function_context(
                 let imports = analyzer
                     .extract_imports(content.as_bytes())
                     .unwrap_or_default();
-                changed_modules.iter().any(|(changed_path, module_path)| {
+                changed_modules.iter().any(|(_, module_path, _)| {
                     if let Some(mp) = module_path {
-                        let changed_ext = extension_from_path(changed_path);
-                        import_scope::imports_reference_module(&imports, mp, file_path, changed_ext)
+                        import_scope::imports_reference_module(
+                            &imports, mp, file_path, ext, &repo_ctx,
+                        )
                     } else {
                         false
                     }
@@ -208,11 +226,28 @@ pub fn build_function_context(
         let caller_count = callers.len() + test_references.len();
         let blast_radius = BlastRadius::compute(callers.len(), test_references.len());
 
+        // The scoping mode for this function is determined by its file's
+        // language: if the language supports scoping AND we could infer a
+        // module path AND no other changed file forced a global fallback,
+        // the scan was scoped.
+        let func_ext = extension_from_path(func_file);
+        let func_has_module =
+            import_scope::infer_module_path(func_file, func_ext, &repo_ctx).is_some();
+        let scoping_mode = if import_scope::supports_import_scoping(func_ext)
+            && func_has_module
+            && !changed_modules.iter().any(|(_, m, s)| !*s || m.is_none())
+        {
+            ScopingMode::Scoped
+        } else {
+            ScopingMode::Fallback
+        };
+
         function_entries.push(FunctionContextEntry {
             name: func_name.clone(),
             file: func_file.clone(),
             change_type: change_type.clone(),
             blast_radius,
+            scoping_mode,
             callers,
             callees,
             test_references,

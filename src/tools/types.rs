@@ -251,12 +251,27 @@ pub struct CalleeEntry {
     pub line: usize,
 }
 
+/// How the caller scan was performed for a given function.
+///
+/// `Scoped` means the scan used import-based filtering and may have excluded
+/// files that don't explicitly import the changed module. `Fallback` means the
+/// scan parsed every file in the repo (current behavior for languages without
+/// import-scoping support). Agents can use this to tell whether a zero-caller
+/// result is authoritative or potentially incomplete.
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopingMode {
+    Scoped,
+    Fallback,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FunctionContextEntry {
     pub name: String,
     pub file: String,
     pub change_type: FunctionChangeType,
     pub blast_radius: BlastRadius,
+    pub scoping_mode: ScopingMode,
     pub callers: Vec<CallerEntry>,
     pub callees: Vec<CalleeEntry>,
     pub test_references: Vec<CallerEntry>,
