@@ -631,6 +631,7 @@ mod tests {
     fn it_counts_function_context_entries_per_language() {
         use crate::tools::types::{
             BlastRadius, CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
+            ScopingMode,
         };
 
         let entries = vec![
@@ -639,6 +640,7 @@ mod tests {
                 file: "src/lib.rs".to_string(),
                 change_type: FunctionChangeType::Modified,
                 blast_radius: BlastRadius::compute(0, 0),
+                scoping_mode: ScopingMode::Scoped,
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
@@ -649,6 +651,7 @@ mod tests {
                 file: "src/main.rs".to_string(),
                 change_type: FunctionChangeType::Added,
                 blast_radius: BlastRadius::compute(0, 0),
+                scoping_mode: ScopingMode::Scoped,
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
@@ -659,6 +662,7 @@ mod tests {
                 file: "scripts/tool.py".to_string(),
                 change_type: FunctionChangeType::Added,
                 blast_radius: BlastRadius::compute(0, 0),
+                scoping_mode: ScopingMode::Scoped,
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
@@ -669,6 +673,7 @@ mod tests {
                 file: "blob.bin".to_string(),
                 change_type: FunctionChangeType::Added,
                 blast_radius: BlastRadius::compute(0, 0),
+                scoping_mode: ScopingMode::Scoped,
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),

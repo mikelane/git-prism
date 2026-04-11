@@ -1,5 +1,6 @@
 pub mod context;
 pub mod history;
+pub mod import_scope;
 pub mod manifest;
 pub mod snapshots;
 pub mod types;

@@ -262,6 +262,11 @@ Returns callers, callees, and test references for each function that changed
 between two refs. Answers "what calls this function?" and "what does this
 function call?" without the agent having to grep.
 
+Uses import-aware scoping for Rust, Python, Go, and TypeScript/JavaScript to
+filter the caller scan to files that actually import the changed module. This
+eliminates false positives from leaf-name collisions and improves performance on
+large repos. Unsupported languages fall back to full-repo scanning.
+
 **Parameters:**
 
 | Parameter | Type | Default | Description |
@@ -292,6 +297,7 @@ function call?" without the agent having to grep.
         "has_tests": true,
         "risk": "low"
       },
+      "scoping_mode": "scoped",
       "callers": [
         { "file": "src/handler.rs", "line": 42, "caller": "handle_request", "is_test": false }
       ],
@@ -307,6 +313,12 @@ function call?" without the agent having to grep.
   ]
 }
 ```
+
+The `scoping_mode` field indicates how the caller scan was performed: `"scoped"`
+means import-based filtering was used (more precise but may miss callers that
+use unusual import patterns), while `"fallback"` means the scan parsed every
+file in the repo (authoritative but slower). Use this to decide whether a
+zero-caller result is definitive or potentially incomplete.
 
 ## CLI Usage
 
