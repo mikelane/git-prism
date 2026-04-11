@@ -11,7 +11,7 @@ Supports both commit-to-commit comparison (`main..HEAD`) and working tree compar
 ## Build & Test
 
 ```bash
-cargo clippy -- -D warnings   # lint — warnings are errors
+cargo clippy --all-targets -- -D warnings   # lint — warnings are errors
 cargo fmt --check              # format check
 cargo test                     # unit + integration tests
 cargo build --release          # release build

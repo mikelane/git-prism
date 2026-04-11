@@ -222,6 +222,113 @@ fn collect_all_history_pages(
     })
 }
 
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Serve => {
+            server::run_server().await?;
+        }
+        Commands::Manifest {
+            range,
+            repo,
+            page_size,
+        } => {
+            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine current directory")
+            });
+            let options = ManifestOptions {
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+                include_function_analysis: true,
+            };
+            let manifest = match parse_range(&range) {
+                RefRange::CommitRange { base, head } => {
+                    collect_all_manifest_pages(&repo_path, base, head, &options, page_size)?
+                }
+                RefRange::WorktreeCompare { base } => {
+                    collect_all_worktree_manifest_pages(&repo_path, base, &options, page_size)?
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Commands::History {
+            range,
+            repo,
+            page_size,
+        } => {
+            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine current directory")
+            });
+            let ref_range = parse_range(&range);
+            validate_commit_range(&ref_range, "history")?;
+            let (base_ref, head_ref) = match ref_range {
+                RefRange::CommitRange { base, head } => (base, head),
+                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
+            };
+            let options = ManifestOptions {
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+                include_function_analysis: true,
+            };
+            let history =
+                collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
+            println!("{}", serde_json::to_string_pretty(&history)?);
+        }
+        Commands::Snapshot { range, paths, repo } => {
+            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine current directory")
+            });
+            let ref_range = parse_range(&range);
+            validate_commit_range(&ref_range, "snapshot")?;
+            let (base_ref, head_ref) = match ref_range {
+                RefRange::CommitRange { base, head } => (base, head),
+                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
+            };
+            let options = SnapshotOptions {
+                include_before: true,
+                include_after: true,
+                max_file_size_bytes: 100_000,
+                line_range: None,
+            };
+            let snapshots = build_snapshots(&repo_path, base_ref, head_ref, &paths, &options)?;
+            println!("{}", serde_json::to_string_pretty(&snapshots)?);
+        }
+        Commands::Context { range, repo } => {
+            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
+                std::env::current_dir().expect("cannot determine current directory")
+            });
+            let ref_range = parse_range(&range);
+            validate_commit_range(&ref_range, "context")?;
+            let (base_ref, head_ref) = match ref_range {
+                RefRange::CommitRange { base, head } => (base, head),
+                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
+            };
+            let context = build_function_context(&repo_path, base_ref, head_ref)?;
+            println!("{}", serde_json::to_string_pretty(&context)?);
+        }
+        Commands::Languages => {
+            println!("Supported languages for function-level analysis:");
+            println!("  c          (.c, .h)");
+            println!("  cpp        (.cpp, .hpp, .cc, .cxx, .hh, .hxx)");
+            println!("  csharp     (.cs)");
+            println!("  go         (.go)");
+            println!("  java       (.java)");
+            println!("  javascript (.js, .jsx)");
+            println!("  kotlin     (.kt, .kts)");
+            println!("  php        (.php)");
+            println!("  python     (.py)");
+            println!("  ruby       (.rb)");
+            println!("  rust       (.rs)");
+            println!("  swift      (.swift)");
+            println!("  typescript (.ts, .tsx)");
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,111 +676,4 @@ mod tests {
         assert_eq!(result.commits.len(), 3);
         assert!(result.pagination.next_cursor.is_none());
     }
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Serve => {
-            server::run_server().await?;
-        }
-        Commands::Manifest {
-            range,
-            repo,
-            page_size,
-        } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
-            let options = ManifestOptions {
-                include_patterns: vec![],
-                exclude_patterns: vec![],
-                include_function_analysis: true,
-            };
-            let manifest = match parse_range(&range) {
-                RefRange::CommitRange { base, head } => {
-                    collect_all_manifest_pages(&repo_path, base, head, &options, page_size)?
-                }
-                RefRange::WorktreeCompare { base } => {
-                    collect_all_worktree_manifest_pages(&repo_path, base, &options, page_size)?
-                }
-            };
-            println!("{}", serde_json::to_string_pretty(&manifest)?);
-        }
-        Commands::History {
-            range,
-            repo,
-            page_size,
-        } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
-            let ref_range = parse_range(&range);
-            validate_commit_range(&ref_range, "history")?;
-            let (base_ref, head_ref) = match ref_range {
-                RefRange::CommitRange { base, head } => (base, head),
-                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
-            };
-            let options = ManifestOptions {
-                include_patterns: vec![],
-                exclude_patterns: vec![],
-                include_function_analysis: true,
-            };
-            let history =
-                collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
-            println!("{}", serde_json::to_string_pretty(&history)?);
-        }
-        Commands::Snapshot { range, paths, repo } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
-            let ref_range = parse_range(&range);
-            validate_commit_range(&ref_range, "snapshot")?;
-            let (base_ref, head_ref) = match ref_range {
-                RefRange::CommitRange { base, head } => (base, head),
-                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
-            };
-            let options = SnapshotOptions {
-                include_before: true,
-                include_after: true,
-                max_file_size_bytes: 100_000,
-                line_range: None,
-            };
-            let snapshots = build_snapshots(&repo_path, base_ref, head_ref, &paths, &options)?;
-            println!("{}", serde_json::to_string_pretty(&snapshots)?);
-        }
-        Commands::Context { range, repo } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
-            let ref_range = parse_range(&range);
-            validate_commit_range(&ref_range, "context")?;
-            let (base_ref, head_ref) = match ref_range {
-                RefRange::CommitRange { base, head } => (base, head),
-                RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
-            };
-            let context = build_function_context(&repo_path, base_ref, head_ref)?;
-            println!("{}", serde_json::to_string_pretty(&context)?);
-        }
-        Commands::Languages => {
-            println!("Supported languages for function-level analysis:");
-            println!("  c          (.c, .h)");
-            println!("  cpp        (.cpp, .hpp, .cc, .cxx, .hh, .hxx)");
-            println!("  csharp     (.cs)");
-            println!("  go         (.go)");
-            println!("  java       (.java)");
-            println!("  javascript (.js, .jsx)");
-            println!("  kotlin     (.kt, .kts)");
-            println!("  php        (.php)");
-            println!("  python     (.py)");
-            println!("  ruby       (.rb)");
-            println!("  rust       (.rs)");
-            println!("  swift      (.swift)");
-            println!("  typescript (.ts, .tsx)");
-        }
-    }
-
-    Ok(())
 }
