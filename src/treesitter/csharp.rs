@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct CSharpAnalyzer;
@@ -66,7 +66,19 @@ impl LanguageAnalyzer for CSharpAnalyzer {
 
         // C# files may have a namespace declaration wrapping classes,
         // or classes at the top level. We need to handle both.
-        fn visit_node(source: &[u8], node: &tree_sitter::Node, functions: &mut Vec<Function>) {
+        //
+        // `depth` bounds recursion to prevent stack overflow on adversarial
+        // input (e.g., thousands of nested namespaces). Methods extracted
+        // before the limit is hit are still returned.
+        fn visit_node(
+            source: &[u8],
+            node: &tree_sitter::Node,
+            functions: &mut Vec<Function>,
+            depth: usize,
+        ) {
+            if depth >= MAX_RECURSION_DEPTH {
+                return;
+            }
             match node.kind() {
                 "class_declaration" | "struct_declaration" | "record_declaration" => {
                     extract_methods_from_class(source, node, functions);
@@ -74,13 +86,13 @@ impl LanguageAnalyzer for CSharpAnalyzer {
                 _ => {
                     let mut cursor = node.walk();
                     for child in node.children(&mut cursor) {
-                        visit_node(source, &child, functions);
+                        visit_node(source, &child, functions, depth + 1);
                     }
                 }
             }
         }
 
-        visit_node(source, &root, &mut functions);
+        visit_node(source, &root, &mut functions, 0);
 
         Ok(functions)
     }
@@ -373,5 +385,45 @@ public class Foo {}
         let analyzer = CSharpAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Security regression: deeply-nested namespace declarations used to stack-overflow
+    /// `visit_node` because it recursed without a depth limit. An attacker committing
+    /// a C# file with thousands of nested namespaces could crash git-prism during
+    /// `get_change_manifest`. The analyzer must now complete without crashing.
+    ///
+    /// Uses nested namespaces (not classes) because `visit_node` stops recursing at
+    /// a `class_declaration`, but falls through and recurses into children for any
+    /// other node kind — including `namespace_declaration`.
+    ///
+    /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
+    /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
+    #[test]
+    fn deeply_nested_namespaces_do_not_stack_overflow() {
+        const NESTING_DEPTH: usize = 5000;
+        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+        let mut source = String::new();
+        for i in 0..NESTING_DEPTH {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        for _ in 0..NESTING_DEPTH {
+            source.push_str("}\n");
+        }
+
+        let handle = std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let analyzer = CSharpAnalyzer;
+                analyzer.extract_functions(source.as_bytes())
+            })
+            .expect("spawn analyzer thread");
+
+        let result = handle
+            .join()
+            .expect("analyzer thread must not stack-overflow on deeply-nested input");
+        let functions = result.expect("analyzer must return Ok on deeply-nested input");
+        // Namespaces contain no methods, so no functions should be extracted.
+        assert!(functions.is_empty());
     }
 }

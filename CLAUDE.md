@@ -46,8 +46,8 @@ Rules:
 ## Key Dependencies
 
 - **`rmcp` 1.3** — MCP SDK. Tools defined with `#[tool_router]` and `#[tool]` proc macros. Stdio transport.
-- **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`). Do not use `git2` or shell out to `git`.
-- **`tree-sitter` 0.26** — Native Rust. Grammar crates: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-go`, `tree-sitter-python`, `tree-sitter-typescript`, `tree-sitter-javascript`, `tree-sitter-rust`.
+- **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`, `status`). Do not use `git2` or shell out to `git`.
+- **`tree-sitter` 0.26** — Native Rust. Grammar crates cover 13 languages: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-c-sharp`, `tree-sitter-go`, `tree-sitter-java`, `tree-sitter-javascript`, `tree-sitter-php`, `tree-sitter-python`, `tree-sitter-ruby`, `tree-sitter-rust`, `tree-sitter-swift`, `tree-sitter-typescript`. Kotlin is vendored under `vendor/tree-sitter-kotlin` and built via `build.rs` + `cc` because no published crate tracks current grammars.
 - **`sha2` 0.10** — SHA-256 hashing for function body content (content-aware diffs) and repo path privacy.
 - **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `history`, `context`, `languages`.
 
@@ -63,6 +63,9 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 - `src/treesitter/` — Function/import extraction. Each language is a self-contained file implementing `LanguageAnalyzer` trait.
 - `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses. `context.rs` handles function context (callers/callees/test references).
 - `src/pagination.rs` — Cursor encoding, pagination types, validation.
+- `src/metrics.rs` — OpenTelemetry metric catalog. Single `Metrics` struct with `record_*` helpers for requests, durations, response bytes, languages seen, change scopes, truncation reasons, pagination pages, gix ops, and tree-sitter parses. Attribute cardinality is bounded by construction.
+- `src/privacy.rs` — Privacy normalization for telemetry: SHA-256 `hash_repo_path`, `normalize_ref_pattern` enum mapping, `classify_ref_mode`, `classify_error_kind`. Keeps raw paths, ref names, and error messages out of exported spans.
+- `src/telemetry.rs` — OTLP exporter bootstrap and `TelemetryGuard`. Reads `GIT_PRISM_OTLP_ENDPOINT`/`_HEADERS`/`_SERVICE_NAME`/`_SERVICE_VERSION`. Telemetry is opt-in; absent endpoint means no-op.
 - `src/server.rs` — MCP server lifecycle (rmcp, stdio).
 - `src/main.rs` — CLI wiring only (clap).
 
