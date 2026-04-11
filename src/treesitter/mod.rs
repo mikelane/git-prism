@@ -13,6 +13,20 @@ pub mod typescript;
 
 use sha2::{Digest, Sha256};
 
+/// Maximum recursion depth for tree-walking analyzers.
+///
+/// Treesitter analyzers that recurse through nested declarations (nested
+/// namespaces, classes, modules, etc.) must bound their recursion to avoid
+/// stack overflow when processing adversarial input read from git blobs.
+///
+/// An attacker committing a source file with thousands of nested class or
+/// module blocks would otherwise crash git-prism during `get_change_manifest`.
+///
+/// 256 is generous for real-world code — humans rarely nest more than ~20
+/// levels — while keeping worst-case stack usage comfortably under the
+/// default 2 MB cargo test stack and the 8 MB default main thread stack.
+pub const MAX_RECURSION_DEPTH: usize = 256;
+
 /// Compute a hex-encoded SHA-256 hash of the given bytes.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
