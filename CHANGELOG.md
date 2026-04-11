@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0] — 2026-04-09
 
+> Released 2026-04-10 (retroactively tagged; see ADR 0007 for history).
+
 ### Added
 
 - **`get_function_context` tool.** New MCP tool and CLI subcommand (`git-prism context HEAD~1..HEAD`) that returns callers, callees, and test references for each changed function. Agents no longer need to grep through the codebase to find who calls a modified function or which tests cover it.
@@ -25,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLAUDE.md documents call extraction conventions, `extract_calls()` pattern, and `context` subcommand.
 
 ## [0.5.0] — 2026-04-09
+
+> Released 2026-04-10 (retroactively tagged; see ADR 0007).
 
 ### Added
 
@@ -137,6 +141,8 @@ Function-level analysis now covers 13 languages (was 8). git-prism supports the 
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.6.0]: https://github.com/mikelane/git-prism/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/mikelane/git-prism/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mikelane/git-prism/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/mikelane/git-prism/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mikelane/git-prism/compare/v0.2.0...v0.3.0
