@@ -12,7 +12,7 @@ Set these environment variables before starting the server:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `GIT_PRISM_OTLP_ENDPOINT` | OTLP gRPC endpoint URL. When unset, telemetry is disabled entirely. | unset (disabled) |
-| `GIT_PRISM_OTLP_HEADERS` | Comma-separated `key=value` pairs sent as gRPC metadata (e.g. `signoz-access-token=xxx`). | unset |
+| `GIT_PRISM_OTLP_HEADERS` | **Planned — not yet wired (see [#43](https://github.com/mikelane/git-prism/issues/43)).** Intended for comma-separated `key=value` pairs sent as gRPC metadata (e.g. `signoz-access-token=xxx`). Setting this variable today has no effect; the exporter sends requests without custom headers. Authenticating against managed OTLP backends that require a header currently requires a local collector proxy. | unset |
 | `GIT_PRISM_SERVICE_NAME` | `service.name` resource attribute reported to the backend. | `git-prism` |
 | `GIT_PRISM_SERVICE_VERSION` | `service.version` resource attribute reported to the backend. | crate version from `Cargo.toml` |
 
@@ -43,24 +43,24 @@ Histograms use explicit bucket boundaries listed below.
 
 **Label values:**
 
-- `tool`: `get_change_manifest`, `get_file_snapshots`, `get_commit_history`
+- `tool`: `get_change_manifest`, `get_file_snapshots`, `get_commit_history`, `get_function_context`
 - `status`: `success`, `error`
 - `pattern`: `worktree`, `single_commit`, `range_double_dot`, `range_triple_dot`, `branch`, `sha`
 - `scope`: `staged`, `unstaged`, `committed`
-- `language`: `rust`, `go`, `python`, `typescript`, `javascript`, `java`, `c`, `cpp`
+- `language`: `rust`, `go`, `python`, `typescript`, `javascript`, `java`, `c`, `cpp`, `csharp`, `ruby`, `swift`, `kotlin`, `php` (13 total; matches the registered analyzers in `src/treesitter/mod.rs`. Files whose extension resolves to `unknown` are filtered before emission.)
 
 ### Performance Metrics
 
 | Metric | Kind | Labels | Description |
 |--------|------|--------|-------------|
 | `git_prism.tool.duration_ms` | histogram | `tool` | End-to-end tool execution time. |
-| `git_prism.gix.operation_ms` | histogram | `operation` | Time spent in gix operations. |
-| `git_prism.treesitter.parse_ms` | histogram | `language` | Tree-sitter parse + extraction time. |
+| `git_prism.gix.operation_ms` | histogram | `operation` | **Planned — not yet wired.** The instrument is registered so dashboards can refer to it, but no call site currently records durations. Tracked in [#189](https://github.com/mikelane/git-prism/issues/189). |
+| `git_prism.treesitter.parse_ms` | histogram | `language` | **Planned — not yet wired.** Same status as `gix.operation_ms`; the `record_treesitter_parse` helper is defined but unused. Tracked in [#189](https://github.com/mikelane/git-prism/issues/189). |
 | `git_prism.errors.total` | counter | `tool`, `error_kind` | Errors by tool and kind. |
 
 **Label values:**
 
-- `operation`: `open_repo`, `resolve_ref`, `diff_commits`, `diff_worktree`, `read_blob`, `walk_commits`
+- `operation`: `open_repo`, `resolve_ref`, `diff_commits`, `diff_worktree`, `read_blob`, `walk_commits` (these are the `git.*` span names in `src/git/`; the label enum is defined for when `gix.operation_ms` is wired up per [#189](https://github.com/mikelane/git-prism/issues/189))
 - `error_kind`: `ref_not_found`, `repo_not_found`, `diff_failed`, `parse_failed`, `io_error`, `unknown`
 
 **Duration histogram buckets (ms):** 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000
@@ -78,7 +78,7 @@ Histograms use explicit bucket boundaries listed below.
 
 **Label values:**
 
-- `reason`: `max_files`, `max_snapshot_files`, `file_size_limit`
+- `reason`: `paginated` (emitted from `get_change_manifest` when the response carries a non-null `next_cursor`), `max_file_size` (emitted from `get_file_snapshots` when a file body exceeds `max_file_size_bytes` and is truncated byte-wise). Silent truncation in `get_file_snapshots` when the `paths` array exceeds its effective limit is not currently reported through this counter; that gap is tracked in [#189](https://github.com/mikelane/git-prism/issues/189).
 
 **Token/byte histogram buckets:** 100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000
 
@@ -122,22 +122,36 @@ mcp.tool.get_commit_history
 └── [manifest sub-tree]           [one per commit in range]
 ```
 
+### `get_function_context`
+
+```
+mcp.tool.get_function_context
+└── context.build
+    ├── context.get_manifest              [delegates into the manifest sub-tree]
+    ├── context.scan_files                [walks head tree, records file_count]
+    ├── context.match_callers             [leaf-name match against changed functions]
+    └── context.extract_callees           [tree-sitter walk per changed function]
+```
+
+`context.build` is the entry span for `build_function_context` in `src/tools/context.rs`. It records three attributes when the build completes: `functions_changed`, `files_scanned`, and `total_callers_found`. The sub-spans are sequential (not parallel). Naming is subject to change while the context subsystem is still iterating; treat these spans as internal rather than part of a stable API.
+
 ### Root Span Attributes
 
-Every root `mcp.tool.*` span carries these attributes:
+Every root `mcp.tool.*` span carries these attributes. Names below use the exact identifiers recorded in `src/server.rs` (underscored, not dotted); this is what SigNoz, Grafana, or Datadog will see when querying traces.
 
 | Attribute | Description |
 |-----------|-------------|
-| `tool.name` | Tool that was invoked. |
-| `repo.path_hash` | SHA-256 hash of the repository path (never the raw path). |
-| `ref.base` | Normalized ref pattern (e.g. `branch`, `sha`, `worktree`). |
-| `ref.head` | Normalized ref pattern for the head ref. |
-| `response.files_count` | Number of files in the response. |
-| `response.tokens_estimated` | Estimated token count. |
-| `response.bytes` | Response size in bytes. |
-| `response.truncated` | Whether the response was truncated (`true`/`false`). |
-| `page_number` | Page number (0-indexed). |
-| `page_size` | Requested page size. |
+| `tool_name` | Tool that was invoked. |
+| `repo_path_hash` | SHA-256 hash of the repository path (never the raw path). |
+| `ref_base` | Normalized ref pattern (e.g. `branch`, `sha`, `worktree`). |
+| `ref_head` | Normalized ref pattern for the head ref. `worktree` when the caller omits `head_ref`. |
+| `response_files_count` | Number of files in the response. |
+| `response_bytes` | Response size in bytes. |
+| `response_truncated` | Whether the response carries a non-null `next_cursor` (`true`/`false`). |
+| `page_number` | Page number (0-indexed), derived from cursor offset. |
+| `page_size` | Requested page size after clamping to the `1..=500` range. |
+
+Token estimates are emitted as the `git_prism.response.tokens_estimated` metric (see the Token-Efficiency Metrics table above) and are not recorded on any span.
 
 ---
 
@@ -151,7 +165,7 @@ The following data **never leaves the process** in any metric, trace, or log:
 - **Commit messages** -- not included in any telemetry data.
 - **Author names and email addresses** -- not exported.
 - **Literal branch, tag, or ref names** -- normalized to a bounded enum (`branch`, `sha`, `worktree`, etc.) before export.
-- **Commit SHAs** — included only as span attributes for trace correlation, never as metric labels. Not human-readable in dashboard views unless explicitly queried.
+- **Commit SHAs** -- not exported on any span or metric. `ref_base` and `ref_head` span attributes carry the normalized ref pattern (`branch`, `sha`, `worktree`, ...), not the raw SHA or ref name, so a dashboard viewer cannot reconstruct which commits a caller touched.
 
 Only structural metadata is exported: counts, durations, file extensions
 (via language labels), and normalized ref patterns.

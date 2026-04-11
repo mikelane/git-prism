@@ -28,7 +28,7 @@ Telemetry is controlled entirely by environment variables with the `GIT_PRISM_` 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `GIT_PRISM_OTLP_ENDPOINT` | OTLP gRPC endpoint URL. When unset, telemetry is disabled. | unset (disabled) |
-| `GIT_PRISM_OTLP_HEADERS` | Comma-separated `key=value` pairs for auth headers. | unset |
+| `GIT_PRISM_OTLP_HEADERS` | Comma-separated `key=value` pairs for auth headers. **Planned — not yet wired as of the v0.3.0 release; tracked in [#43](https://github.com/mikelane/git-prism/issues/43).** The field is retained in this design doc because it captures the intended shape; the user-facing `docs/telemetry.md` mirrors this caveat. | unset |
 | `GIT_PRISM_SERVICE_NAME` | Service name reported to the backend. | `git-prism` |
 | `GIT_PRISM_SERVICE_VERSION` | Service version reported to the backend. | crate version at compile time |
 
