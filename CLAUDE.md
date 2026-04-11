@@ -17,6 +17,12 @@ cargo test                     # unit + integration tests
 cargo build --release          # release build
 ```
 
+Run a single test (substring filter; works because `git-prism` is a binary crate, not a lib):
+
+```bash
+cargo test --bin git-prism -- <test_name_filter>
+```
+
 ## Pull Request Workflow
 
 When you finish work on a branch — whether that's an epic, a feature, a
@@ -130,7 +136,7 @@ Each arrow is a **real GitHub blocking dependency** set via the Dependencies API
 
 1. **Spike first if the problem space is unknown.** The spike lives on a `spike/<topic>` branch that is never merged. Its only deliverable is an ADR in `docs/decisions/NNNN-short-title.md`. The prototype code is disposable — the ADR is the artifact. No TDD during spikes.
 
-2. **BDD Bootstrap blocks everything.** Before any implementation begins, write ALL Gherkin scenarios for the epic using a real cucumber framework (`behave`, `cucumber-js`) in a **different language than production code**. Tag each scenario with `@ISSUE-XX` pointing to the implementation issue that will make it pass. Step definitions must attempt real operations and fail with assertion errors — not `raise NotImplementedError` or `pass`. The tests must run and fail (RED).
+2. **BDD Bootstrap blocks everything.** This repo uses [`behave`](https://behave.readthedocs.io/) as the cucumber runner; Gherkin `.feature` files live under [`bdd/features/`](bdd/features/) and step definitions are written in Python under `bdd/steps/`. Python is used specifically because the production code is Rust, keeping step definitions in a different language than production preserves the behavioral contract and prevents tests from importing internals. Before any implementation begins, write ALL Gherkin scenarios for the epic; tag each with `@ISSUE-XX` pointing to the implementation issue that will make it pass. Step definitions must attempt real operations and fail with assertion errors — not `raise NotImplementedError` or `pass`. The tests must run and fail (RED).
 
 3. **Implementation issues reference their scenarios.** Each issue's body includes the specific `@ISSUE-XX` Gherkin scenarios it must make pass. First commit on the branch removes `@not_implemented` from those scenarios (proving RED). Then make them GREEN. Use TDD internally for unit tests.
 

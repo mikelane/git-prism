@@ -65,7 +65,7 @@ Returns structured metadata about what changed between two git refs.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `base_ref` | string | _(required)_ | Base git ref (commit SHA, branch, tag, `HEAD~1`) |
-| `head_ref` | string | `"HEAD"` | Head git ref |
+| `head_ref` | string | _(omitted → working tree)_ | Head git ref. When the field is omitted from the request, the tool compares `base_ref` against the working tree (staged + unstaged changes) instead of diffing two commits. Passing `"HEAD"` explicitly produces a committed-mode diff against `HEAD`, which is distinct from working-tree mode. |
 | `repo_path` | string | cwd | Path to the git repository |
 | `include_patterns` | string[] | `[]` | Glob patterns to include (e.g. `["*.rs", "*.go"]`) |
 | `exclude_patterns` | string[] | `[]` | Glob patterns to exclude (e.g. `["*.lock"]`) |
@@ -84,7 +84,7 @@ Returns structured metadata about what changed between two git refs.
     "base_sha": "a1b2c3d4e5f6",
     "head_sha": "f6e5d4c3b2a1",
     "generated_at": "2026-04-03T12:00:00Z",
-    "version": "0.1.0"
+    "version": "x.y.z"
   },
   "summary": {
     "total_files_changed": 3,
@@ -102,6 +102,7 @@ Returns structured metadata about what changed between two git refs.
       "path": "src/handler.go",
       "old_path": null,
       "change_type": "modified",
+      "change_scope": "committed",
       "language": "go",
       "is_binary": false,
       "is_generated": false,
@@ -362,10 +363,33 @@ This three-step approach keeps token usage low. The manifest is compact metadata
 context identifies the blast radius without reading file content; snapshots are
 requested only for files that need inspection.
 
-For large changesets, the manifest may span multiple pages. When `next_cursor`
-is non-null in the response, pass it back as the `cursor` parameter to fetch
-the next page. The `summary` always reflects all files regardless of pagination,
-so you can triage before paging through file entries.
+## Pagination
+
+`get_change_manifest` and `get_commit_history` return a `pagination` object on
+every response:
+
+```json
+"pagination": {
+  "total_items": 842,
+  "page_start": 0,
+  "page_size": 100,
+  "next_cursor": "eyJvZmZzZXQiOjEwMCwiYmFzZV9zaGEiOiIuLi4ifQ=="
+}
+```
+
+When `next_cursor` is non-null, pass it back as the `cursor` parameter on the
+next call to fetch the following page. The cursor is an opaque base64 payload
+that encodes the page offset plus the resolved base/head SHAs; the server
+rejects a cursor whose SHAs no longer match the refs supplied in the follow-up
+call, so a cursor minted against `main..feature` cannot be reused against a
+different range. The manifest `summary` always reflects all files in the
+changeset regardless of which page is returned, so agents can triage from
+page 1 before deciding whether to page through the remaining file entries.
+
+`page_size` is clamped server-side to the `1..=500` range; values outside that
+range are coerced rather than rejected. The CLI (`git-prism manifest`,
+`git-prism history`) paginates internally and always returns the complete
+result; the cursor contract is only visible through the MCP tool interface.
 
 ## Supported Languages
 
@@ -406,7 +430,17 @@ content, not line positions. This means:
   entry with `old_name` populated, instead of separate `deleted` + `added`.
 
 The `change_type` values for functions are: `added`, `modified`, `deleted`,
-`signature_changed`, `renamed`.
+`signature_changed`, `renamed`. Renamed entries carry the previous name in
+the `old_name` field (null for all other variants) so agents can correlate the
+post-rename function back to its history.
+
+**Whitespace and comment sensitivity.** The body hash is computed over the raw
+byte span of the function body as tree-sitter sees it. Reformatting runs,
+comment additions or removals, trailing-whitespace changes, and indentation
+shifts will therefore change the hash and produce a `modified` entry even when
+the executable logic is unchanged. A future release may normalize whitespace
+and strip comments before hashing; until then, running a formatter on a file
+will show every touched function as `modified` on the next manifest call.
 
 ## Dependency File Tracking
 
@@ -425,7 +459,7 @@ Optional OpenTelemetry instrumentation, disabled by default and opt-in via envir
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `GIT_PRISM_OTLP_ENDPOINT` | OTLP gRPC endpoint URL. When unset, telemetry is disabled. | unset (disabled) |
-| `GIT_PRISM_OTLP_HEADERS` | Comma-separated `key=value` pairs for auth headers. | unset |
+| `GIT_PRISM_OTLP_HEADERS` | Planned, not yet wired ([#43](https://github.com/mikelane/git-prism/issues/43)). Setting this variable has no effect today; managed OTLP backends that require auth headers need a local collector proxy. | unset |
 | `GIT_PRISM_SERVICE_NAME` | Service name reported to the backend. | `git-prism` |
 | `GIT_PRISM_SERVICE_VERSION` | Service version reported to the backend. | crate version |
 

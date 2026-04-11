@@ -59,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ruby** tree-sitter analyzer (`.rb`) — methods, singleton methods, `require`/`require_relative`
 - **Swift** tree-sitter analyzer (`.swift`) — functions, methods, init declarations, imports
 
-Function-level analysis now covers 13 languages (was 8). git-prism supports the top 13 most popular languages on GitHub.
+Function-level analysis now covers 13 languages (was 8). The selection targets widely-used languages on GitHub as of early 2026 (Rust, Go, Python, JavaScript, TypeScript, Java, C, C++, C#, Ruby, Swift, Kotlin, PHP); language priority was chosen from informal GitHub usage signals rather than a formal Octoverse citation.
 
 ### Changed
 
@@ -100,7 +100,7 @@ Function-level analysis now covers 13 languages (was 8). git-prism supports the 
 - New modules: `src/telemetry.rs`, `src/metrics.rs`, `src/privacy.rs`, `src/pagination.rs`
 - `base64` added as direct dependency for cursor encoding
 - OpenTelemetry stack: `tracing`, `tracing-opentelemetry`, `opentelemetry-otlp` (gRPC/tonic)
-- ADRs: mutation testing baseline (#0002), pagination spike (#0003)
+- ADRs: mutation testing baseline (ADR 0002), pagination spike (ADR 0003)
 - Test count: 246 → 366 (120 new tests including mutation-testing gap closers)
 - CI: mutation testing workflow with 4-shard parallelism, nextest, copy-target caching
 
