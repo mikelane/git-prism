@@ -65,6 +65,9 @@ fn extract_functions_from_node(
                     extract_functions_from_node(source, &body, Some(cls_name), functions);
                 }
             }
+            "decorated_definition" => {
+                extract_functions_from_node(source, &child, class_name, functions);
+            }
             _ => {}
         }
     }
@@ -321,5 +324,52 @@ class MyClass:
         let analyzer = PythonAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn extracts_decorated_function() {
+        let source = b"@app.route(\"/\")\ndef index():\n    return \"Hello\"\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "index");
+    }
+
+    #[test]
+    fn extracts_stacked_decorator_function() {
+        let source =
+            b"@app.route(\"/admin\")\n@login_required\ndef admin():\n    return \"Admin\"\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "admin");
+    }
+
+    #[test]
+    fn extracts_decorated_class_method() {
+        let source = b"class Foo:\n    @staticmethod\n    def bar():\n        pass\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "Foo");
+        assert_eq!(functions[1].name, "Foo.bar");
+    }
+
+    #[test]
+    fn extracts_async_decorated_function() {
+        let source = b"@app.get(\"/\")\nasync def index():\n    return {\"ok\": True}\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "index");
+    }
+
+    #[test]
+    fn extracts_decorated_class() {
+        let source = b"@dataclass\nclass Point:\n    x: int\n    y: int\n";
+        let analyzer = PythonAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "Point");
     }
 }
