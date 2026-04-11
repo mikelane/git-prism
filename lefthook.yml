@@ -7,3 +7,8 @@ pre-push:
       run: cargo clippy --all-targets -- -D warnings
     test:
       run: env -u GIT_DIR -u GIT_WORK_TREE cargo test
+
+commit-msg:
+  commands:
+    validate-pr-refs:
+      run: scripts/validate-pr-refs.sh {1}
