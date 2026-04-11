@@ -347,24 +347,24 @@ class MyClass:
     /// This test verifies the guard does not corrupt extraction at 5000 depth: the
     /// outermost ~256 classes must still be extracted even on a constrained stack.
     #[test]
-    fn deeply_nested_classes_do_not_stack_overflow() {
+    fn it_completes_without_overflow_on_deeply_nested_classes() {
         // 1024 = MAX_RECURSION_DEPTH * 4: enough headroom past the cap without
         // the extreme runtime of 5000-level indented Python (which is O(n²) in
         // string construction due to the indent repetition).
-        const NESTING_DEPTH: usize = 1024;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+        const GENERATED_NESTING_LEVELS: usize = 1024;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             let indent = "    ".repeat(i);
             source.push_str(&format!("{indent}class C{i}:\n"));
         }
         // Innermost class needs a body — use `pass` at the deepest indent.
-        let deepest_indent = "    ".repeat(NESTING_DEPTH);
+        let deepest_indent = "    ".repeat(GENERATED_NESTING_LEVELS);
         source.push_str(&format!("{deepest_indent}pass\n"));
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = PythonAnalyzer;
                 analyzer.extract_functions(source.as_bytes())
@@ -375,30 +375,32 @@ class MyClass:
             .join()
             .expect("analyzer thread must not stack-overflow on deeply-nested input");
         let functions = result.expect("analyzer must return Ok on deeply-nested input");
-        // At least the outermost classes (up to MAX_RECURSION_DEPTH) must be
-        // returned — the depth guard truncates deeper nesting but preserves
-        // whatever extraction completed successfully.
+        // The outermost MAX_RECURSION_DEPTH (256) classes must all be extracted
+        // before the guard fires. Asserting >= MAX_RECURSION_DEPTH catches
+        // regressions where the guard fires too early (e.g., at depth 10).
         assert!(
-            !functions.is_empty(),
-            "expected partial extraction to include outer classes"
+            functions.len() >= MAX_RECURSION_DEPTH,
+            "expected at least {} classes to be extracted before depth guard fires, got {}",
+            MAX_RECURSION_DEPTH,
+            functions.len()
         );
     }
 
     /// Triangulation: 255 nested classes with a method at the innermost level.
     /// The guard fires at depth 256, so depth 255 must still allow extraction.
     #[test]
-    fn nested_classes_at_boundary_depth_still_extract_methods() {
-        const NESTING_DEPTH: usize = 255;
+    fn it_extracts_methods_at_boundary_nesting_depth() {
+        const GENERATED_NESTING_LEVELS: usize = 255;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             let indent = "    ".repeat(i);
             source.push_str(&format!("{indent}class C{i}:\n"));
         }
         // Add a method at the innermost class body (depth 255).
-        let method_indent = "    ".repeat(NESTING_DEPTH);
+        let method_indent = "    ".repeat(GENERATED_NESTING_LEVELS);
         source.push_str(&format!("{method_indent}def leaf_method(self):\n"));
-        let body_indent = "    ".repeat(NESTING_DEPTH + 1);
+        let body_indent = "    ".repeat(GENERATED_NESTING_LEVELS + 1);
         source.push_str(&format!("{body_indent}pass\n"));
 
         let analyzer = PythonAnalyzer;

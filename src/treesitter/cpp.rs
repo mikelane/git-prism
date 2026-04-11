@@ -538,20 +538,20 @@ void unix_init() { return; }
     /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
     /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
     #[test]
-    fn deeply_nested_namespaces_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+    fn it_completes_without_overflow_on_deeply_nested_namespaces() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("namespace N{i} {{\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = CppAnalyzer;
                 analyzer.extract_functions(source.as_bytes())
@@ -569,15 +569,15 @@ void unix_init() { return; }
     /// Triangulation: 255 nested namespaces with a function at the innermost level.
     /// The guard fires at depth 256, so depth 255 must still allow extraction.
     #[test]
-    fn nested_namespaces_at_boundary_depth_still_extract_functions() {
-        const NESTING_DEPTH: usize = 255;
+    fn it_extracts_functions_at_boundary_nesting_depth() {
+        const GENERATED_NESTING_LEVELS: usize = 255;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("namespace N{i} {{\n"));
         }
         source.push_str("void leaf_fn() {}\n");
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 

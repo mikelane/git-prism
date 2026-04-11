@@ -2,7 +2,7 @@ use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash
 use tree_sitter::Parser;
 
 #[derive(Debug, Clone, Copy)]
-pub enum JsDialect {
+enum JsDialect {
     TypeScript,
     Tsx,
     JavaScript,
@@ -508,21 +508,21 @@ class Greeter {
     /// walker completes without crashing on a deeply-nested (but grammar-limited)
     /// export chain, and that extraction still works correctly.
     #[test]
-    fn deeply_nested_export_statements_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+    fn it_completes_without_overflow_on_deeply_nested_export_statements() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         // Stacked `export` keywords — tree-sitter error-recovers these, so
         // they don't produce nested export_statement nodes in practice.
         // The test still validates the analyzer handles the input safely.
         let mut source = String::new();
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("export ");
         }
         source.push_str("class C {}\n");
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = TypeScriptAnalyzer::typescript();
                 analyzer.extract_functions(source.as_bytes())
@@ -536,16 +536,21 @@ class Greeter {
         // No assertion on function count — the parse tree shape is grammar-dependent.
     }
 
-    /// Triangulation: a standard export wrapping a class with a method must still extract.
+    /// Triangulation: sequential exported classes with methods must all extract.
     /// This confirms the guard does not fire on legitimate export_statement usage.
+    /// NOTE: These are sequential (not nested) exports — each recurses at depth 1,
+    /// not depth 255. This tests non-regression of the export_statement arm, not
+    /// the depth-boundary property (tree-sitter error-recovers stacked `export`
+    /// keywords to a single export_statement, so true depth-255 nesting via exports
+    /// is not achievable with valid or error-recovered TypeScript syntax).
     #[test]
-    fn export_statement_wrapping_class_still_extracts_methods() {
-        const NESTING_DEPTH: usize = 255;
+    fn it_extracts_methods_from_exported_classes() {
+        const CLASS_COUNT: usize = 255;
 
         // Build 255 sequential (not nested) exported classes each with a method,
         // to confirm the export_statement arm still works at high volume.
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..CLASS_COUNT {
             source.push_str(&format!("export class C{i} {{ method{i}(): void {{}} }}\n"));
         }
 
@@ -553,8 +558,8 @@ class Greeter {
         let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
         assert_eq!(
             functions.len(),
-            NESTING_DEPTH,
-            "all {NESTING_DEPTH} methods must be extracted"
+            CLASS_COUNT,
+            "all {CLASS_COUNT} methods must be extracted"
         );
     }
 

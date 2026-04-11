@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
+use super::{body_hash_for_node, CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH};
 use tree_sitter::Parser;
 
 pub struct RustAnalyzer;
@@ -340,21 +340,21 @@ use anyhow::Result;
     /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
     /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
     #[test]
-    fn deeply_nested_impls_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+    fn it_completes_without_overflow_on_deeply_nested_impls() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("impl T{i} {{\n"));
         }
         source.push_str("fn leaf() {}\n");
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = RustAnalyzer;
                 analyzer.extract_functions(source.as_bytes())
@@ -371,9 +371,13 @@ use anyhow::Result;
     }
 
     /// Triangulation: 255 sequential impl blocks (not nested), each with one method.
-    /// Confirms the guard does not interfere with legitimate impl extraction.
+    /// Confirms the guard does not interfere with legitimate (shallow) impl extraction.
+    /// NOTE: This does NOT exercise the depth-255 boundary — nested Rust impls are a
+    /// parse error and tree-sitter error-recovers them to ERROR nodes, not nested
+    /// impl_item nodes. The deeply_nested_impls_do_not_stack_overflow test covers the
+    /// overflow safety property; this test covers the non-regression property.
     #[test]
-    fn sequential_impls_at_boundary_count_all_extract() {
+    fn sequential_impls_all_extract() {
         const IMPL_COUNT: usize = 255;
 
         let mut source = String::new();
