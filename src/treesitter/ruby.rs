@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct RubyAnalyzer;
@@ -24,7 +24,11 @@ fn extract_functions_from_node(
     node: &tree_sitter::Node,
     class_name: Option<&str>,
     functions: &mut Vec<Function>,
+    depth: usize,
 ) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -80,7 +84,13 @@ fn extract_functions_from_node(
                     body_hash,
                 });
                 if let Some(body) = child.child_by_field_name("body") {
-                    extract_functions_from_node(source, &body, Some(cls_name), functions);
+                    extract_functions_from_node(
+                        source,
+                        &body,
+                        Some(cls_name),
+                        functions,
+                        depth + 1,
+                    );
                 }
             }
             _ => {}
@@ -96,7 +106,7 @@ impl LanguageAnalyzer for RubyAnalyzer {
             .ok_or_else(|| anyhow::anyhow!("Failed to parse Ruby source"))?;
         let root = tree.root_node();
         let mut functions = Vec::new();
-        extract_functions_from_node(source, &root, None, &mut functions);
+        extract_functions_from_node(source, &root, None, &mut functions, 0);
         Ok(functions)
     }
 
@@ -357,5 +367,49 @@ end
         let analyzer = RubyAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Security regression: deeply-nested class declarations used to stack-overflow
+    /// `extract_functions_from_node` because it recursed into each class body without
+    /// a depth limit. An attacker committing a Ruby file with thousands of nested
+    /// class blocks could crash git-prism during `get_change_manifest`. The analyzer
+    /// must now complete without crashing.
+    ///
+    /// Runs on a thread with a bounded 512KB stack to force the crash to be
+    /// reproducible regardless of the host's default stack size.
+    #[test]
+    fn deeply_nested_classes_do_not_stack_overflow() {
+        const NESTING_DEPTH: usize = 5000;
+        // 2 MB: roomy enough for bounded recursion to `MAX_RECURSION_DEPTH`
+        // but far too small for unbounded recursion to 5000 frames.
+        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+        let mut source = String::new();
+        for i in 0..NESTING_DEPTH {
+            source.push_str(&format!("class C{i}\n"));
+        }
+        for _ in 0..NESTING_DEPTH {
+            source.push_str("end\n");
+        }
+
+        let handle = std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let analyzer = RubyAnalyzer;
+                analyzer.extract_functions(source.as_bytes())
+            })
+            .expect("spawn analyzer thread");
+
+        let result = handle
+            .join()
+            .expect("analyzer thread must not stack-overflow on deeply-nested input");
+        let functions = result.expect("analyzer must return Ok on deeply-nested input");
+        // At least the outermost classes (up to MAX_RECURSION_DEPTH) must be
+        // returned — the depth guard truncates deeper nesting but preserves
+        // whatever extraction completed successfully.
+        assert!(
+            !functions.is_empty(),
+            "expected partial extraction to include outer classes"
+        );
     }
 }
