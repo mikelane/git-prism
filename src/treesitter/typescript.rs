@@ -132,6 +132,9 @@ fn extract_functions_from_node(
                     }
                 }
             }
+            "export_statement" => {
+                extract_functions_from_node(source, &child, class_name, functions);
+            }
             _ => {}
         }
     }
@@ -476,5 +479,55 @@ class Greeter {
         let analyzer = TypeScriptAnalyzer::typescript();
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn extracts_export_function() {
+        let source = br#"export function greet(name: string): string {
+    return `Hello, ${name}!`;
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "greet");
+    }
+
+    #[test]
+    fn extracts_export_default_function() {
+        let source = br#"export default function handler(req: any): any {
+    return { status: 200 };
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "handler");
+    }
+
+    #[test]
+    fn extracts_export_class_methods() {
+        let source = br#"export class Calculator {
+    add(a: number, b: number): number {
+        return a + b;
+    }
+}
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "Calculator.add");
+    }
+
+    #[test]
+    fn extracts_export_const_arrow_function() {
+        let source = br#"export const add = (a: number, b: number): number => {
+    return a + b;
+};
+"#;
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "add");
     }
 }

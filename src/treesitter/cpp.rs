@@ -116,6 +116,18 @@ fn collect_functions(
                     });
                 }
             }
+            // linkage_specification body can be declaration_list (braced
+            // `extern "C" { ... }`), function_definition (single-def form
+            // `extern "C" void foo() {...}`), or declaration (forward-decl
+            // form `extern "C" int foo(int);`). Recursing into the
+            // linkage_specification itself walks its direct children; the
+            // declaration_list arm below handles the braced case.
+            "linkage_specification" => {
+                collect_functions(&child, source, scope, functions);
+            }
+            "declaration_list" => {
+                collect_functions(&child, source, scope, functions);
+            }
             kind if is_preprocessor_container(kind) => {
                 collect_functions(&child, source, scope, functions);
             }
@@ -502,5 +514,60 @@ void unix_init() { return; }
         let analyzer = CppAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn extracts_functions_inside_extern_c() {
+        let source = br#"extern "C" {
+
+void ffi_init() {
+    printf("init\n");
+}
+
+void ffi_cleanup() {
+    printf("cleanup\n");
+}
+
+}
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "ffi_init");
+        assert_eq!(functions[1].name, "ffi_cleanup");
+    }
+
+    // Single-declaration extern "C" (no braces) — linkage_specification wraps
+    // a bare function_definition instead of a declaration_list with body field.
+    #[test]
+    fn extracts_function_inside_single_extern_c() {
+        let source = br#"extern "C" int compute(int x) {
+    return x + 1;
+}
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "compute");
+    }
+
+    #[test]
+    fn extracts_functions_inside_nested_extern_c() {
+        let source = br#"#ifdef __cplusplus
+extern "C" {
+#endif
+
+void inner_fn() {
+    return;
+}
+
+#ifdef __cplusplus
+}
+#endif
+"#;
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source).unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "inner_fn");
     }
 }

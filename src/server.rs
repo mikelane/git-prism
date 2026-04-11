@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn it_counts_function_context_entries_per_language() {
         use crate::tools::types::{
-            CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
+            BlastRadius, CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
         };
 
         let entries = vec![
@@ -638,6 +638,7 @@ mod tests {
                 name: "calculate".to_string(),
                 file: "src/lib.rs".to_string(),
                 change_type: FunctionChangeType::Modified,
+                blast_radius: BlastRadius::compute(0, 0),
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
@@ -647,6 +648,7 @@ mod tests {
                 name: "helper".to_string(),
                 file: "src/main.rs".to_string(),
                 change_type: FunctionChangeType::Added,
+                blast_radius: BlastRadius::compute(0, 0),
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
@@ -656,6 +658,7 @@ mod tests {
                 name: "process_data".to_string(),
                 file: "scripts/tool.py".to_string(),
                 change_type: FunctionChangeType::Added,
+                blast_radius: BlastRadius::compute(0, 0),
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
@@ -665,6 +668,7 @@ mod tests {
                 name: "Binary".to_string(),
                 file: "blob.bin".to_string(),
                 change_type: FunctionChangeType::Added,
+                blast_radius: BlastRadius::compute(0, 0),
                 callers: Vec::<CallerEntry>::new(),
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
