@@ -21,6 +21,23 @@ fn change_scope_label(scope: ChangeScope) -> &'static str {
     }
 }
 
+/// Group changed-function context entries by the language of their containing
+/// file, returning one count per known language. Entries whose language cannot
+/// be detected from the extension are excluded to keep metric label cardinality
+/// bounded and consistent with the manifest tool's `functions_changed` signal.
+fn functions_per_language_counts(
+    entries: &[crate::tools::types::FunctionContextEntry],
+) -> std::collections::HashMap<&'static str, u64> {
+    let mut counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
+    for entry in entries {
+        let language = crate::tools::types::detect_language(&entry.file);
+        if language != "unknown" {
+            *counts.entry(language).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
 #[derive(Debug, Clone)]
 pub struct GitPrismServer {
     tool_router: ToolRouter<Self>,
@@ -533,18 +550,14 @@ impl GitPrismServer {
                 }
                 metrics.record_files_returned(seen_files.len() as f64);
 
-                // Languages analyzed — derived from file extensions of the changed
-                // functions, mirroring the manifest tool's `languages.analyzed` signal.
-                let mut seen_languages: std::collections::HashSet<&'static str> =
-                    std::collections::HashSet::new();
-                for func in &response.functions {
-                    let language = crate::tools::types::detect_language(&func.file);
-                    if language != "unknown" {
-                        seen_languages.insert(language);
-                    }
-                }
-                for language in &seen_languages {
+                // Languages analyzed and per-language function counts — derived
+                // from file extensions of the changed functions, mirroring the
+                // manifest tool's `languages.analyzed` and `functions_changed`
+                // signals so all four tools emit the same language-keyed metrics.
+                let functions_per_language = functions_per_language_counts(&response.functions);
+                for (language, count) in &functions_per_language {
                     metrics.record_language(language);
+                    metrics.record_functions_changed(language, *count as f64);
                 }
 
                 metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
@@ -611,6 +624,61 @@ mod tests {
         assert!(
             router.has_route("get_function_context"),
             "get_function_context must be registered as an MCP tool"
+        );
+    }
+
+    #[test]
+    fn it_counts_function_context_entries_per_language() {
+        use crate::tools::types::{
+            CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
+        };
+
+        let entries = vec![
+            FunctionContextEntry {
+                name: "calculate".to_string(),
+                file: "src/lib.rs".to_string(),
+                change_type: FunctionChangeType::Modified,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+            FunctionContextEntry {
+                name: "helper".to_string(),
+                file: "src/main.rs".to_string(),
+                change_type: FunctionChangeType::Added,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+            FunctionContextEntry {
+                name: "process_data".to_string(),
+                file: "scripts/tool.py".to_string(),
+                change_type: FunctionChangeType::Added,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+            FunctionContextEntry {
+                name: "Binary".to_string(),
+                file: "blob.bin".to_string(),
+                change_type: FunctionChangeType::Added,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+        ];
+
+        let counts = functions_per_language_counts(&entries);
+
+        assert_eq!(counts.get("rust").copied(), Some(2));
+        assert_eq!(counts.get("python").copied(), Some(1));
+        assert!(
+            !counts.contains_key("unknown"),
+            "unknown language must be excluded from metric labels"
         );
     }
 

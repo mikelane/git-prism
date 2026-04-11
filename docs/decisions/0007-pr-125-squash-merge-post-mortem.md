@@ -6,7 +6,7 @@
 
 ## Context
 
-PR #125, merged 2026-04-09, bore the title "docs: add TDD rules and Epic SDLC process to CLAUDE.md" and was approved under the assumption it contained only docs changes. In reality, the PR was a squash merge of the entire `claude/spike-function-context-kOgGL` branch — 9 commits spanning spike, ADR, BDD bootstrap, tree-sitter extract_calls() across 13 languages, MCP tool types, CLI wiring, docs, and release bump. The merged commit touched 30 files including +432 lines of new Rust code, a new ADR (0005), and a new CHANGELOG section.
+PR #125, merged 2026-04-09, bore the title "docs: add TDD rules and Epic SDLC process to CLAUDE.md" and was approved under the assumption it contained only docs changes. In reality, the PR was a squash merge of the entire `claude/spike-function-context-kOgGL` branch — 9 commits spanning spike, ADR, BDD bootstrap, tree-sitter extract_calls() across 13 languages, MCP tool types, CLI wiring, docs, and release bump. The merged commit (`acb9652`) touched **31 files** with **+2884 insertions / -39 deletions** total, including a new ADR (0005), a new CHANGELOG section, and substantial production Rust changes. The single largest addition was `src/tools/context.rs` at +432 lines — an entire new MCP tool implementation file landed under a docs-titled PR.
 
 The squash commit body references PRs #114 through #123 — **none of these PR numbers exist in the repository**. The work was performed on a long-running spike branch and merged as a single PR with a misleading title, without the individual feature PRs being opened and reviewed separately.
 
