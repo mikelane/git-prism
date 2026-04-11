@@ -6,8 +6,9 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use crate::git::diff::ChangeScope;
 use crate::tools::{
-    HistoryArgs, HistoryResponse, ManifestArgs, ManifestOptions, ManifestResponse, SnapshotArgs,
-    SnapshotOptions, SnapshotResponse, build_history, build_manifest, build_snapshots,
+    ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,
+    ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions, SnapshotResponse,
+    build_function_context, build_history, build_manifest, build_snapshots,
     build_worktree_manifest,
 };
 
@@ -18,6 +19,23 @@ fn change_scope_label(scope: ChangeScope) -> &'static str {
         ChangeScope::Staged => "staged",
         ChangeScope::Unstaged => "unstaged",
     }
+}
+
+/// Group changed-function context entries by the language of their containing
+/// file, returning one count per known language. Entries whose language cannot
+/// be detected from the extension are excluded to keep metric label cardinality
+/// bounded and consistent with the manifest tool's `functions_changed` signal.
+fn functions_per_language_counts(
+    entries: &[crate::tools::types::FunctionContextEntry],
+) -> std::collections::HashMap<&'static str, u64> {
+    let mut counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
+    for entry in entries {
+        let language = crate::tools::types::detect_language(&entry.file);
+        if language != "unknown" {
+            *counts.entry(language).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 #[derive(Debug, Clone)]
@@ -452,6 +470,109 @@ impl GitPrismServer {
 
         result
     }
+
+    /// Returns callers, callees, and test references for each function that
+    /// changed between two git refs. Answers "what calls this function?" and
+    /// "what does this function call?" without the agent having to grep.
+    #[tool(
+        name = "get_function_context",
+        description = "Returns callers, callees, and test references for each function that changed between two git refs"
+    )]
+    async fn get_function_context(
+        &self,
+        Parameters(args): Parameters<ContextArgs>,
+    ) -> Result<Json<FunctionContextResponse>, String> {
+        let start = std::time::Instant::now();
+        let tool_name = "get_function_context";
+
+        // Extract ref info before moving args into spawn_blocking.
+        let base_ref_clone = args.base_ref.clone();
+        let head_ref_clone = args.head_ref.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let repo_path = match args.repo_path {
+                Some(p) => PathBuf::from(p),
+                None => std::env::current_dir()
+                    .map_err(|e| format!("cannot determine working directory: {e}"))?,
+            };
+
+            let root_span = tracing::info_span!(
+                "mcp.tool.get_function_context",
+                tool_name = "get_function_context",
+                repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
+                ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
+                ref_head = crate::privacy::normalize_ref_pattern(&args.head_ref).as_str(),
+                response_files_count = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                response_truncated = tracing::field::Empty,
+            );
+            let _enter = root_span.enter();
+
+            let result = build_function_context(&repo_path, &args.base_ref, &args.head_ref);
+
+            match &result {
+                Ok(response) => {
+                    root_span.record("response_files_count", response.functions.len() as i64);
+                    root_span.record("response_truncated", false);
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "tool invocation failed");
+                }
+            }
+
+            result.map(Json).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let metrics = crate::metrics::get();
+        let duration_ms = start.elapsed().as_millis() as f64;
+        metrics.record_duration(tool_name, duration_ms);
+
+        match &result {
+            Ok(Json(response)) => {
+                metrics.record_request(tool_name, "success");
+
+                // TODO(#43): response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport — consider caching.
+                let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                metrics.record_response_bytes(tool_name, json_bytes as f64);
+                metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                // Context-specific metrics: count the unique files touched by changed
+                // functions so "files returned" stays meaningful across tools.
+                let mut seen_files: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for func in &response.functions {
+                    seen_files.insert(func.file.as_str());
+                }
+                metrics.record_files_returned(seen_files.len() as f64);
+
+                // Languages analyzed and per-language function counts — derived
+                // from file extensions of the changed functions, mirroring the
+                // manifest tool's `languages.analyzed` and `functions_changed`
+                // signals so all four tools emit the same language-keyed metrics.
+                let functions_per_language = functions_per_language_counts(&response.functions);
+                for (language, count) in &functions_per_language {
+                    metrics.record_language(language);
+                    metrics.record_functions_changed(language, *count as f64);
+                }
+
+                metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
+                    &base_ref_clone,
+                    Some(&head_ref_clone),
+                ));
+            }
+            Err(e) => {
+                metrics.record_request(tool_name, "error");
+                metrics.record_error(tool_name, crate::privacy::classify_error_kind(e));
+            }
+        }
+
+        result
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -464,4 +585,114 @@ pub async fn run_server() -> anyhow::Result<()> {
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_registers_get_change_manifest_tool() {
+        let router = GitPrismServer::tool_router();
+        assert!(
+            router.has_route("get_change_manifest"),
+            "get_change_manifest must be registered"
+        );
+    }
+
+    #[test]
+    fn it_registers_get_commit_history_tool() {
+        let router = GitPrismServer::tool_router();
+        assert!(
+            router.has_route("get_commit_history"),
+            "get_commit_history must be registered"
+        );
+    }
+
+    #[test]
+    fn it_registers_get_file_snapshots_tool() {
+        let router = GitPrismServer::tool_router();
+        assert!(
+            router.has_route("get_file_snapshots"),
+            "get_file_snapshots must be registered"
+        );
+    }
+
+    #[test]
+    fn it_registers_get_function_context_tool() {
+        let router = GitPrismServer::tool_router();
+        assert!(
+            router.has_route("get_function_context"),
+            "get_function_context must be registered as an MCP tool"
+        );
+    }
+
+    #[test]
+    fn it_counts_function_context_entries_per_language() {
+        use crate::tools::types::{
+            CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
+        };
+
+        let entries = vec![
+            FunctionContextEntry {
+                name: "calculate".to_string(),
+                file: "src/lib.rs".to_string(),
+                change_type: FunctionChangeType::Modified,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+            FunctionContextEntry {
+                name: "helper".to_string(),
+                file: "src/main.rs".to_string(),
+                change_type: FunctionChangeType::Added,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+            FunctionContextEntry {
+                name: "process_data".to_string(),
+                file: "scripts/tool.py".to_string(),
+                change_type: FunctionChangeType::Added,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+            FunctionContextEntry {
+                name: "Binary".to_string(),
+                file: "blob.bin".to_string(),
+                change_type: FunctionChangeType::Added,
+                callers: Vec::<CallerEntry>::new(),
+                callees: Vec::<CalleeEntry>::new(),
+                test_references: Vec::<CallerEntry>::new(),
+                caller_count: 0,
+            },
+        ];
+
+        let counts = functions_per_language_counts(&entries);
+
+        assert_eq!(counts.get("rust").copied(), Some(2));
+        assert_eq!(counts.get("python").copied(), Some(1));
+        assert!(
+            !counts.contains_key("unknown"),
+            "unknown language must be excluded from metric labels"
+        );
+    }
+
+    #[test]
+    fn it_registers_exactly_four_tools() {
+        let router = GitPrismServer::tool_router();
+        let tools = router.list_all();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(
+            tools.len(),
+            4,
+            "expected exactly four MCP tools, found {}: {:?}",
+            tools.len(),
+            names
+        );
+    }
 }
