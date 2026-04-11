@@ -30,7 +30,7 @@ pub fn process_data(x: i32) -> i32 {
 """
 
 RUST_NO_TESTS_CALLER_A = """\
-use lib::process_data;
+use crate::lib::process_data;
 
 fn handle_request() {
     let result = process_data(42);
@@ -38,7 +38,7 @@ fn handle_request() {
 """
 
 RUST_NO_TESTS_CALLER_B = """\
-use lib::process_data;
+use crate::lib::process_data;
 
 fn batch_run() {
     let result = process_data(100);
