@@ -591,6 +591,25 @@ pub async fn run_server() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// The canonical list of MCP tools exposed by this server.
+    ///
+    /// This constant is a compile-time contract. If you add, remove, or rename
+    /// a tool, you MUST update this constant and the corresponding docs
+    /// (README.md "N MCP tools" claim, CHANGELOG entry, CLAUDE.md tool list).
+    /// The `it_matches_expected_tools` test enforces that the list here is
+    /// identical to the tools actually registered via the `#[tool]` macro.
+    ///
+    /// History: git-prism shipped multiple releases with `get_function_context`
+    /// claimed as a new MCP tool in CHANGELOG/README/CLAUDE.md while the tool
+    /// itself was never registered in src/server.rs. This constant was
+    /// introduced as part of issue #202 to make that class of drift impossible.
+    const EXPECTED_TOOLS: &[&str] = &[
+        "get_change_manifest",
+        "get_commit_history",
+        "get_file_snapshots",
+        "get_function_context",
+    ];
+
     #[test]
     fn it_registers_get_change_manifest_tool() {
         let router = GitPrismServer::tool_router();
@@ -702,6 +721,25 @@ mod tests {
             "expected exactly four MCP tools, found {}: {:?}",
             tools.len(),
             names
+        );
+    }
+
+    #[test]
+    fn it_matches_expected_tools() {
+        let router = GitPrismServer::tool_router();
+        let mut actual: Vec<String> = router
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        actual.sort();
+        let mut expected: Vec<String> = EXPECTED_TOOLS.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            actual, expected,
+            "MCP tool set drifted from EXPECTED_TOOLS. \
+             If you added, removed, or renamed a tool, update the EXPECTED_TOOLS constant \
+             in src/server.rs AND update README.md 'N MCP tools' count, CHANGELOG, and CLAUDE.md."
         );
     }
 }

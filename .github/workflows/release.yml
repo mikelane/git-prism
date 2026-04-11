@@ -317,7 +317,13 @@ jobs:
             export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
             brew update
             # We avoid reformatting user-provided data such as the app description and homepage.
-            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+            # brew style failures here are advisory (the generated formula may have style nits
+            # that don't affect functionality). We surface them as GitHub annotations rather
+            # than masking with `|| true` — the integrity workflow bans `|| true` in workflow
+            # files because silent masking hid the mutation-testing shard bug for months.
+            if ! brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}"; then
+              echo "::warning::brew style returned non-zero for Formula/${filename} (advisory, not blocking)"
+            fi
 
             git add "Formula/${filename}"
             git commit -m "${name} ${version}"

@@ -68,7 +68,14 @@ jobs:
         run: git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
 
       - name: Run cargo-mutants on changed files
-        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --in-diff pr.diff || true
+        # Incremental mutation testing is informational on PRs: a failing mutant should
+        # surface in the "Report mutation score" step, not block the PR. We use
+        # continue-on-error rather than `|| true` so the failure is visible in the GitHub
+        # UI (yellow warning icon) rather than silently masked. The integrity workflow
+        # bans `|| true` in workflow files because of incidents where it hid real bugs
+        # for multiple releases.
+        continue-on-error: true
+        run: cargo mutants --timeout 300 --jobs 4 --copy-target true --test-tool nextest --in-diff pr.diff
 
       - name: Report mutation score
         if: always()

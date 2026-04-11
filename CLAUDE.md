@@ -197,6 +197,19 @@ gh api repos/OWNER/REPO/issues/XX/dependencies/blocked_by \
 
 Don't trust memory or issue titles. Check the API.
 
+## Release Hygiene
+
+Release integrity — tag, GH Release, crates.io publish, homebrew tap — is enforced by `.github/workflows/integrity.yml` and by the global `releasing-to-production` skill. See `~/.claude/skills/releasing-to-production/SKILL.md` for the full release checklist.
+
+Non-negotiable rules:
+
+- **Release PRs are incomplete until the tag is pushed and the release workflow succeeds.** Bumping `Cargo.toml` without tagging leaves main in a broken state. The `integrity.yml` workflow's `cargo-tag-sync` check will fail on any main commit where `Cargo.toml` version has no matching git tag.
+- **`|| true` is banned in workflow files.** It masks errors silently and caused the mutation-testing shard bug (A5 finding from 2026-04-10 gauntlet). The `integrity.yml` workflow greps for this pattern and fails the build.
+- **Clippy always uses `--all-targets`.** Any `cargo clippy` command in `ci.yml`, `lefthook.yml`, `CLAUDE.md`, or ad-hoc session commands must include `--all-targets`. The `integrity.yml` workflow enforces this.
+- **CHANGELOG sections must match git tags.** Every `## [X.Y.Z]` heading must have a corresponding tag (except `## [Unreleased]`). Enforced by `integrity.yml`.
+- **MCP tool drift is a test failure, not a doc failure.** `src/server.rs::tests::it_matches_expected_tools` is the single source of truth for which tools are registered. If you add, remove, or rename a tool, update the `EXPECTED_TOOLS` constant AND update README/CHANGELOG/CLAUDE.md — or the test will fail.
+- **Commit messages must reference real PR/issue numbers.** Phantom `(#N)` references are rejected by the lefthook `commit-msg` hook (`scripts/validate-pr-refs.sh`). This prevents the PR #125 squash-merge situation where commits referenced PRs #114-#123 that never existed.
+
 ## Git Hooks (lefthook)
 
 A pre-push hook runs `fmt --check`, `clippy`, and `test` before every push. Managed by [lefthook](https://github.com/evilmartians/lefthook) via `lefthook.yml`. After cloning:

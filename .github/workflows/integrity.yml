@@ -1,0 +1,173 @@
+name: Integrity
+
+# Enforces release hygiene and drift checks that catch mismatches between
+# Cargo.toml / git tags / CHANGELOG / README / workflow files. Introduced
+# as part of issue #202 after an April 2026 retrospective found six classes
+# of silent drift that had shipped multiple releases undetected.
+#
+# Security: any input sourced from PR metadata (title, body, etc.) is passed
+# via env vars rather than ${{ }} expansion directly in run blocks. See
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integrity:
+    name: Integrity checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Cargo.toml version matches a git tag
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "✓ v$VERSION tag exists"
+          else
+            # Narrow allowlist: `chore: release vX.Y.Z` or `chore(release): X.Y.Z`
+            # with an actual version number after `release`. Prevents "chore: release the hounds"
+            # from bypassing the check.
+            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && echo "${PR_TITLE:-}" | grep -qiE '^chore(\([^)]*\))?:[[:space:]]+release[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+'; then
+              echo "⚠ v$VERSION has no tag (release PR in flight — OK)"
+            else
+              echo "✗ Cargo.toml version $VERSION has no matching git tag"
+              exit 1
+            fi
+          fi
+
+      - name: README MCP tool count matches src/server.rs
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          README_COUNT=$(grep -oE '[0-9]+ MCP tools?' README.md | head -1 | grep -oE '[0-9]+' || echo 0)
+          # The README uses words like "Four MCP tools" — fall back to word-to-digit mapping.
+          if [ "$README_COUNT" = "0" ]; then
+            README_WORD=$(grep -oE '(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten) MCP tools?' README.md | head -1 | awk '{print $1}' || true)
+            case "$README_WORD" in
+              One) README_COUNT=1 ;;
+              Two) README_COUNT=2 ;;
+              Three) README_COUNT=3 ;;
+              Four) README_COUNT=4 ;;
+              Five) README_COUNT=5 ;;
+              Six) README_COUNT=6 ;;
+              Seven) README_COUNT=7 ;;
+              Eight) README_COUNT=8 ;;
+              Nine) README_COUNT=9 ;;
+              Ten) README_COUNT=10 ;;
+              *) README_COUNT=0 ;;
+            esac
+          fi
+          CODE_COUNT=$(grep -c '#\[tool(' src/server.rs || echo 0)
+          if [ "$README_COUNT" = "$CODE_COUNT" ]; then
+            echo "✓ README claims $README_COUNT MCP tools, src/server.rs has $CODE_COUNT"
+          else
+            echo "✗ README claims $README_COUNT MCP tools but src/server.rs has $CODE_COUNT"
+            exit 1
+          fi
+
+      - name: Workflow files do not mask errors
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # Comment-aware: the pattern matches only lines whose prefix contains no '#',
+          # so YAML and shell comments (including backticked references in explanatory
+          # text) do not trip the check. integrity.yml is excluded to avoid self-matching
+          # on its own pattern literal — this file is hand-audited.
+          if grep -rnE '^[^#]*\|\| true' .github/workflows/ --exclude=integrity.yml; then
+            echo ""
+            echo "forbidden masking pattern found in workflow files"
+            echo "Use 'continue-on-error: true' on the step, or an explicit 'if !' check."
+            exit 1
+          fi
+          echo "no masking pattern in workflow files"
+
+      - name: cargo clippy invocations include --all-targets
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          FILES_TO_CHECK=".github/workflows/ci.yml lefthook.yml CLAUDE.md"
+          BAD=""
+          for f in $FILES_TO_CHECK; do
+            # `if` context suppresses pipefail so no-match exits do not abort the script.
+            if BAD_LINES=$(grep -n 'cargo clippy' "$f" | grep -v -- '--all-targets'); then
+              BAD+=$'\n'"${f}:"$'\n'"${BAD_LINES}"
+            fi
+          done
+          if [ -z "$BAD" ]; then
+            echo "✓ all cargo clippy invocations use --all-targets"
+          else
+            printf "✗ cargo clippy without --all-targets:%s\n" "$BAD"
+            exit 1
+          fi
+
+      - name: '@not_implemented scenarios for closed issues'
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]; then
+            echo "⚠ not a PR event, skipping @not_implemented audit"
+            exit 0
+          fi
+          PR_NUM="${GITHUB_EVENT_PATH:+$(jq -r '.pull_request.number // empty' < "$GITHUB_EVENT_PATH")}"
+          if [ -z "$PR_NUM" ]; then
+            echo "⚠ no PR number, skipping"
+            exit 0
+          fi
+          BODY=$(gh pr view "$PR_NUM" --json body --jq .body)
+          # Case-insensitive, handles `Closes/closes/close/closed`, `Fix/fixes/fixed`, `Resolves/resolved`.
+          ISSUES=""
+          if MATCHES=$(echo "$BODY" | grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+'); then
+            ISSUES=$(echo "$MATCHES" | grep -oE '[0-9]+')
+          fi
+          if [ -z "$ISSUES" ]; then
+            echo "⚠ no Closes/Fixes/Resolves references, skipping"
+            exit 0
+          fi
+          BAD=""
+          for ISSUE in $ISSUES; do
+            if HITS=$(grep -rn "@ISSUE-$ISSUE" bdd/features/ 2>/dev/null | grep '@not_implemented'); then
+              BAD+=$'\n'"${HITS}"
+            fi
+          done
+          if [ -z "$BAD" ]; then
+            echo "✓ no @not_implemented scenarios for closed issues"
+          else
+            printf "✗ PR closes issues but their scenarios are still @not_implemented:%s\n" "$BAD"
+            exit 1
+          fi
+
+      - name: CHANGELOG sections have matching git tags
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          git fetch --tags 2>/dev/null || true
+          MISSING=""
+          # Pattern allows pre-release and build suffixes: `0.7.0`, `0.7.0-rc.1`, `0.7.0+build.5`.
+          while IFS= read -r VER; do
+            if [ "$VER" = "Unreleased" ]; then continue; fi
+            if ! git rev-parse "v$VER" >/dev/null 2>&1; then
+              MISSING="$MISSING $VER"
+            fi
+          done < <(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' CHANGELOG.md | sed 's/^## \[\(.*\)\]$/\1/')
+          if [ -z "$MISSING" ]; then
+            echo "✓ all CHANGELOG versions have matching tags"
+          else
+            echo "✗ CHANGELOG sections without matching git tags:$MISSING"
+            exit 1
+          fi
