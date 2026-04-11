@@ -189,6 +189,17 @@ pub struct HistoryArgs {
     pub page_size: usize,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ContextArgs {
+    /// Base git ref (exclusive). Commits after this are considered.
+    pub base_ref: String,
+    /// Head git ref (inclusive). Required — this tool does not support working
+    /// tree mode because callers/callees are resolved from committed content.
+    pub head_ref: String,
+    /// Path to the git repository (defaults to the server's working directory).
+    pub repo_path: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
