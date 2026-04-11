@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct RustAnalyzer;
@@ -24,7 +24,11 @@ fn extract_functions_from_node(
     node: &tree_sitter::Node,
     type_name: Option<&str>,
     functions: &mut Vec<Function>,
+    depth: usize,
 ) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -53,7 +57,13 @@ fn extract_functions_from_node(
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
                 if let Some(body) = child.child_by_field_name("body") {
-                    extract_functions_from_node(source, &body, Some(impl_type), functions);
+                    extract_functions_from_node(
+                        source,
+                        &body,
+                        Some(impl_type),
+                        functions,
+                        depth + 1,
+                    );
                 }
             }
             _ => {}
@@ -69,7 +79,7 @@ impl LanguageAnalyzer for RustAnalyzer {
             .ok_or_else(|| anyhow::anyhow!("Failed to parse Rust source"))?;
         let root = tree.root_node();
         let mut functions = Vec::new();
-        extract_functions_from_node(source, &root, None, &mut functions);
+        extract_functions_from_node(source, &root, None, &mut functions, 0);
         Ok(functions)
     }
 
@@ -315,5 +325,69 @@ use anyhow::Result;
         let analyzer = RustAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Security regression: deeply-nested `impl` blocks (invalid Rust syntax) used to
+    /// stack-overflow `extract_functions_from_node` because it recursed into each
+    /// `impl_item` body without a depth limit. Although `impl Foo { impl Bar {} }` is
+    /// a parse error, the tree-sitter Rust grammar's error recovery DOES produce nested
+    /// `impl_item` nodes from this input — contrary to the initial plan assumption.
+    /// An attacker committing such a file could crash git-prism during `get_change_manifest`.
+    ///
+    /// RED: 5000 nested `impl` blocks on a 2 MB bounded-stack thread → SIGABRT without guard.
+    /// GREEN: guard returns early at depth 256; thread completes normally.
+    ///
+    /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
+    /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
+    #[test]
+    fn deeply_nested_impls_do_not_stack_overflow() {
+        const NESTING_DEPTH: usize = 5000;
+        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+        let mut source = String::new();
+        for i in 0..NESTING_DEPTH {
+            source.push_str(&format!("impl T{i} {{\n"));
+        }
+        source.push_str("fn leaf() {}\n");
+        for _ in 0..NESTING_DEPTH {
+            source.push_str("}\n");
+        }
+
+        let handle = std::thread::Builder::new()
+            .stack_size(TEST_STACK_SIZE)
+            .spawn(move || {
+                let analyzer = RustAnalyzer;
+                analyzer.extract_functions(source.as_bytes())
+            })
+            .expect("spawn analyzer thread");
+
+        let result = handle
+            .join()
+            .expect("analyzer thread must not stack-overflow on deeply-nested input");
+        result.expect("analyzer must return Ok on deeply-nested input");
+        // No assertion on function count — tree-sitter Rust error recovery
+        // produces ERROR nodes for illegal nested impls, not nested impl_item
+        // nodes, so the walker may or may not extract the leaf function.
+    }
+
+    /// Triangulation: 255 sequential impl blocks (not nested), each with one method.
+    /// Confirms the guard does not interfere with legitimate impl extraction.
+    #[test]
+    fn sequential_impls_at_boundary_count_all_extract() {
+        const IMPL_COUNT: usize = 255;
+
+        let mut source = String::new();
+        for i in 0..IMPL_COUNT {
+            source.push_str(&format!("struct T{i};\n"));
+            source.push_str(&format!("impl T{i} {{ fn method_{i}(&self) {{}} }}\n"));
+        }
+
+        let analyzer = RustAnalyzer;
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        assert_eq!(
+            functions.len(),
+            IMPL_COUNT,
+            "all {IMPL_COUNT} impl methods must be extracted"
+        );
     }
 }
