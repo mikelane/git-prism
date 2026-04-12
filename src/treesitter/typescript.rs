@@ -508,7 +508,7 @@ class Greeter {
     /// walker completes without crashing on a deeply-nested (but grammar-limited)
     /// export chain, and that extraction still works correctly.
     #[test]
-    fn it_completes_without_overflow_on_deeply_nested_export_statements() {
+    fn it_completes_without_overflow_on_deeply_stacked_export_keywords() {
         const GENERATED_NESTING_LEVELS: usize = 5000;
         const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 

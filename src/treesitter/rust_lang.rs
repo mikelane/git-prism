@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
+use super::{body_hash_for_node, CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH};
 use tree_sitter::Parser;
 
 pub struct RustAnalyzer;
@@ -365,17 +365,19 @@ use anyhow::Result;
             .join()
             .expect("analyzer thread must not stack-overflow on deeply-nested input");
         result.expect("analyzer must return Ok on deeply-nested input");
-        // No assertion on function count — tree-sitter Rust error recovery
-        // produces ERROR nodes for illegal nested impls, not nested impl_item
-        // nodes, so the walker may or may not extract the leaf function.
+        // No assertion on function count — nested impls are a parse error, but
+        // tree-sitter Rust error recovery DOES produce nested impl_item nodes
+        // (confirmed: the unguarded walker SIGABRTs at 5000 levels on a 2MB thread).
+        // The leaf function is past the depth cap and is not extracted.
     }
 
     /// Triangulation: 255 sequential impl blocks (not nested), each with one method.
     /// Confirms the guard does not interfere with legitimate (shallow) impl extraction.
-    /// NOTE: This does NOT exercise the depth-255 boundary — nested Rust impls are a
-    /// parse error and tree-sitter error-recovers them to ERROR nodes, not nested
-    /// impl_item nodes. The deeply_nested_impls_do_not_stack_overflow test covers the
-    /// overflow safety property; this test covers the non-regression property.
+    /// NOTE: This does NOT exercise the depth-255 boundary — valid Rust syntax does not
+    /// allow nested impl blocks. However, tree-sitter Rust error recovery DOES produce
+    /// nested impl_item nodes from syntactically illegal nesting (confirmed: SIGABRT at
+    /// 5000 levels on a 2 MB thread). The it_completes_without_overflow_on_deeply_nested_impls
+    /// test covers the overflow safety property; this test covers the non-regression property.
     #[test]
     fn sequential_impls_all_extract() {
         const IMPL_COUNT: usize = 255;
