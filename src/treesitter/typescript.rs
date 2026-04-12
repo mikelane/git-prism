@@ -61,6 +61,10 @@ fn extract_functions_from_node(
     depth: usize,
 ) {
     if depth >= MAX_RECURSION_DEPTH {
+        tracing::warn!(
+            depth_limit = MAX_RECURSION_DEPTH,
+            "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+        );
         return;
     }
     let mut cursor = node.walk();
@@ -225,6 +229,7 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_simple_function() {
@@ -489,6 +494,30 @@ class Greeter {
         let analyzer = TypeScriptAnalyzer::typescript();
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Depth-guard warning: the `tracing::warn!` in `extract_functions_from_node` is
+    /// defense-in-depth for future grammar changes. With the current tree-sitter TypeScript
+    /// grammar, the guard is not reachable via any syntactically meaningful input:
+    ///
+    /// - `class C0 { class C1 { ... } }` → tree-sitter error-recovers inner classes to
+    ///   ERROR nodes; the `class_declaration` arm is never matched inside a class body.
+    /// - `export export export class C {}` → extra `export` keywords become a single
+    ///   ERROR node; nested `export_statement` nodes are never produced.
+    /// - TypeScript namespaces parse as `internal_module > statement_block`; the `_` arm
+    ///   does not recurse, so namespace depth never increments the recursion counter.
+    ///
+    /// The warn! is present for when a future grammar version produces such nesting.
+    /// The triangulation test below confirms shallow input never emits the warning.
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_input() {
+        let source = b"export class Foo { bar(): void {} }\n";
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
     }
 
     /// Defense-in-depth: deeply-nested TypeScript export_statement and class_declaration
