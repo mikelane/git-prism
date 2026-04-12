@@ -145,9 +145,7 @@ pub fn init() -> TelemetryGuard {
         }
     }
 
-    eprintln!(
-        "git-prism: telemetry initialized (HTTP/protobuf, endpoint={endpoint})"
-    );
+    eprintln!("git-prism: telemetry initialized (HTTP/protobuf, endpoint={endpoint})");
 
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
