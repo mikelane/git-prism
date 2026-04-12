@@ -42,8 +42,13 @@ pub struct TelemetryGuard {
 
 impl TelemetryGuard {
     /// Returns `true` if telemetry is active (providers are initialized).
-    #[cfg(test)]
-    fn is_active(&self) -> bool {
+    ///
+    /// A `false` return means `init()` either saw no endpoint configured or
+    /// failed at some stage of provider/subscriber setup and degraded to a
+    /// zero-cost no-op. Production callers (e.g. `run_server`) can use this
+    /// to emit a user-visible warning that telemetry is inactive even though
+    /// `GIT_PRISM_OTLP_ENDPOINT` is set.
+    pub fn is_active(&self) -> bool {
         self.tracer_provider.is_some()
     }
 }
@@ -66,12 +71,55 @@ impl Drop for TelemetryGuard {
     }
 }
 
+/// Attach the OTel tracing layer to the global `tracing` subscriber.
+///
+/// Returns `Err` if another subscriber is already registered globally — the
+/// most common cause is a competing library (e.g. rmcp's stdio logger) having
+/// installed its own subscriber before git-prism gets the chance. When this
+/// happens, `init()` must degrade to a no-op guard rather than silently
+/// dropping every span into an unattached OTel layer (see B1 regression test).
+#[cfg(not(test))]
+fn attach_tracing_subscriber_default(tracer_provider: &SdkTracerProvider) -> Result<(), String> {
+    let tracer = tracer_provider.tracer("git-prism");
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    Registry::default()
+        .with(otel_layer)
+        .try_init()
+        .map_err(|e| e.to_string())
+}
+
+/// In test builds the global tracing subscriber is managed by `#[traced_test]`
+/// (or is left unset) and must not be touched by `init()` — installing a
+/// competing subscriber would poison `Once` state shared across tests. The
+/// regression test for B1 exercises the failure path via `init_with_attacher`
+/// directly, so the default attacher can safely be a no-op in test builds.
+#[cfg(test)]
+fn attach_tracing_subscriber_default(_tracer_provider: &SdkTracerProvider) -> Result<(), String> {
+    Ok(())
+}
+
 /// Read telemetry configuration from environment variables and initialize
 /// OpenTelemetry providers if an OTLP endpoint is configured.
 ///
 /// When `GIT_PRISM_OTLP_ENDPOINT` is not set, this returns a no-op guard
 /// with zero overhead.
 pub fn init() -> TelemetryGuard {
+    init_with_attacher(attach_tracing_subscriber_default)
+}
+
+/// Core telemetry initialization body, parameterized by a subscriber-attach
+/// function so tests can inject a failure without touching tracing's
+/// process-global state.
+///
+/// This function is the single source of truth for the ordering of exporter
+/// construction, provider installation, subscriber attachment, and the
+/// user-visible "telemetry initialized" message. Every failure path must
+/// return a no-op `TelemetryGuard` AND suppress the success message —
+/// otherwise operators see "initialized" while spans silently disappear.
+fn init_with_attacher<F>(attach_subscriber: F) -> TelemetryGuard
+where
+    F: FnOnce(&SdkTracerProvider) -> Result<(), String>,
+{
     let endpoint = match std::env::var(ENV_OTLP_ENDPOINT) {
         Ok(ep) if !ep.is_empty() => ep,
         _ => {
@@ -147,22 +195,26 @@ pub fn init() -> TelemetryGuard {
         .with_resource(resource)
         .build();
 
-    // Install global meter provider and tracing subscriber.
-    // In test builds both are skipped: the global subscriber is managed by
-    // #[traced_test] (its Once would be poisoned by a competing registration),
-    // and set_meter_provider triggers OpenTelemetry's internal tracing
-    // diagnostics which also install a global subscriber as a side effect.
+    // Install global meter provider. In test builds this is skipped:
+    // `set_meter_provider` triggers OpenTelemetry's internal tracing
+    // diagnostics which install a global subscriber as a side effect,
+    // and tests manage their own subscriber state via `#[traced_test]`.
     #[cfg(not(test))]
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-    // Initialize the tracing subscriber with the OTel layer.
-    #[cfg(not(test))]
-    {
-        let tracer = tracer_provider.tracer("git-prism");
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-        if let Err(e) = Registry::default().with(otel_layer).try_init() {
-            eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
-        }
+    // Attach the OTel layer to the tracing subscriber. If this fails
+    // (most commonly because another subscriber was already registered
+    // globally — e.g. rmcp's stdio logger), degrade to a no-op guard
+    // consistent with the exporter-build failure paths above. The
+    // success message below MUST NOT fire in that case, or operators
+    // will see "initialized" while spans silently disappear into an
+    // unattached OTel layer.
+    if let Err(e) = attach_subscriber(&tracer_provider) {
+        eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
+        return TelemetryGuard {
+            tracer_provider: None,
+            meter_provider: None,
+        };
     }
 
     eprintln!("git-prism: telemetry initialized (HTTP/protobuf, endpoint={base})");
@@ -311,5 +363,41 @@ mod tests {
             std::env::remove_var(ENV_SERVICE_NAME);
         }
         drop(guard);
+    }
+
+    /// Regression test for PR #210 blocker B1.
+    ///
+    /// Before the fix: when `Registry::default().with(otel_layer).try_init()`
+    /// failed (most commonly because another subscriber was already registered
+    /// globally, e.g. rmcp's stdio logger), `init()` logged the error via
+    /// `eprintln!` and then continued on to print the success message and
+    /// return an active `TelemetryGuard`. Traces silently disappeared into an
+    /// OTel layer that was never attached to a subscriber while the operator
+    /// saw "telemetry initialized" on stderr.
+    ///
+    /// This test injects a failing subscriber-attacher and asserts the guard
+    /// degrades to no-op — matching how the other exporter-build failure paths
+    /// behave. The injection point avoids depending on tracing's process-global
+    /// subscriber state (which would make this test order-dependent with the
+    /// other happy-path tests in this module).
+    #[tokio::test]
+    async fn it_returns_noop_guard_when_tracing_subscriber_init_fails() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
+        }
+        let guard =
+            init_with_attacher(|_tp| Err("subscriber already registered (simulated)".to_string()));
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        assert!(
+            !guard.is_active(),
+            "guard must degrade to no-op when the tracing subscriber cannot be attached; \
+             returning an active guard with no attached subscriber silently drops every span"
+        );
     }
 }
