@@ -37,10 +37,14 @@ impl TelemetryGuard {
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         if let Some(tp) = self.tracer_provider.take() {
-            let _ = tp.shutdown();
+            if let Err(e) = tp.shutdown() {
+                eprintln!("git-prism: failed to flush traces on shutdown: {e}");
+            }
         }
         if let Some(mp) = self.meter_provider.take() {
-            let _ = mp.shutdown();
+            if let Err(e) = mp.shutdown() {
+                eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
+            }
         }
     }
 }
@@ -141,6 +145,10 @@ pub fn init() -> TelemetryGuard {
         }
     }
 
+    eprintln!(
+        "git-prism: telemetry initialized (HTTP/protobuf, endpoint={endpoint})"
+    );
+
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
         meter_provider: Some(meter_provider),
@@ -158,10 +166,14 @@ mod tests {
     /// for the duration of the test (setup, exercise, and cleanup).
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-    // Helper to remove telemetry env vars for test isolation.
-    // SAFETY: Caller must hold ENV_MUTEX. `set_var`/`remove_var` are unsafe
-    // because they mutate shared process state; the mutex serializes access
-    // so no concurrent mutation occurs.
+    /// Helper to remove telemetry env vars for test isolation.
+    ///
+    /// # Safety
+    ///
+    /// Caller must hold `ENV_MUTEX` for the duration of the call and any
+    /// subsequent env-var reads in the same test. `set_var`/`remove_var` are
+    /// unsafe because they mutate shared process state without synchronization;
+    /// holding the mutex serializes all access so no concurrent mutation occurs.
     unsafe fn clear_telemetry_env() {
         unsafe {
             std::env::remove_var(ENV_OTLP_ENDPOINT);
