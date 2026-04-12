@@ -113,8 +113,6 @@ pub fn init() -> TelemetryGuard {
         .with_resource(resource.clone())
         .build();
 
-    let tracer = tracer_provider.tracer("git-prism");
-
     // Meter provider
     let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metrics_exporter).build();
 
@@ -126,12 +124,16 @@ pub fn init() -> TelemetryGuard {
     // Install global meter provider
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-    // Set up the tracing-opentelemetry layer
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // Initialize the tracing subscriber with the OTel layer
-    if let Err(e) = Registry::default().with(otel_layer).try_init() {
-        eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
+    // Initialize the tracing subscriber with the OTel layer.
+    // In test builds the global subscriber is managed by #[traced_test], so we
+    // skip subscriber registration to avoid poisoning tracing-test's Once.
+    #[cfg(not(test))]
+    {
+        let tracer = tracer_provider.tracer("git-prism");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        if let Err(e) = Registry::default().with(otel_layer).try_init() {
+            eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
+        }
     }
 
     TelemetryGuard {
