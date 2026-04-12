@@ -16,6 +16,23 @@ const ENV_OTLP_ENDPOINT: &str = "GIT_PRISM_OTLP_ENDPOINT";
 const ENV_SERVICE_NAME: &str = "GIT_PRISM_SERVICE_NAME";
 const ENV_SERVICE_VERSION: &str = "GIT_PRISM_SERVICE_VERSION";
 
+/// Compute the per-signal OTLP HTTP endpoints from a base URL.
+///
+/// `opentelemetry-otlp` 0.28's HTTP exporter does not auto-append the
+/// per-signal path (`/v1/traces`, `/v1/metrics`) when the endpoint is
+/// supplied via `with_endpoint()` — only the env-var-driven path
+/// (`OTEL_EXPORTER_OTLP_ENDPOINT`) triggers that behavior. We construct
+/// the full signal URLs explicitly so a user-supplied
+/// `GIT_PRISM_OTLP_ENDPOINT=http://collector:4318` reaches the canonical
+/// signal paths that real OTLP backends expect.
+fn signal_endpoints(base: &str) -> (String, String) {
+    let trimmed = base.trim_end_matches('/');
+    (
+        format!("{trimmed}/v1/traces"),
+        format!("{trimmed}/v1/metrics"),
+    )
+}
+
 /// Guard that owns the telemetry providers. When dropped, it flushes
 /// pending spans and metrics with a bounded timeout.
 pub struct TelemetryGuard {
@@ -66,6 +83,9 @@ pub fn init() -> TelemetryGuard {
         }
     };
 
+    let base = endpoint.trim_end_matches('/');
+    let (traces_endpoint, metrics_endpoint) = signal_endpoints(base);
+
     let service_name =
         std::env::var(ENV_SERVICE_NAME).unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string());
     let service_version = std::env::var(ENV_SERVICE_VERSION)
@@ -74,7 +94,7 @@ pub fn init() -> TelemetryGuard {
     // Build the OTLP trace exporter.
     let trace_exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_http()
-        .with_endpoint(&endpoint)
+        .with_endpoint(&traces_endpoint)
         .with_timeout(EXPORT_TIMEOUT)
         .build()
     {
@@ -91,7 +111,7 @@ pub fn init() -> TelemetryGuard {
     // Build the OTLP metrics exporter.
     let metrics_exporter = match opentelemetry_otlp::MetricExporter::builder()
         .with_http()
-        .with_endpoint(&endpoint)
+        .with_endpoint(&metrics_endpoint)
         .with_timeout(EXPORT_TIMEOUT)
         .build()
     {
@@ -145,7 +165,7 @@ pub fn init() -> TelemetryGuard {
         }
     }
 
-    eprintln!("git-prism: telemetry initialized (HTTP/protobuf, endpoint={endpoint})");
+    eprintln!("git-prism: telemetry initialized (HTTP/protobuf, endpoint={base})");
 
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
@@ -258,6 +278,20 @@ mod tests {
         }
         drop(active_guard);
         // If we reach here without panicking, the test passes.
+    }
+
+    #[test]
+    fn it_trims_trailing_slash_when_computing_signal_paths() {
+        let (traces, metrics) = signal_endpoints("http://localhost:4318/");
+        assert_eq!(traces, "http://localhost:4318/v1/traces");
+        assert_eq!(metrics, "http://localhost:4318/v1/metrics");
+    }
+
+    #[test]
+    fn it_appends_signal_paths_to_a_bare_base() {
+        let (traces, metrics) = signal_endpoints("http://localhost:4318");
+        assert_eq!(traces, "http://localhost:4318/v1/traces");
+        assert_eq!(metrics, "http://localhost:4318/v1/metrics");
     }
 
     #[tokio::test]

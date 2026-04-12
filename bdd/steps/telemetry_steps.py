@@ -250,14 +250,6 @@ def _spawn_server(
             env.pop(key, None)
     if endpoint is not None:
         env["GIT_PRISM_OTLP_ENDPOINT"] = endpoint
-        # opentelemetry-otlp 0.28's HTTP exporter only appends `/v1/traces`
-        # and `/v1/metrics` when it reads the endpoint from
-        # `OTEL_EXPORTER_OTLP_ENDPOINT`. When the endpoint is provided via
-        # the `with_endpoint()` builder call (as production code does),
-        # the SDK posts to the endpoint as-is. Setting this env var lets
-        # the mock collector receive requests on the canonical signal
-        # paths, matching how a real OTLP backend would behave.
-        env["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
     proc = subprocess.Popen(  # noqa: S603 -- test harness, inputs are fixed strings
         [context.binary_path, "serve"],
         stdin=subprocess.PIPE,
