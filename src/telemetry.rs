@@ -69,7 +69,7 @@ pub fn init() -> TelemetryGuard {
 
     // Build the OTLP trace exporter.
     let trace_exporter = match opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
+        .with_http()
         .with_endpoint(&endpoint)
         .with_timeout(EXPORT_TIMEOUT)
         .build()
@@ -86,7 +86,7 @@ pub fn init() -> TelemetryGuard {
 
     // Build the OTLP metrics exporter.
     let metrics_exporter = match opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
+        .with_http()
         .with_endpoint(&endpoint)
         .with_timeout(EXPORT_TIMEOUT)
         .build()
