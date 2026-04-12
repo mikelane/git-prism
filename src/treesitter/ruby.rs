@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
+use super::{body_hash_for_node, CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH};
 use tree_sitter::Parser;
 
 pub struct RubyAnalyzer;
@@ -27,6 +27,10 @@ fn extract_functions_from_node(
     depth: usize,
 ) {
     if depth >= MAX_RECURSION_DEPTH {
+        tracing::warn!(
+            depth_limit = MAX_RECURSION_DEPTH,
+            "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+        );
         return;
     }
     let mut cursor = node.walk();
@@ -177,6 +181,7 @@ impl LanguageAnalyzer for RubyAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_standalone_method() {
@@ -372,6 +377,39 @@ end
     /// Security regression: deeply-nested class declarations used to stack-overflow
     /// `extract_functions_from_node` because it recursed into each class body without
     /// a depth limit. An attacker committing a Ruby file with thousands of nested
+    /// Depth-guard warning: when `extract_functions_from_node` hits MAX_RECURSION_DEPTH
+    /// it must emit a tracing::warn! so operators can observe truncation in logs/OTLP.
+    ///
+    /// Uses 300 nesting levels — past MAX_RECURSION_DEPTH (256) but shallow enough
+    /// to run on the default test stack without spawning a new thread.
+    #[test]
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_classes() {
+        const NESTING_DEPTH: usize = 300;
+
+        let mut source = String::new();
+        for i in 0..NESTING_DEPTH {
+            source.push_str(&format!("class C{i}\n"));
+        }
+        for _ in 0..NESTING_DEPTH {
+            source.push_str("end\n");
+        }
+
+        let analyzer = RubyAnalyzer;
+        let _ = analyzer.extract_functions(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+    }
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_input() {
+        let source = b"class Foo\n  def bar\n  end\nend\n";
+        let analyzer = RubyAnalyzer;
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
+    }
+
     /// class blocks could crash git-prism during `get_change_manifest`. The analyzer
     /// must now complete without crashing.
     ///

@@ -77,6 +77,10 @@ impl LanguageAnalyzer for CSharpAnalyzer {
             depth: usize,
         ) {
             if depth >= MAX_RECURSION_DEPTH {
+                tracing::warn!(
+                    depth_limit = MAX_RECURSION_DEPTH,
+                    "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+                );
                 return;
             }
             match node.kind() {
@@ -172,6 +176,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_simple_method() {
@@ -392,6 +397,46 @@ public class Foo {}
     /// a C# file with thousands of nested namespaces could crash git-prism during
     /// `get_change_manifest`. The analyzer must now complete without crashing.
     ///
+    /// Depth-guard warning: when `visit_node` hits MAX_RECURSION_DEPTH it must emit
+    /// a tracing::warn! so operators can observe truncation in logs/OTLP.
+    ///
+    /// Uses 300 nesting levels — well past MAX_RECURSION_DEPTH (256) but shallow
+    /// enough to run on the default test stack without spawning a new thread.
+    /// `#[traced_test]` only captures logs from the current thread, so we must
+    /// avoid spawning a new thread here.
+    #[test]
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_namespaces() {
+        const NESTING_DEPTH: usize = 300;
+
+        let mut source = String::new();
+        for i in 0..NESTING_DEPTH {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        for _ in 0..NESTING_DEPTH {
+            source.push_str("}\n");
+        }
+
+        let analyzer = CSharpAnalyzer;
+        let _ = analyzer.extract_functions(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+    }
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_input() {
+        let source = br#"namespace MyApp {
+    public class Service {
+        public void Run() {}
+    }
+}
+"#;
+        let analyzer = CSharpAnalyzer;
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
+    }
+
     /// Uses nested namespaces (not classes) because `visit_node` stops recursing at
     /// a `class_declaration`, but falls through and recurses into children for any
     /// other node kind — including `namespace_declaration`.
