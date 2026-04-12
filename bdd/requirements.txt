@@ -1,5 +1,4 @@
 behave>=1.2.6
-grpcio>=1.80.0
 opentelemetry-proto>=1.29.0
-# CVE-2024-7254 floor; transitive via opentelemetry-proto and grpcio
+# CVE-2024-7254 floor; transitive via opentelemetry-proto
 protobuf>=5.29.2

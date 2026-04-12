@@ -2,8 +2,9 @@
 Feature: OpenTelemetry metrics and traces for the MCP server
 
   The git-prism MCP server emits OpenTelemetry metrics and traces over OTLP
-  gRPC when configured via environment variables. Telemetry is off by default.
-  Exports must never include raw repo paths, commit SHAs, or literal ref names.
+  HTTP/protobuf when configured via environment variables. Telemetry is off
+  by default. Exports must never include raw repo paths, commit SHAs, or
+  literal ref names.
 
   Background:
     Given a mock OTLP collector is running

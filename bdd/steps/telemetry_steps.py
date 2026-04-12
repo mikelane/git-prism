@@ -1,13 +1,10 @@
 """Step definitions for the OpenTelemetry (metrics + traces) feature.
 
-The production telemetry module does not exist yet — these scenarios are
-tagged @not_implemented and must FAIL with assertion errors until the
-`src/telemetry.rs` module and instrumentation sites land.
-
-This file also defines a minimal in-memory OTLP gRPC collector. It
-implements the two OTLP service servicers (`TraceServiceServicer` and
-`MetricsServiceServicer`) from `opentelemetry-proto` and records every
-export request it receives. Steps assert against that recorded state.
+This file defines a minimal in-memory OTLP HTTP/protobuf collector. It
+accepts POSTs to `/v1/traces` and `/v1/metrics`, parses the binary
+protobuf bodies into `ExportTraceServiceRequest` /
+`ExportMetricsServiceRequest` messages, and records every received
+request so step definitions can assert against the resulting state.
 """
 
 from __future__ import annotations
@@ -15,22 +12,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
-from concurrent import futures
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from typing import Any
 
-import grpc
 from behave import given, then, when
 from behave.runner import Context
-from opentelemetry.proto.collector.metrics.v1 import (
-    metrics_service_pb2,
-    metrics_service_pb2_grpc,
-)
-from opentelemetry.proto.collector.trace.v1 import (
-    trace_service_pb2,
-    trace_service_pb2_grpc,
-)
+from opentelemetry.proto.collector.metrics.v1 import metrics_service_pb2
+from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
 
 VALID_REF_PATTERNS = {
     "worktree",
@@ -43,44 +34,42 @@ VALID_REF_PATTERNS = {
 
 
 class MockOtlpCollector:
-    """In-memory OTLP gRPC collector for assertion use in BDD tests.
+    """In-memory OTLP HTTP/protobuf collector for assertion use in BDD tests.
 
-    Implements the two OTLP service servicers that a real OTLP backend
-    exposes, storing every received export request in memory so step
-    definitions can assert on the state the server emitted.
+    Runs a tiny ThreadingHTTPServer that accepts POSTs to `/v1/traces`
+    and `/v1/metrics`, parses the binary protobuf bodies into the
+    standard `Export*ServiceRequest` messages, and stores every received
+    request so step definitions can assert on the state the server emitted.
     """
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._trace_requests: list[Any] = []
         self._metric_requests: list[Any] = []
-        self.server: grpc.Server | None = None
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
         self.port: int | None = None
 
     def start(self) -> None:
-        """Bind a grpc.Server to a free port and register both servicers."""
-        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-        trace_service_pb2_grpc.add_TraceServiceServicer_to_server(
-            _TraceServicer(self), self.server,
+        """Bind a ThreadingHTTPServer to a free port and serve in the background."""
+        collector = self
+        handler_cls = _make_handler(collector)
+        self._server = ThreadingHTTPServer(("localhost", 0), handler_cls)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            daemon=True,
         )
-        metrics_service_pb2_grpc.add_MetricsServiceServicer_to_server(
-            _MetricsServicer(self), self.server,
-        )
-        self.port = self.server.add_insecure_port("localhost:0")
-        if self.port == 0:
-            raise RuntimeError("gRPC mock collector failed to bind")
-        self.server.start()
-        # Verify the server is actually accepting connections before returning
-        channel = grpc.insecure_channel(f"localhost:{self.port}")
-        try:
-            grpc.channel_ready_future(channel).result(timeout=5)
-        finally:
-            channel.close()
+        self._thread.start()
 
     def stop(self) -> None:
-        if self.server is not None:
-            self.server.stop(grace=1).wait()
-            self.server = None
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
 
     def record_trace(self, request: Any) -> None:
         with self._lock:
@@ -122,22 +111,45 @@ class MockOtlpCollector:
         return out
 
 
-class _TraceServicer(trace_service_pb2_grpc.TraceServiceServicer):
-    def __init__(self, collector: MockOtlpCollector) -> None:
-        self._collector = collector
+def _make_handler(collector: MockOtlpCollector) -> type[BaseHTTPRequestHandler]:
+    """Build a request handler class bound to a specific collector instance."""
 
-    def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
-        self._collector.record_trace(request)
-        return trace_service_pb2.ExportTraceServiceResponse()
+    class _OtlpHttpHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler protocol
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(content_length) if content_length > 0 else b""
 
+            if self.path == "/v1/traces":
+                request = trace_service_pb2.ExportTraceServiceRequest()
+                request.ParseFromString(body)
+                collector.record_trace(request)
+                response = trace_service_pb2.ExportTraceServiceResponse()
+                self._send_protobuf(response.SerializeToString())
+                return
 
-class _MetricsServicer(metrics_service_pb2_grpc.MetricsServiceServicer):
-    def __init__(self, collector: MockOtlpCollector) -> None:
-        self._collector = collector
+            if self.path == "/v1/metrics":
+                request = metrics_service_pb2.ExportMetricsServiceRequest()
+                request.ParseFromString(body)
+                collector.record_metrics(request)
+                response = metrics_service_pb2.ExportMetricsServiceResponse()
+                self._send_protobuf(response.SerializeToString())
+                return
 
-    def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
-        self._collector.record_metrics(request)
-        return metrics_service_pb2.ExportMetricsServiceResponse()
+            self.send_response(404)
+            self.end_headers()
+
+        def _send_protobuf(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 -- BaseHTTPRequestHandler protocol
+            # Silence default stderr access logging during tests.
+            return
+
+    return _OtlpHttpHandler
 
 
 # ---------- helpers used by the steps ----------
@@ -152,6 +164,38 @@ def _get_collector(context: Context) -> MockOtlpCollector:
         )
         raise AssertionError(msg)
     return collector
+
+
+def _assert_not_jsonrpc_error(line: str, context: str) -> None:
+    """Assert that a JSON-RPC response line is not an error response.
+
+    Empty lines and non-JSON output are tolerated (the server may still be
+    initializing, or a stray log line may have been written). Only explicit
+    JSON-RPC error responses raise.
+    """
+    if not line.strip():
+        return
+    try:
+        response = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if isinstance(response, dict) and "error" in response:
+        msg = f"Server returned JSON-RPC error in {context}: {response['error']}"
+        raise AssertionError(msg)
+
+
+def _wait_for_export(collector: MockOtlpCollector, timeout: float = 5.0) -> None:
+    """Poll the mock collector until at least one trace or metric request arrives.
+
+    Replaces the previous load-bearing ``time.sleep(0.5)``. Does not raise on
+    timeout — downstream assertions produce clearer failure messages pointing
+    at the missing telemetry data.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if collector.get_trace_requests() or collector.get_metric_requests():
+            return
+        time.sleep(0.05)
 
 
 def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
@@ -177,6 +221,7 @@ def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
 
 
 def _send_tool_call(
+    context: Context,
     proc: subprocess.Popen[str],
     tool_name: str,
     arguments: dict[str, Any],
@@ -184,9 +229,10 @@ def _send_tool_call(
 ) -> None:
     """Send a JSON-RPC tools/call request, wait for the response, then shut down.
 
-    Closes stdin after reading the response to trigger a clean server shutdown
-    (which flushes the TelemetryGuard). Waits for the process to exit so all
-    OTLP exports complete before assertions run.
+    Lets ``proc.communicate()`` close stdin itself to trigger a clean server
+    shutdown (which flushes the TelemetryGuard) and drain stdout + stderr in
+    one call. After shutdown, polls the mock collector for OTLP delivery
+    instead of sleeping.
     """
     request = {
         "jsonrpc": "2.0",
@@ -199,22 +245,29 @@ def _send_tool_call(
     proc.stdin.write(json.dumps(request) + "\n")
     proc.stdin.flush()
 
-    # Read the tool response (blocks until the server writes it).
-    # The initialize response was already written but not consumed;
-    # read and discard it, then read the tool response.
-    proc.stdout.readline()  # initialize response
-    proc.stdout.readline()  # tool call response
+    # Read the two JSON-RPC responses. readline() is used intentionally —
+    # MCP over stdio writes one JSON-RPC message per line.
+    init_line = proc.stdout.readline()
+    _assert_not_jsonrpc_error(init_line, "initialize")
 
-    # Close stdin to signal EOF → server shuts down → TelemetryGuard flushes.
-    proc.stdin.close()
+    tool_line = proc.stdout.readline()
+    _assert_not_jsonrpc_error(tool_line, "tools/call")
+
+    # communicate() closes stdin internally (signaling EOF so the server
+    # shuts down and flushes its TelemetryGuard), then drains stdout and
+    # stderr concurrently. Explicitly closing stdin first causes a
+    # ValueError on Linux because communicate() still tries to flush it
+    # during its internal setup — macOS silently tolerates the double
+    # close but Linux raises "I/O operation on closed file".
     try:
-        proc.wait(timeout=10)
+        proc.communicate(timeout=10)
     except subprocess.TimeoutExpired:
-        proc.terminate()
-        proc.wait(timeout=5)
+        proc.kill()
+        proc.communicate(timeout=5)
 
-    # Give the OTLP exporter a moment to deliver to the collector.
-    time.sleep(0.5)
+    # Poll the collector for OTLP delivery instead of sleeping — avoids
+    # flaky CI on slow runners while keeping a bounded upper wait.
+    _wait_for_export(_get_collector(context))
 
 
 def _spawn_server(
@@ -228,6 +281,14 @@ def _spawn_server(
     env.pop("GIT_PRISM_OTLP_HEADERS", None)
     env.pop("GIT_PRISM_SERVICE_NAME", None)
     env.pop("GIT_PRISM_SERVICE_VERSION", None)
+    # Scrub any inherited OpenTelemetry env vars from the parent shell
+    # (e.g. local SigNoz/OrbStack collector config). The opentelemetry-otlp
+    # SDK gives `OTEL_EXPORTER_OTLP_*` env vars higher precedence than the
+    # `with_endpoint()` builder call, so a stale parent env can silently
+    # redirect exports away from the mock collector.
+    for key in list(env):
+        if key.startswith("OTEL_"):
+            env.pop(key, None)
     if endpoint is not None:
         env["GIT_PRISM_OTLP_ENDPOINT"] = endpoint
     proc = subprocess.Popen(  # noqa: S603 -- test harness, inputs are fixed strings
@@ -351,6 +412,7 @@ def step_start_server_and_call_tool(context: Context, tool_name: str) -> None:
     proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
     _send_mcp_initialize(proc)
     _send_tool_call(
+        context,
         proc,
         tool_name,
         {"base_ref": "HEAD~1", "head_ref": "HEAD", "repo_path": repo_path},
@@ -369,6 +431,7 @@ def step_start_server_and_call_tool_invalid_ref(
     proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
     _send_mcp_initialize(proc)
     _send_tool_call(
+        context,
         proc,
         tool_name,
         {
@@ -381,20 +444,19 @@ def step_start_server_and_call_tool_invalid_ref(
 
 @when("I wait {seconds:d} seconds for any exports")
 def step_wait(context: Context, seconds: int) -> None:
-    # Close stdin on all server procs to trigger shutdown → telemetry flush.
+    # communicate() closes stdin itself (triggering shutdown → telemetry
+    # flush) and then drains stdout + stderr so we don't deadlock on a full
+    # pipe buffer. Do NOT call proc.stdin.close() first: on Linux that
+    # causes communicate() to raise ValueError during its internal flush.
     for proc in getattr(context, "server_procs", []):
-        if proc.stdin and not proc.stdin.closed:
-            proc.stdin.close()
         try:
-            proc.wait(timeout=seconds)
+            proc.communicate(timeout=seconds)
         except subprocess.TimeoutExpired:
-            proc.terminate()
+            proc.kill()
             try:
-                proc.wait(timeout=2)
+                proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
-    # Give the OTLP exporter time to deliver.
-    time.sleep(1)
 
 
 # ---------- Assertions: metrics ----------
@@ -611,20 +673,37 @@ def step_ref_pattern_bounded(context: Context, key: str) -> None:
 
 
 def _stop_server_procs(context: Context) -> None:
-    """Terminate any spawned git-prism processes, draining their pipes."""
+    """Terminate any spawned git-prism processes, draining their pipes.
+
+    Tolerates Popen objects that are mid-communicate or already half-dead:
+    if a prior communicate() call aborted before initializing its internal
+    state (e.g. a ValueError from a closed stdin on Linux), a second call
+    can raise AttributeError/ValueError/OSError. We swallow those here so
+    cleanup never cascades into a HOOK-ERROR that masks the real failure.
+    """
     procs = getattr(context, "server_procs", [])
     for proc in procs:
         if proc.poll() is not None:
             continue  # already exited
-        proc.terminate()
+        try:
+            proc.terminate()
+        except (ValueError, OSError):
+            pass
         try:
             proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
             try:
                 proc.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass  # zombie — log and move on
+            except (subprocess.TimeoutExpired, ValueError, OSError, AttributeError):
+                pass  # zombie or half-initialized Popen — move on
+        except (ValueError, OSError, AttributeError):
+            # Prior communicate() may have left Popen in a partially
+            # initialized state; force-kill and drain best-effort.
+            try:
+                proc.kill()
+            except (ValueError, OSError):
+                pass
     context.server_procs = []
 
 

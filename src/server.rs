@@ -587,11 +587,27 @@ impl ServerHandler for GitPrismServer {
 }
 
 pub async fn run_server() -> anyhow::Result<()> {
-    let _telemetry = crate::telemetry::init();
+    let telemetry = crate::telemetry::init();
+    // If the operator configured an OTLP endpoint but `init()` degraded to
+    // a no-op (exporter build failed, subscriber attach failed, etc.), warn
+    // loudly on stderr. The original symptom of PR #210 blocker B1 was
+    // "telemetry looks configured but nothing arrives at the collector" —
+    // surfacing this at startup makes the failure visible instead of silent.
+    if std::env::var("GIT_PRISM_OTLP_ENDPOINT").is_ok_and(|v| !v.is_empty())
+        && !telemetry.is_active()
+    {
+        eprintln!(
+            "git-prism: WARNING: GIT_PRISM_OTLP_ENDPOINT is set but telemetry failed to \
+             initialize; spans and metrics will NOT be exported. See earlier stderr lines \
+             for the underlying cause (trace exporter, metric exporter, or tracing subscriber)."
+        );
+    }
     crate::metrics::get().record_session_started();
     let server = GitPrismServer::new();
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;
+    // `telemetry` is dropped here at end of scope — this is what flushes
+    // any pending spans and metrics on shutdown (see `TelemetryGuard::drop`).
     Ok(())
 }
 
