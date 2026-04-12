@@ -1,13 +1,10 @@
 """Step definitions for the OpenTelemetry (metrics + traces) feature.
 
-The production telemetry module does not exist yet — these scenarios are
-tagged @not_implemented and must FAIL with assertion errors until the
-`src/telemetry.rs` module and instrumentation sites land.
-
-This file also defines a minimal in-memory OTLP gRPC collector. It
-implements the two OTLP service servicers (`TraceServiceServicer` and
-`MetricsServiceServicer`) from `opentelemetry-proto` and records every
-export request it receives. Steps assert against that recorded state.
+This file defines a minimal in-memory OTLP HTTP/protobuf collector. It
+accepts POSTs to `/v1/traces` and `/v1/metrics`, parses the binary
+protobuf bodies into `ExportTraceServiceRequest` /
+`ExportMetricsServiceRequest` messages, and records every received
+request so step definitions can assert against the resulting state.
 """
 
 from __future__ import annotations
@@ -15,22 +12,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
-from concurrent import futures
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 from typing import Any
 
-import grpc
 from behave import given, then, when
 from behave.runner import Context
-from opentelemetry.proto.collector.metrics.v1 import (
-    metrics_service_pb2,
-    metrics_service_pb2_grpc,
-)
-from opentelemetry.proto.collector.trace.v1 import (
-    trace_service_pb2,
-    trace_service_pb2_grpc,
-)
+from opentelemetry.proto.collector.metrics.v1 import metrics_service_pb2
+from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
 
 VALID_REF_PATTERNS = {
     "worktree",
@@ -43,44 +34,42 @@ VALID_REF_PATTERNS = {
 
 
 class MockOtlpCollector:
-    """In-memory OTLP gRPC collector for assertion use in BDD tests.
+    """In-memory OTLP HTTP/protobuf collector for assertion use in BDD tests.
 
-    Implements the two OTLP service servicers that a real OTLP backend
-    exposes, storing every received export request in memory so step
-    definitions can assert on the state the server emitted.
+    Runs a tiny ThreadingHTTPServer that accepts POSTs to `/v1/traces`
+    and `/v1/metrics`, parses the binary protobuf bodies into the
+    standard `Export*ServiceRequest` messages, and stores every received
+    request so step definitions can assert on the state the server emitted.
     """
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._trace_requests: list[Any] = []
         self._metric_requests: list[Any] = []
-        self.server: grpc.Server | None = None
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
         self.port: int | None = None
 
     def start(self) -> None:
-        """Bind a grpc.Server to a free port and register both servicers."""
-        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-        trace_service_pb2_grpc.add_TraceServiceServicer_to_server(
-            _TraceServicer(self), self.server,
+        """Bind a ThreadingHTTPServer to a free port and serve in the background."""
+        collector = self
+        handler_cls = _make_handler(collector)
+        self._server = ThreadingHTTPServer(("localhost", 0), handler_cls)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            daemon=True,
         )
-        metrics_service_pb2_grpc.add_MetricsServiceServicer_to_server(
-            _MetricsServicer(self), self.server,
-        )
-        self.port = self.server.add_insecure_port("localhost:0")
-        if self.port == 0:
-            raise RuntimeError("gRPC mock collector failed to bind")
-        self.server.start()
-        # Verify the server is actually accepting connections before returning
-        channel = grpc.insecure_channel(f"localhost:{self.port}")
-        try:
-            grpc.channel_ready_future(channel).result(timeout=5)
-        finally:
-            channel.close()
+        self._thread.start()
 
     def stop(self) -> None:
-        if self.server is not None:
-            self.server.stop(grace=1).wait()
-            self.server = None
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
 
     def record_trace(self, request: Any) -> None:
         with self._lock:
@@ -122,22 +111,45 @@ class MockOtlpCollector:
         return out
 
 
-class _TraceServicer(trace_service_pb2_grpc.TraceServiceServicer):
-    def __init__(self, collector: MockOtlpCollector) -> None:
-        self._collector = collector
+def _make_handler(collector: MockOtlpCollector) -> type[BaseHTTPRequestHandler]:
+    """Build a request handler class bound to a specific collector instance."""
 
-    def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
-        self._collector.record_trace(request)
-        return trace_service_pb2.ExportTraceServiceResponse()
+    class _OtlpHttpHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler protocol
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(content_length) if content_length > 0 else b""
 
+            if self.path == "/v1/traces":
+                request = trace_service_pb2.ExportTraceServiceRequest()
+                request.ParseFromString(body)
+                collector.record_trace(request)
+                response = trace_service_pb2.ExportTraceServiceResponse()
+                self._send_protobuf(response.SerializeToString())
+                return
 
-class _MetricsServicer(metrics_service_pb2_grpc.MetricsServiceServicer):
-    def __init__(self, collector: MockOtlpCollector) -> None:
-        self._collector = collector
+            if self.path == "/v1/metrics":
+                request = metrics_service_pb2.ExportMetricsServiceRequest()
+                request.ParseFromString(body)
+                collector.record_metrics(request)
+                response = metrics_service_pb2.ExportMetricsServiceResponse()
+                self._send_protobuf(response.SerializeToString())
+                return
 
-    def Export(self, request, context):  # noqa: N802 -- gRPC protocol requires this name
-        self._collector.record_metrics(request)
-        return metrics_service_pb2.ExportMetricsServiceResponse()
+            self.send_response(404)
+            self.end_headers()
+
+        def _send_protobuf(self, body: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 -- BaseHTTPRequestHandler protocol
+            # Silence default stderr access logging during tests.
+            return
+
+    return _OtlpHttpHandler
 
 
 # ---------- helpers used by the steps ----------
@@ -228,8 +240,24 @@ def _spawn_server(
     env.pop("GIT_PRISM_OTLP_HEADERS", None)
     env.pop("GIT_PRISM_SERVICE_NAME", None)
     env.pop("GIT_PRISM_SERVICE_VERSION", None)
+    # Scrub any inherited OpenTelemetry env vars from the parent shell
+    # (e.g. local SigNoz/OrbStack collector config). The opentelemetry-otlp
+    # SDK gives `OTEL_EXPORTER_OTLP_*` env vars higher precedence than the
+    # `with_endpoint()` builder call, so a stale parent env can silently
+    # redirect exports away from the mock collector.
+    for key in list(env):
+        if key.startswith("OTEL_"):
+            env.pop(key, None)
     if endpoint is not None:
         env["GIT_PRISM_OTLP_ENDPOINT"] = endpoint
+        # opentelemetry-otlp 0.28's HTTP exporter only appends `/v1/traces`
+        # and `/v1/metrics` when it reads the endpoint from
+        # `OTEL_EXPORTER_OTLP_ENDPOINT`. When the endpoint is provided via
+        # the `with_endpoint()` builder call (as production code does),
+        # the SDK posts to the endpoint as-is. Setting this env var lets
+        # the mock collector receive requests on the canonical signal
+        # paths, matching how a real OTLP backend would behave.
+        env["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
     proc = subprocess.Popen(  # noqa: S603 -- test harness, inputs are fixed strings
         [context.binary_path, "serve"],
         stdin=subprocess.PIPE,
