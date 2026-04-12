@@ -576,7 +576,15 @@ impl GitPrismServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for GitPrismServer {}
+impl ServerHandler for GitPrismServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        let mut info = rmcp::model::ServerInfo::default();
+        info.capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build();
+        info
+    }
+}
 
 pub async fn run_server() -> anyhow::Result<()> {
     let _telemetry = crate::telemetry::init();
@@ -721,6 +729,16 @@ mod tests {
             "expected exactly four MCP tools, found {}: {:?}",
             tools.len(),
             names
+        );
+    }
+
+    #[test]
+    fn it_advertises_tools_in_server_capabilities() {
+        let server = GitPrismServer::new();
+        let info = server.get_info();
+        assert!(
+            info.capabilities.tools.is_some(),
+            "ServerInfo must advertise tools capability so MCP clients call tools/list"
         );
     }
 
