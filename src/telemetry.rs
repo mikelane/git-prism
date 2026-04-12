@@ -123,12 +123,15 @@ pub fn init() -> TelemetryGuard {
         .with_resource(resource)
         .build();
 
-    // Install global meter provider
+    // Install global meter provider and tracing subscriber.
+    // In test builds both are skipped: the global subscriber is managed by
+    // #[traced_test] (its Once would be poisoned by a competing registration),
+    // and set_meter_provider triggers OpenTelemetry's internal tracing
+    // diagnostics which also install a global subscriber as a side effect.
+    #[cfg(not(test))]
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     // Initialize the tracing subscriber with the OTel layer.
-    // In test builds the global subscriber is managed by #[traced_test], so we
-    // skip subscriber registration to avoid poisoning tracing-test's Once.
     #[cfg(not(test))]
     {
         let tracer = tracer_provider.tracer("git-prism");

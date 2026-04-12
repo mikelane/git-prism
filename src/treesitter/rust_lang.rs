@@ -1,4 +1,4 @@
-use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
+use super::{body_hash_for_node, CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH};
 use tree_sitter::Parser;
 
 pub struct RustAnalyzer;
@@ -29,6 +29,7 @@ fn extract_functions_from_node(
     if depth >= MAX_RECURSION_DEPTH {
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
+            language = "rust",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;

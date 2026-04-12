@@ -39,6 +39,7 @@ fn collect_functions(
     if depth >= MAX_RECURSION_DEPTH {
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
+            language = "c",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;
@@ -100,6 +101,7 @@ fn collect_imports(
     if depth >= MAX_RECURSION_DEPTH {
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
+            language = "c",
             "tree-sitter depth guard fired: recursive walk truncated; some imports may be missing"
         );
         return;

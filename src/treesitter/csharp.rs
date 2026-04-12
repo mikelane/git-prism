@@ -79,6 +79,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
             if depth >= MAX_RECURSION_DEPTH {
                 tracing::warn!(
                     depth_limit = MAX_RECURSION_DEPTH,
+                    language = "csharp",
                     "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
                 );
                 return;
@@ -248,8 +249,9 @@ mod tests {
         assert_eq!(functions[0].name, "Utils.Format");
     }
 
+    // Checks both methods in one fixture; row > 0 ensures row+1 != row*1 and row+1 != row-1.
     #[test]
-    fn line_number_accuracy() {
+    fn it_reports_correct_line_numbers_for_methods_inside_namespace() {
         let source = br#"using System;
 
 namespace MyApp {
@@ -470,5 +472,35 @@ public class Foo {}
         let functions = result.expect("analyzer must return Ok on deeply-nested input");
         // Namespaces contain no methods, so no functions should be extracted.
         assert!(functions.is_empty());
+    }
+
+    /// Triangulation: moderately-nested namespaces with a class at the innermost level
+    /// must still be extracted — the depth guard must not fire on legitimate code.
+    ///
+    /// C#'s `visit_node` recurses into ALL children of non-class nodes, so each
+    /// semantic namespace level consumes several depth increments. This test uses
+    /// 10 levels — well within any reasonable limit — to prove the guard does not
+    /// erroneously block legitimate real-world code.
+    #[test]
+    fn it_extracts_class_from_moderately_nested_namespaces() {
+        const GENERATED_NESTING_LEVELS: usize = 10;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        source.push_str("public class Leaf { public void Run() {} }\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("}\n");
+        }
+
+        let analyzer = CSharpAnalyzer;
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        let leaf = functions.iter().find(|f| f.name == "Leaf.Run");
+        assert!(
+            leaf.is_some(),
+            "method inside class nested 10 levels deep must be extracted; got {} functions",
+            functions.len()
+        );
     }
 }

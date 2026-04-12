@@ -63,6 +63,7 @@ fn extract_functions_from_node(
     if depth >= MAX_RECURSION_DEPTH {
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
+            language = "typescript",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;

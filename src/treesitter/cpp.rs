@@ -48,6 +48,7 @@ fn collect_functions(
     if depth >= MAX_RECURSION_DEPTH {
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
+            language = "cpp",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;
@@ -115,11 +116,11 @@ fn collect_functions(
                     } else {
                         format!("{}::{}", scope.join("::"), raw_name)
                     };
-                    let sig = child.utf8_text(source).unwrap_or("").trim().to_string();
+                    let signature = child.utf8_text(source).unwrap_or("").trim().to_string();
                     let body_hash = sha256_hex(&source[child.start_byte()..child.end_byte()]);
                     functions.push(Function {
                         name: qualified,
-                        signature: sig,
+                        signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
                         body_hash,
@@ -155,6 +156,7 @@ fn collect_imports(
     if depth >= MAX_RECURSION_DEPTH {
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
+            language = "cpp",
             "tree-sitter depth guard fired: recursive walk truncated; some imports may be missing"
         );
         return;
