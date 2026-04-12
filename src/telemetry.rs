@@ -36,15 +36,15 @@ impl TelemetryGuard {
 /// an explicit timeout.
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(tp) = self.tracer_provider.take() {
-            if let Err(e) = tp.shutdown() {
-                eprintln!("git-prism: failed to flush traces on shutdown: {e}");
-            }
+        if let Some(tp) = self.tracer_provider.take()
+            && let Err(e) = tp.shutdown()
+        {
+            eprintln!("git-prism: failed to flush traces on shutdown: {e}");
         }
-        if let Some(mp) = self.meter_provider.take() {
-            if let Err(e) = mp.shutdown() {
-                eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
-            }
+        if let Some(mp) = self.meter_provider.take()
+            && let Err(e) = mp.shutdown()
+        {
+            eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
         }
     }
 }
