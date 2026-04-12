@@ -8,6 +8,16 @@ pre-push:
     test:
       run: env -u GIT_DIR -u GIT_WORK_TREE cargo test
 
+post-merge:
+  commands:
+    rebuild-binary:
+      run: nohup cargo build --release > /tmp/git-prism-build.log 2>&1 &
+
+post-rewrite:
+  commands:
+    rebuild-binary:
+      run: nohup cargo build --release > /tmp/git-prism-build.log 2>&1 &
+
 commit-msg:
   commands:
     validate-pr-refs:

@@ -576,7 +576,15 @@ impl GitPrismServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for GitPrismServer {}
+impl ServerHandler for GitPrismServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        let mut server_info = rmcp::model::ServerInfo::default();
+        server_info.capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .build();
+        server_info
+    }
+}
 
 pub async fn run_server() -> anyhow::Result<()> {
     let _telemetry = crate::telemetry::init();
@@ -643,6 +651,15 @@ mod tests {
         assert!(
             router.has_route("get_function_context"),
             "get_function_context must be registered as an MCP tool"
+        );
+    }
+
+    #[test]
+    fn it_returns_empty_map_when_entries_is_empty() {
+        let counts = functions_per_language_counts(&[]);
+        assert!(
+            counts.is_empty(),
+            "empty input must produce empty map, not panic or insert spurious entries"
         );
     }
 
@@ -722,6 +739,43 @@ mod tests {
             tools.len(),
             names
         );
+    }
+
+    #[test]
+    fn it_advertises_tools_in_server_capabilities() {
+        let server = GitPrismServer::new();
+        let server_info = server.get_info();
+        // Must be Some — None means MCP clients will never call tools/list.
+        // Must have list_changed == None — this server does not emit change notifications,
+        // so advertising Some(true) would be a lie that breaks conformant clients.
+        assert_eq!(
+            server_info.capabilities.tools,
+            Some(rmcp::model::ToolsCapability { list_changed: None }),
+            "tools capability must be enabled with list_changed=None (static tool set, no notifications)"
+        );
+    }
+
+    #[test]
+    fn it_does_not_advertise_resources_or_prompts_capabilities() {
+        // Advertising unimplemented capabilities causes MCP clients to call endpoints
+        // that do not exist, producing confusing errors.
+        let server = GitPrismServer::new();
+        let info = server.get_info();
+        assert!(
+            info.capabilities.resources.is_none(),
+            "resources capability must not be advertised — this server does not implement resources"
+        );
+        assert!(
+            info.capabilities.prompts.is_none(),
+            "prompts capability must not be advertised — this server does not implement prompts"
+        );
+    }
+
+    #[test]
+    fn it_labels_all_change_scope_variants() {
+        assert_eq!(change_scope_label(ChangeScope::Committed), "committed");
+        assert_eq!(change_scope_label(ChangeScope::Staged), "staged");
+        assert_eq!(change_scope_label(ChangeScope::Unstaged), "unstaged");
     }
 
     #[test]
