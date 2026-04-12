@@ -1,4 +1,6 @@
-use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node, sha256_hex};
+use super::{
+    CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node, sha256_hex,
+};
 use tree_sitter::Parser;
 
 pub struct CAnalyzer;
@@ -28,7 +30,15 @@ fn is_preprocessor_container(kind: &str) -> bool {
     )
 }
 
-fn collect_functions(node: &tree_sitter::Node, source: &[u8], functions: &mut Vec<Function>) {
+fn collect_functions(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    functions: &mut Vec<Function>,
+    depth: usize,
+) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -70,14 +80,22 @@ fn collect_functions(node: &tree_sitter::Node, source: &[u8], functions: &mut Ve
                 }
             }
             kind if is_preprocessor_container(kind) => {
-                collect_functions(&child, source, functions);
+                collect_functions(&child, source, functions, depth + 1);
             }
             _ => {}
         }
     }
 }
 
-fn collect_imports(node: &tree_sitter::Node, source: &[u8], imports: &mut Vec<String>) {
+fn collect_imports(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    imports: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -86,7 +104,7 @@ fn collect_imports(node: &tree_sitter::Node, source: &[u8], imports: &mut Vec<St
                 imports.push(text);
             }
             kind if is_preprocessor_container(kind) => {
-                collect_imports(&child, source, imports);
+                collect_imports(&child, source, imports, depth + 1);
             }
             _ => {}
         }
@@ -100,7 +118,7 @@ impl LanguageAnalyzer for CAnalyzer {
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse C source"))?;
         let mut functions = Vec::new();
-        collect_functions(&tree.root_node(), source, &mut functions);
+        collect_functions(&tree.root_node(), source, &mut functions, 0);
         Ok(functions)
     }
 
@@ -140,7 +158,7 @@ impl LanguageAnalyzer for CAnalyzer {
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse C source"))?;
         let mut imports = Vec::new();
-        collect_imports(&tree.root_node(), source, &mut imports);
+        collect_imports(&tree.root_node(), source, &mut imports, 0);
         Ok(imports)
     }
 }
@@ -343,6 +361,69 @@ void guarded(int x) {
         let imports = analyzer.extract_imports(source).unwrap();
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0], "#include <special.h>");
+    }
+
+    /// Security regression: deeply-nested preprocessor blocks used to stack-overflow
+    /// `collect_functions` because it recursed without a depth limit. An attacker committing
+    /// a C file with thousands of nested `#ifdef` blocks could crash git-prism during
+    /// `get_change_manifest`. The analyzer must now complete without crashing.
+    ///
+    /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
+    /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
+    #[test]
+    fn it_completes_without_overflow_on_deeply_nested_preproc_blocks() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("#ifdef MACRO_{i}\n"));
+        }
+        // Function is past the cap — it should not be extracted.
+        source.push_str("void deep_fn(void) {}\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("#endif\n");
+        }
+
+        let handle = std::thread::Builder::new()
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let analyzer = CAnalyzer;
+                analyzer.extract_functions(source.as_bytes())
+            })
+            .expect("spawn analyzer thread");
+
+        let result = handle
+            .join()
+            .expect("analyzer thread must not stack-overflow on deeply-nested input");
+        let functions = result.expect("analyzer must return Ok on deeply-nested input");
+        // Guard fires at depth 256 — the function at depth 5000 is not extracted.
+        assert!(functions.is_empty());
+    }
+
+    /// Triangulation: 255 nested `#ifdef` blocks with a function at the innermost level.
+    /// The guard fires at depth 256, so depth 255 must still allow extraction.
+    #[test]
+    fn it_extracts_functions_at_boundary_nesting_depth() {
+        const GENERATED_NESTING_LEVELS: usize = 255;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("#ifdef MACRO_{i}\n"));
+        }
+        source.push_str("void leaf_fn(void) {}\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("#endif\n");
+        }
+
+        let analyzer = CAnalyzer;
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        assert_eq!(
+            functions.len(),
+            1,
+            "function at depth 255 must be extracted"
+        );
+        assert_eq!(functions[0].name, "leaf_fn");
     }
 
     #[test]

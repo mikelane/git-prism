@@ -1,8 +1,8 @@
-use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node};
+use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
 use tree_sitter::Parser;
 
 #[derive(Debug, Clone, Copy)]
-pub enum JsDialect {
+enum JsDialect {
     TypeScript,
     Tsx,
     JavaScript,
@@ -58,7 +58,11 @@ fn extract_functions_from_node(
     node: &tree_sitter::Node,
     class_name: Option<&str>,
     functions: &mut Vec<Function>,
+    depth: usize,
 ) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -103,7 +107,13 @@ fn extract_functions_from_node(
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
                 if let Some(body) = child.child_by_field_name("body") {
-                    extract_functions_from_node(source, &body, Some(cls_name), functions);
+                    extract_functions_from_node(
+                        source,
+                        &body,
+                        Some(cls_name),
+                        functions,
+                        depth + 1,
+                    );
                 }
             }
             "lexical_declaration" => {
@@ -133,7 +143,7 @@ fn extract_functions_from_node(
                 }
             }
             "export_statement" => {
-                extract_functions_from_node(source, &child, class_name, functions);
+                extract_functions_from_node(source, &child, class_name, functions, depth + 1);
             }
             _ => {}
         }
@@ -148,7 +158,7 @@ impl LanguageAnalyzer for TypeScriptAnalyzer {
             .ok_or_else(|| anyhow::anyhow!("Failed to parse source"))?;
         let root = tree.root_node();
         let mut functions = Vec::new();
-        extract_functions_from_node(source, &root, None, &mut functions);
+        extract_functions_from_node(source, &root, None, &mut functions, 0);
         Ok(functions)
     }
 
@@ -479,6 +489,78 @@ class Greeter {
         let analyzer = TypeScriptAnalyzer::typescript();
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Defense-in-depth: deeply-nested TypeScript export_statement and class_declaration
+    /// bodies are guarded by `MAX_RECURSION_DEPTH`. The two recursion sites in
+    /// `extract_functions_from_node` are `class_declaration` body and `export_statement`.
+    ///
+    /// Investigation per the plan: valid TypeScript syntax does not allow
+    /// `class A { class B {} }` at the declaration level, and the tree-sitter
+    /// TypeScript grammar's error recovery produces ERROR nodes (not nested
+    /// `class_declaration` nodes) for malformed input. Similarly, stacked `export`
+    /// keywords are parse errors and error-recover to a single `export_statement`
+    /// wrapping the inner tokens, not to recursively nested `export_statement` nodes.
+    /// Because the walker's match is explicit (`"export_statement"` and `"class_declaration"`),
+    /// ERROR-kind nodes are invisible to the recursion path.
+    ///
+    /// Guard added for defense-in-depth and consistency. This test verifies the
+    /// walker completes without crashing on a deeply-nested (but grammar-limited)
+    /// export chain, and that extraction still works correctly.
+    #[test]
+    fn it_completes_without_overflow_on_deeply_stacked_export_keywords() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+        // Stacked `export` keywords — tree-sitter error-recovers these, so
+        // they don't produce nested export_statement nodes in practice.
+        // The test still validates the analyzer handles the input safely.
+        let mut source = String::new();
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("export ");
+        }
+        source.push_str("class C {}\n");
+
+        let handle = std::thread::Builder::new()
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let analyzer = TypeScriptAnalyzer::typescript();
+                analyzer.extract_functions(source.as_bytes())
+            })
+            .expect("spawn analyzer thread");
+
+        let result = handle
+            .join()
+            .expect("analyzer thread must not stack-overflow on deeply-nested input");
+        result.expect("analyzer must return Ok on deeply-nested input");
+        // No assertion on function count — the parse tree shape is grammar-dependent.
+    }
+
+    /// Triangulation: sequential exported classes with methods must all extract.
+    /// This confirms the guard does not fire on legitimate export_statement usage.
+    /// NOTE: These are sequential (not nested) exports — each recurses at depth 1,
+    /// not depth 255. This tests non-regression of the export_statement arm, not
+    /// the depth-boundary property (tree-sitter error-recovers stacked `export`
+    /// keywords to a single export_statement, so true depth-255 nesting via exports
+    /// is not achievable with valid or error-recovered TypeScript syntax).
+    #[test]
+    fn it_extracts_methods_from_exported_classes() {
+        const CLASS_COUNT: usize = 255;
+
+        // Build 255 sequential (not nested) exported classes each with a method,
+        // to confirm the export_statement arm still works at high volume.
+        let mut source = String::new();
+        for i in 0..CLASS_COUNT {
+            source.push_str(&format!("export class C{i} {{ method{i}(): void {{}} }}\n"));
+        }
+
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        assert_eq!(
+            functions.len(),
+            CLASS_COUNT,
+            "all {CLASS_COUNT} methods must be extracted"
+        );
     }
 
     #[test]

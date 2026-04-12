@@ -1,4 +1,6 @@
-use super::{CallSite, Function, LanguageAnalyzer, body_hash_for_node, sha256_hex};
+use super::{
+    CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node, sha256_hex,
+};
 use tree_sitter::Parser;
 
 pub struct CppAnalyzer;
@@ -41,7 +43,11 @@ fn collect_functions(
     source: &[u8],
     scope: &[String],
     functions: &mut Vec<Function>,
+    depth: usize,
 ) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -57,7 +63,7 @@ fn collect_functions(
                     new_scope.push(ns_name);
                 }
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_functions(&body, source, &new_scope, functions);
+                    collect_functions(&body, source, &new_scope, functions, depth + 1);
                 }
             }
             "class_specifier" | "struct_specifier" => {
@@ -72,7 +78,7 @@ fn collect_functions(
                     new_scope.push(class_name);
                 }
                 if let Some(body) = child.child_by_field_name("body") {
-                    collect_functions(&body, source, &new_scope, functions);
+                    collect_functions(&body, source, &new_scope, functions, depth + 1);
                 }
             }
             "function_definition" => {
@@ -123,20 +129,28 @@ fn collect_functions(
             // linkage_specification itself walks its direct children; the
             // declaration_list arm below handles the braced case.
             "linkage_specification" => {
-                collect_functions(&child, source, scope, functions);
+                collect_functions(&child, source, scope, functions, depth + 1);
             }
             "declaration_list" => {
-                collect_functions(&child, source, scope, functions);
+                collect_functions(&child, source, scope, functions, depth + 1);
             }
             kind if is_preprocessor_container(kind) => {
-                collect_functions(&child, source, scope, functions);
+                collect_functions(&child, source, scope, functions, depth + 1);
             }
             _ => {}
         }
     }
 }
 
-fn collect_imports(node: &tree_sitter::Node, source: &[u8], imports: &mut Vec<String>) {
+fn collect_imports(
+    node: &tree_sitter::Node,
+    source: &[u8],
+    imports: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth >= MAX_RECURSION_DEPTH {
+        return;
+    }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         match child.kind() {
@@ -145,7 +159,7 @@ fn collect_imports(node: &tree_sitter::Node, source: &[u8], imports: &mut Vec<St
                 imports.push(text);
             }
             kind if is_preprocessor_container(kind) => {
-                collect_imports(&child, source, imports);
+                collect_imports(&child, source, imports, depth + 1);
             }
             _ => {}
         }
@@ -159,7 +173,7 @@ impl LanguageAnalyzer for CppAnalyzer {
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse C++ source"))?;
         let mut functions = Vec::new();
-        collect_functions(&tree.root_node(), source, &[], &mut functions);
+        collect_functions(&tree.root_node(), source, &[], &mut functions, 0);
         Ok(functions)
     }
 
@@ -209,7 +223,7 @@ impl LanguageAnalyzer for CppAnalyzer {
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("Failed to parse C++ source"))?;
         let mut imports = Vec::new();
-        collect_imports(&tree.root_node(), source, &mut imports);
+        collect_imports(&tree.root_node(), source, &mut imports, 0);
         Ok(imports)
     }
 }
@@ -514,6 +528,67 @@ void unix_init() { return; }
         let analyzer = CppAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Security regression: deeply-nested namespace declarations used to stack-overflow
+    /// `collect_functions` because it recursed without a depth limit. An attacker committing
+    /// a C++ file with thousands of nested namespaces could crash git-prism during
+    /// `get_change_manifest`. The analyzer must now complete without crashing.
+    ///
+    /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
+    /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
+    #[test]
+    fn it_completes_without_overflow_on_deeply_nested_namespaces() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("}\n");
+        }
+
+        let handle = std::thread::Builder::new()
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
+            .spawn(move || {
+                let analyzer = CppAnalyzer;
+                analyzer.extract_functions(source.as_bytes())
+            })
+            .expect("spawn analyzer thread");
+
+        let result = handle
+            .join()
+            .expect("analyzer thread must not stack-overflow on deeply-nested input");
+        let functions = result.expect("analyzer must return Ok on deeply-nested input");
+        // Namespaces contain no functions themselves — everything past the cap is guarded out.
+        assert!(functions.is_empty());
+    }
+
+    /// Triangulation: 255 nested namespaces with a function at the innermost level.
+    /// The guard fires at depth 256, so depth 255 must still allow extraction.
+    #[test]
+    fn it_extracts_functions_at_boundary_nesting_depth() {
+        const GENERATED_NESTING_LEVELS: usize = 255;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        source.push_str("void leaf_fn() {}\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("}\n");
+        }
+
+        let analyzer = CppAnalyzer;
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        assert_eq!(
+            functions.len(),
+            1,
+            "function at depth 255 must be extracted"
+        );
+        assert!(functions[0].name.ends_with("leaf_fn"));
     }
 
     #[test]
