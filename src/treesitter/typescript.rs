@@ -509,7 +509,6 @@ class Greeter {
     ///
     /// The warn! is present for when a future grammar version produces such nesting.
     /// The triangulation test below confirms shallow input never emits the warning.
-
     /// Triangulation: shallow input must NOT emit the depth-guard warning.
     #[test]
     #[traced_test]

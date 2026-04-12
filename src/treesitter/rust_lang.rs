@@ -1,4 +1,4 @@
-use super::{body_hash_for_node, CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH};
+use super::{CallSite, Function, LanguageAnalyzer, MAX_RECURSION_DEPTH, body_hash_for_node};
 use tree_sitter::Parser;
 
 pub struct RustAnalyzer;
