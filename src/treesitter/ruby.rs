@@ -27,6 +27,12 @@ fn extract_functions_from_node(
     depth: usize,
 ) {
     if depth >= MAX_RECURSION_DEPTH {
+        tracing::warn!(
+            depth_limit = MAX_RECURSION_DEPTH,
+            language = "ruby",
+            operation = "functions",
+            "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+        );
         return;
     }
     let mut cursor = node.walk();
@@ -177,6 +183,7 @@ impl LanguageAnalyzer for RubyAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_standalone_method() {
@@ -369,31 +376,64 @@ end
         assert!(calls.is_empty());
     }
 
-    /// Security regression: deeply-nested class declarations used to stack-overflow
-    /// `extract_functions_from_node` because it recursed into each class body without
-    /// a depth limit. An attacker committing a Ruby file with thousands of nested
-    /// class blocks could crash git-prism during `get_change_manifest`. The analyzer
-    /// must now complete without crashing.
+    /// Depth-guard warning: when `extract_functions_from_node` hits MAX_RECURSION_DEPTH
+    /// it must emit a tracing::warn! so operators can observe truncation in logs/OTLP.
     ///
-    /// Runs on a thread with a bounded 512KB stack to force the crash to be
-    /// reproducible regardless of the host's default stack size.
+    /// Uses 300 nesting levels — past MAX_RECURSION_DEPTH (256) but shallow enough
+    /// to run on the default test stack without spawning a new thread.
     #[test]
-    fn deeply_nested_classes_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        // 2 MB: roomy enough for bounded recursion to `MAX_RECURSION_DEPTH`
-        // but far too small for unbounded recursion to 5000 frames.
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_classes() {
+        const GENERATED_NESTING_LEVELS: usize = 300;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("class C{i}\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("end\n");
+        }
+
+        let analyzer = RubyAnalyzer;
+        let _ = analyzer.extract_functions(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"ruby\""));
+        assert!(logs_contain("operation=\"functions\""));
+    }
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_input() {
+        let source = b"class Foo\n  def bar\n  end\nend\n";
+        let analyzer = RubyAnalyzer;
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
+    }
+
+    /// Security regression: deeply-nested Ruby class declarations used to stack-overflow
+    /// `extract_functions_from_node` because it recursed into each class body without
+    /// a depth limit. An attacker committing a file with thousands of nested class
+    /// blocks could crash git-prism during `get_change_manifest`. The analyzer
+    /// must now complete without crashing.
+    ///
+    /// Runs on a thread with a 2 MB stack: roomy enough for bounded recursion to
+    /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
+    #[test]
+    fn deeply_nested_classes_do_not_stack_overflow() {
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("class C{i}\n"));
+        }
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("end\n");
         }
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = RubyAnalyzer;
                 analyzer.extract_functions(source.as_bytes())
@@ -404,12 +444,47 @@ end
             .join()
             .expect("analyzer thread must not stack-overflow on deeply-nested input");
         let functions = result.expect("analyzer must return Ok on deeply-nested input");
-        // At least the outermost classes (up to MAX_RECURSION_DEPTH) must be
-        // returned — the depth guard truncates deeper nesting but preserves
-        // whatever extraction completed successfully.
+        // The guard fires at MAX_RECURSION_DEPTH (256) — at least that many classes
+        // must be extracted before truncation. Asserting >= MAX_RECURSION_DEPTH catches
+        // regressions where the guard fires too early (e.g., at depth 10).
         assert!(
-            !functions.is_empty(),
-            "expected partial extraction to include outer classes"
+            functions.len() >= MAX_RECURSION_DEPTH,
+            "expected at least {} classes extracted before depth guard fires, got {}",
+            MAX_RECURSION_DEPTH,
+            functions.len()
+        );
+    }
+
+    /// Triangulation: 255 nested classes with a method at the innermost level.
+    /// The guard fires at depth 256, so the class body at depth 255 must still
+    /// be visited, allowing the method inside to be extracted.
+    ///
+    /// `extract_functions_from_node` is called with `depth + 1` when recursing
+    /// into a class body, so class C254's body is visited at depth 255 — below
+    /// MAX_RECURSION_DEPTH (256). The method inside the innermost class must appear
+    /// in the result.
+    #[test]
+    fn it_extracts_methods_at_boundary_nesting_depth() {
+        const GENERATED_NESTING_LEVELS: usize = 255;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("class C{i}\n"));
+        }
+        // Method at the innermost class body — depth 255 when visited.
+        source.push_str("def leaf_method\n");
+        source.push_str("end\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("end\n");
+        }
+
+        let analyzer = RubyAnalyzer;
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        let leaf = functions.iter().find(|f| f.name.ends_with("leaf_method"));
+        assert!(
+            leaf.is_some(),
+            "method at depth 255 must be extracted; got {} functions",
+            functions.len()
         );
     }
 }

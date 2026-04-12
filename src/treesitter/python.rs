@@ -28,6 +28,12 @@ fn extract_functions_from_node(
     depth: usize,
 ) {
     if depth >= MAX_RECURSION_DEPTH {
+        tracing::warn!(
+            depth_limit = MAX_RECURSION_DEPTH,
+            language = "python",
+            operation = "functions",
+            "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+        );
         return;
     }
     let mut cursor = node.walk();
@@ -161,6 +167,7 @@ impl LanguageAnalyzer for PythonAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_simple_function() {
@@ -334,6 +341,41 @@ class MyClass:
         let analyzer = PythonAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    /// Depth-guard warning: when `extract_functions_from_node` hits MAX_RECURSION_DEPTH
+    /// it must emit a tracing::warn! so operators can observe truncation in logs/OTLP.
+    ///
+    /// Uses 300 nesting levels — past MAX_RECURSION_DEPTH (256) but shallow enough
+    /// to run on the default test stack without spawning a new thread.
+    #[test]
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_classes() {
+        const GENERATED_NESTING_LEVELS: usize = 300;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            let indent = "    ".repeat(i);
+            source.push_str(&format!("{indent}class C{i}:\n"));
+        }
+        let deepest_indent = "    ".repeat(GENERATED_NESTING_LEVELS);
+        source.push_str(&format!("{deepest_indent}pass\n"));
+
+        let analyzer = PythonAnalyzer;
+        let _ = analyzer.extract_functions(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"python\""));
+        assert!(logs_contain("operation=\"functions\""));
+    }
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_input() {
+        let source = b"class Foo:\n    def bar(self):\n        pass\n";
+        let analyzer = PythonAnalyzer;
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
     }
 
     /// Defense-in-depth: deeply-nested Python class declarations are guarded by

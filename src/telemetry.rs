@@ -1,8 +1,10 @@
 use std::time::Duration;
 
+#[cfg(not(test))]
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider};
+#[cfg(not(test))]
 use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
 const DEFAULT_SERVICE_NAME: &str = "git-prism";
@@ -113,8 +115,6 @@ pub fn init() -> TelemetryGuard {
         .with_resource(resource.clone())
         .build();
 
-    let tracer = tracer_provider.tracer("git-prism");
-
     // Meter provider
     let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metrics_exporter).build();
 
@@ -123,15 +123,22 @@ pub fn init() -> TelemetryGuard {
         .with_resource(resource)
         .build();
 
-    // Install global meter provider
+    // Install global meter provider and tracing subscriber.
+    // In test builds both are skipped: the global subscriber is managed by
+    // #[traced_test] (its Once would be poisoned by a competing registration),
+    // and set_meter_provider triggers OpenTelemetry's internal tracing
+    // diagnostics which also install a global subscriber as a side effect.
+    #[cfg(not(test))]
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-    // Set up the tracing-opentelemetry layer
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // Initialize the tracing subscriber with the OTel layer
-    if let Err(e) = Registry::default().with(otel_layer).try_init() {
-        eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
+    // Initialize the tracing subscriber with the OTel layer.
+    #[cfg(not(test))]
+    {
+        let tracer = tracer_provider.tracer("git-prism");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        if let Err(e) = Registry::default().with(otel_layer).try_init() {
+            eprintln!("git-prism: failed to initialize tracing subscriber: {e}");
+        }
     }
 
     TelemetryGuard {

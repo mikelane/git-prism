@@ -77,6 +77,12 @@ impl LanguageAnalyzer for CSharpAnalyzer {
             depth: usize,
         ) {
             if depth >= MAX_RECURSION_DEPTH {
+                tracing::warn!(
+                    depth_limit = MAX_RECURSION_DEPTH,
+                    language = "csharp",
+                    operation = "functions",
+                    "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+                );
                 return;
             }
             match node.kind() {
@@ -172,6 +178,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_simple_method() {
@@ -243,8 +250,9 @@ mod tests {
         assert_eq!(functions[0].name, "Utils.Format");
     }
 
+    // Checks both methods in one fixture; row > 0 ensures row+1 != row*1 and row+1 != row-1.
     #[test]
-    fn line_number_accuracy() {
+    fn it_reports_correct_line_numbers_for_methods_inside_namespace() {
         let source = br#"using System;
 
 namespace MyApp {
@@ -392,6 +400,48 @@ public class Foo {}
     /// a C# file with thousands of nested namespaces could crash git-prism during
     /// `get_change_manifest`. The analyzer must now complete without crashing.
     ///
+    /// Depth-guard warning: when `visit_node` hits MAX_RECURSION_DEPTH it must emit
+    /// a tracing::warn! so operators can observe truncation in logs/OTLP.
+    ///
+    /// Uses 300 nesting levels — well past MAX_RECURSION_DEPTH (256) but shallow
+    /// enough to run on the default test stack without spawning a new thread.
+    /// `#[traced_test]` only captures logs from the current thread, so we must
+    /// avoid spawning a new thread here.
+    #[test]
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_namespaces() {
+        const GENERATED_NESTING_LEVELS: usize = 300;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("}\n");
+        }
+
+        let analyzer = CSharpAnalyzer;
+        let _ = analyzer.extract_functions(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"csharp\""));
+        assert!(logs_contain("operation=\"functions\""));
+    }
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_input() {
+        let source = br#"namespace MyApp {
+    public class Service {
+        public void Run() {}
+    }
+}
+"#;
+        let analyzer = CSharpAnalyzer;
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
+    }
+
     /// Uses nested namespaces (not classes) because `visit_node` stops recursing at
     /// a `class_declaration`, but falls through and recurses into children for any
     /// other node kind — including `namespace_declaration`.
@@ -400,19 +450,19 @@ public class Foo {}
     /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
     #[test]
     fn deeply_nested_namespaces_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("namespace N{i} {{\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = CSharpAnalyzer;
                 analyzer.extract_functions(source.as_bytes())
@@ -425,5 +475,35 @@ public class Foo {}
         let functions = result.expect("analyzer must return Ok on deeply-nested input");
         // Namespaces contain no methods, so no functions should be extracted.
         assert!(functions.is_empty());
+    }
+
+    /// Triangulation: moderately-nested namespaces with a class at the innermost level
+    /// must still be extracted — the depth guard must not fire on legitimate code.
+    ///
+    /// C#'s `visit_node` recurses into ALL children of non-class nodes, so each
+    /// semantic namespace level consumes several depth increments. This test uses
+    /// 10 levels — well within any reasonable limit — to prove the guard does not
+    /// erroneously block legitimate real-world code.
+    #[test]
+    fn it_extracts_class_from_moderately_nested_namespaces() {
+        const GENERATED_NESTING_LEVELS: usize = 10;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        source.push_str("public class Leaf { public void Run() {} }\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("}\n");
+        }
+
+        let analyzer = CSharpAnalyzer;
+        let functions = analyzer.extract_functions(source.as_bytes()).unwrap();
+        let leaf = functions.iter().find(|f| f.name == "Leaf.Run");
+        assert!(
+            leaf.is_some(),
+            "method inside class nested 10 levels deep must be extracted; got {} functions",
+            functions.len()
+        );
     }
 }

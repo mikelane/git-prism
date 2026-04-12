@@ -46,6 +46,12 @@ fn collect_functions(
     depth: usize,
 ) {
     if depth >= MAX_RECURSION_DEPTH {
+        tracing::warn!(
+            depth_limit = MAX_RECURSION_DEPTH,
+            language = "cpp",
+            operation = "functions",
+            "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
+        );
         return;
     }
     let mut cursor = node.walk();
@@ -111,11 +117,11 @@ fn collect_functions(
                     } else {
                         format!("{}::{}", scope.join("::"), raw_name)
                     };
-                    let sig = child.utf8_text(source).unwrap_or("").trim().to_string();
+                    let signature = child.utf8_text(source).unwrap_or("").trim().to_string();
                     let body_hash = sha256_hex(&source[child.start_byte()..child.end_byte()]);
                     functions.push(Function {
                         name: qualified,
-                        signature: sig,
+                        signature,
                         start_line: child.start_position().row + 1,
                         end_line: child.end_position().row + 1,
                         body_hash,
@@ -149,6 +155,12 @@ fn collect_imports(
     depth: usize,
 ) {
     if depth >= MAX_RECURSION_DEPTH {
+        tracing::warn!(
+            depth_limit = MAX_RECURSION_DEPTH,
+            language = "cpp",
+            operation = "imports",
+            "tree-sitter depth guard fired: recursive walk truncated; some imports may be missing"
+        );
         return;
     }
     let mut cursor = node.walk();
@@ -231,6 +243,7 @@ impl LanguageAnalyzer for CppAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn extracts_class_method() {
@@ -644,5 +657,68 @@ void inner_fn() {
         let functions = analyzer.extract_functions(source).unwrap();
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "inner_fn");
+    }
+
+    /// Depth-guard warning: deeply-nested namespaces must emit the warning when truncated.
+    #[test]
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_namespaces() {
+        const GENERATED_NESTING_LEVELS: usize = 300;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("namespace N{i} {{\n"));
+        }
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("}\n");
+        }
+
+        let analyzer = CppAnalyzer;
+        let _ = analyzer.extract_functions(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"cpp\""));
+        assert!(logs_contain("operation=\"functions\""));
+    }
+
+    /// Triangulation: shallow input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_functions() {
+        let source = b"void foo() {}\nvoid bar() {}\n";
+        let analyzer = CppAnalyzer;
+        let _ = analyzer.extract_functions(source);
+        assert!(!logs_contain("depth guard fired"));
+    }
+
+    /// Depth-guard warning: deeply-nested preprocessor blocks in collect_imports must emit warning.
+    #[test]
+    #[traced_test]
+    fn it_emits_depth_guard_warning_on_deeply_nested_preproc_in_imports() {
+        const GENERATED_NESTING_LEVELS: usize = 300;
+
+        let mut source = String::new();
+        for i in 0..GENERATED_NESTING_LEVELS {
+            source.push_str(&format!("#ifdef MACRO_{i}\n"));
+        }
+        source.push_str("#include <deep.h>\n");
+        for _ in 0..GENERATED_NESTING_LEVELS {
+            source.push_str("#endif\n");
+        }
+
+        let analyzer = CppAnalyzer;
+        let _ = analyzer.extract_imports(source.as_bytes());
+        assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"cpp\""));
+        assert!(logs_contain("operation=\"imports\""));
+    }
+
+    /// Triangulation: shallow import input must NOT emit the depth-guard warning.
+    #[test]
+    #[traced_test]
+    fn it_does_not_emit_depth_guard_warning_on_shallow_imports() {
+        let source = b"#include <stdio.h>\n#include <stdlib.h>\n";
+        let analyzer = CppAnalyzer;
+        let _ = analyzer.extract_imports(source);
+        assert!(!logs_contain("depth guard fired"));
     }
 }
