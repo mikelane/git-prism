@@ -49,6 +49,7 @@ fn collect_functions(
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
             language = "cpp",
+            operation = "functions",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;
@@ -157,6 +158,7 @@ fn collect_imports(
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
             language = "cpp",
+            operation = "imports",
             "tree-sitter depth guard fired: recursive walk truncated; some imports may be missing"
         );
         return;
@@ -661,19 +663,21 @@ void inner_fn() {
     #[test]
     #[traced_test]
     fn it_emits_depth_guard_warning_on_deeply_nested_namespaces() {
-        const NESTING_DEPTH: usize = 300;
+        const GENERATED_NESTING_LEVELS: usize = 300;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("namespace N{i} {{\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let analyzer = CppAnalyzer;
         let _ = analyzer.extract_functions(source.as_bytes());
         assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"cpp\""));
+        assert!(logs_contain("operation=\"functions\""));
     }
 
     /// Triangulation: shallow input must NOT emit the depth-guard warning.
@@ -690,20 +694,22 @@ void inner_fn() {
     #[test]
     #[traced_test]
     fn it_emits_depth_guard_warning_on_deeply_nested_preproc_in_imports() {
-        const NESTING_DEPTH: usize = 300;
+        const GENERATED_NESTING_LEVELS: usize = 300;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("#ifdef MACRO_{i}\n"));
         }
         source.push_str("#include <deep.h>\n");
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("#endif\n");
         }
 
         let analyzer = CppAnalyzer;
         let _ = analyzer.extract_imports(source.as_bytes());
         assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"cpp\""));
+        assert!(logs_contain("operation=\"imports\""));
     }
 
     /// Triangulation: shallow import input must NOT emit the depth-guard warning.

@@ -80,6 +80,7 @@ impl LanguageAnalyzer for CSharpAnalyzer {
                 tracing::warn!(
                     depth_limit = MAX_RECURSION_DEPTH,
                     language = "csharp",
+                    operation = "functions",
                     "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
                 );
                 return;
@@ -409,19 +410,21 @@ public class Foo {}
     #[test]
     #[traced_test]
     fn it_emits_depth_guard_warning_on_deeply_nested_namespaces() {
-        const NESTING_DEPTH: usize = 300;
+        const GENERATED_NESTING_LEVELS: usize = 300;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("namespace N{i} {{\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let analyzer = CSharpAnalyzer;
         let _ = analyzer.extract_functions(source.as_bytes());
         assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"csharp\""));
+        assert!(logs_contain("operation=\"functions\""));
     }
 
     /// Triangulation: shallow input must NOT emit the depth-guard warning.
@@ -447,19 +450,19 @@ public class Foo {}
     /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
     #[test]
     fn deeply_nested_namespaces_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("namespace N{i} {{\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = CSharpAnalyzer;
                 analyzer.extract_functions(source.as_bytes())

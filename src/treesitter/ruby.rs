@@ -30,6 +30,7 @@ fn extract_functions_from_node(
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
             language = "ruby",
+            operation = "functions",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;
@@ -383,19 +384,21 @@ end
     #[test]
     #[traced_test]
     fn it_emits_depth_guard_warning_on_deeply_nested_classes() {
-        const NESTING_DEPTH: usize = 300;
+        const GENERATED_NESTING_LEVELS: usize = 300;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("class C{i}\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("end\n");
         }
 
         let analyzer = RubyAnalyzer;
         let _ = analyzer.extract_functions(source.as_bytes());
         assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"ruby\""));
+        assert!(logs_contain("operation=\"functions\""));
     }
 
     /// Triangulation: shallow input must NOT emit the depth-guard warning.
@@ -418,19 +421,19 @@ end
     /// `MAX_RECURSION_DEPTH` but far too small for unbounded recursion to 5000 frames.
     #[test]
     fn deeply_nested_classes_do_not_stack_overflow() {
-        const NESTING_DEPTH: usize = 5000;
-        const TEST_STACK_SIZE: usize = 2 * 1024 * 1024;
+        const GENERATED_NESTING_LEVELS: usize = 5000;
+        const CONSTRAINED_THREAD_STACK_BYTES: usize = 2 * 1024 * 1024;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("class C{i}\n"));
         }
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("end\n");
         }
 
         let handle = std::thread::Builder::new()
-            .stack_size(TEST_STACK_SIZE)
+            .stack_size(CONSTRAINED_THREAD_STACK_BYTES)
             .spawn(move || {
                 let analyzer = RubyAnalyzer;
                 analyzer.extract_functions(source.as_bytes())
@@ -441,12 +444,14 @@ end
             .join()
             .expect("analyzer thread must not stack-overflow on deeply-nested input");
         let functions = result.expect("analyzer must return Ok on deeply-nested input");
-        // At least the outermost classes (up to MAX_RECURSION_DEPTH) must be
-        // returned — the depth guard truncates deeper nesting but preserves
-        // whatever extraction completed successfully.
+        // The guard fires at MAX_RECURSION_DEPTH (256) — at least that many classes
+        // must be extracted before truncation. Asserting >= MAX_RECURSION_DEPTH catches
+        // regressions where the guard fires too early (e.g., at depth 10).
         assert!(
-            !functions.is_empty(),
-            "expected partial extraction to include outer classes"
+            functions.len() >= MAX_RECURSION_DEPTH,
+            "expected at least {} classes extracted before depth guard fires, got {}",
+            MAX_RECURSION_DEPTH,
+            functions.len()
         );
     }
 

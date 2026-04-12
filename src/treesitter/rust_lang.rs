@@ -30,6 +30,7 @@ fn extract_functions_from_node(
         tracing::warn!(
             depth_limit = MAX_RECURSION_DEPTH,
             language = "rust",
+            operation = "functions",
             "tree-sitter depth guard fired: recursive walk truncated; some functions may be missing"
         );
         return;
@@ -342,20 +343,22 @@ use anyhow::Result;
     #[test]
     #[traced_test]
     fn it_emits_depth_guard_warning_on_deeply_nested_impls() {
-        const NESTING_DEPTH: usize = 300;
+        const GENERATED_NESTING_LEVELS: usize = 300;
 
         let mut source = String::new();
-        for i in 0..NESTING_DEPTH {
+        for i in 0..GENERATED_NESTING_LEVELS {
             source.push_str(&format!("impl T{i} {{\n"));
         }
         source.push_str("fn leaf() {}\n");
-        for _ in 0..NESTING_DEPTH {
+        for _ in 0..GENERATED_NESTING_LEVELS {
             source.push_str("}\n");
         }
 
         let analyzer = RustAnalyzer;
         let _ = analyzer.extract_functions(source.as_bytes());
         assert!(logs_contain("depth guard fired"));
+        assert!(logs_contain("language=\"rust\""));
+        assert!(logs_contain("operation=\"functions\""));
     }
 
     /// Triangulation: shallow input must NOT emit the depth-guard warning.
