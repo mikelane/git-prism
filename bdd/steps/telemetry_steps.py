@@ -229,11 +229,10 @@ def _send_tool_call(
 ) -> None:
     """Send a JSON-RPC tools/call request, wait for the response, then shut down.
 
-    Closes stdin after reading the response to trigger a clean server shutdown
-    (which flushes the TelemetryGuard). Drains stdout and stderr via
-    ``proc.communicate()`` to avoid the canonical pipe-buffer deadlock that
-    bit this harness during PR #210 review. After shutdown, polls the mock
-    collector for OTLP delivery instead of sleeping.
+    Lets ``proc.communicate()`` close stdin itself to trigger a clean server
+    shutdown (which flushes the TelemetryGuard) and drain stdout + stderr in
+    one call. After shutdown, polls the mock collector for OTLP delivery
+    instead of sleeping.
     """
     request = {
         "jsonrpc": "2.0",
@@ -254,14 +253,12 @@ def _send_tool_call(
     tool_line = proc.stdout.readline()
     _assert_not_jsonrpc_error(tool_line, "tools/call")
 
-    # Close stdin to signal EOF → server shuts down → TelemetryGuard flushes.
-    try:
-        proc.stdin.close()
-    except (BrokenPipeError, ValueError):
-        pass  # stdin may already be closed if the server exited
-
-    # Drain remaining stdout + stderr with a timeout to avoid the canonical
-    # pipe-buffer deadlock that bit this test harness during PR #210 review.
+    # communicate() closes stdin internally (signaling EOF so the server
+    # shuts down and flushes its TelemetryGuard), then drains stdout and
+    # stderr concurrently. Explicitly closing stdin first causes a
+    # ValueError on Linux because communicate() still tries to flush it
+    # during its internal setup — macOS silently tolerates the double
+    # close but Linux raises "I/O operation on closed file".
     try:
         proc.communicate(timeout=10)
     except subprocess.TimeoutExpired:
@@ -447,15 +444,11 @@ def step_start_server_and_call_tool_invalid_ref(
 
 @when("I wait {seconds:d} seconds for any exports")
 def step_wait(context: Context, seconds: int) -> None:
-    # Close stdin on all server procs to trigger shutdown → telemetry flush,
-    # then drain stdout + stderr via communicate() so we don't deadlock on
-    # a full pipe buffer (the canonical proc.wait() hazard).
+    # communicate() closes stdin itself (triggering shutdown → telemetry
+    # flush) and then drains stdout + stderr so we don't deadlock on a full
+    # pipe buffer. Do NOT call proc.stdin.close() first: on Linux that
+    # causes communicate() to raise ValueError during its internal flush.
     for proc in getattr(context, "server_procs", []):
-        if proc.stdin and not proc.stdin.closed:
-            try:
-                proc.stdin.close()
-            except (BrokenPipeError, ValueError):
-                pass
         try:
             proc.communicate(timeout=seconds)
         except subprocess.TimeoutExpired:
@@ -680,20 +673,37 @@ def step_ref_pattern_bounded(context: Context, key: str) -> None:
 
 
 def _stop_server_procs(context: Context) -> None:
-    """Terminate any spawned git-prism processes, draining their pipes."""
+    """Terminate any spawned git-prism processes, draining their pipes.
+
+    Tolerates Popen objects that are mid-communicate or already half-dead:
+    if a prior communicate() call aborted before initializing its internal
+    state (e.g. a ValueError from a closed stdin on Linux), a second call
+    can raise AttributeError/ValueError/OSError. We swallow those here so
+    cleanup never cascades into a HOOK-ERROR that masks the real failure.
+    """
     procs = getattr(context, "server_procs", [])
     for proc in procs:
         if proc.poll() is not None:
             continue  # already exited
-        proc.terminate()
+        try:
+            proc.terminate()
+        except (ValueError, OSError):
+            pass
         try:
             proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
             try:
                 proc.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass  # zombie — log and move on
+            except (subprocess.TimeoutExpired, ValueError, OSError, AttributeError):
+                pass  # zombie or half-initialized Popen — move on
+        except (ValueError, OSError, AttributeError):
+            # Prior communicate() may have left Popen in a partially
+            # initialized state; force-kill and drain best-effort.
+            try:
+                proc.kill()
+            except (ValueError, OSError):
+                pass
     context.server_procs = []
 
 
