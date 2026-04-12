@@ -1,8 +1,10 @@
 use std::time::Duration;
 
+#[cfg(not(test))]
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{metrics::SdkMeterProvider, trace::SdkTracerProvider};
+#[cfg(not(test))]
 use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
 const DEFAULT_SERVICE_NAME: &str = "git-prism";
