@@ -211,7 +211,7 @@ mod tests {
             clear_telemetry_env();
             // Use a dummy endpoint — the exporter won't connect but providers
             // should still be created.
-            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
         }
         let guard = init();
         assert!(
@@ -239,7 +239,7 @@ mod tests {
         // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
-            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
         }
         let active_guard = init();
         // SAFETY: cleanup
@@ -256,7 +256,7 @@ mod tests {
         // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
         unsafe {
             clear_telemetry_env();
-            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4317");
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
             std::env::set_var(ENV_SERVICE_NAME, "custom-prism");
         }
         let guard = init();
