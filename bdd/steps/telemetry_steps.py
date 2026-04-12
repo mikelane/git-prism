@@ -166,6 +166,38 @@ def _get_collector(context: Context) -> MockOtlpCollector:
     return collector
 
 
+def _assert_not_jsonrpc_error(line: str, context: str) -> None:
+    """Assert that a JSON-RPC response line is not an error response.
+
+    Empty lines and non-JSON output are tolerated (the server may still be
+    initializing, or a stray log line may have been written). Only explicit
+    JSON-RPC error responses raise.
+    """
+    if not line.strip():
+        return
+    try:
+        response = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    if isinstance(response, dict) and "error" in response:
+        msg = f"Server returned JSON-RPC error in {context}: {response['error']}"
+        raise AssertionError(msg)
+
+
+def _wait_for_export(collector: MockOtlpCollector, timeout: float = 5.0) -> None:
+    """Poll the mock collector until at least one trace or metric request arrives.
+
+    Replaces the previous load-bearing ``time.sleep(0.5)``. Does not raise on
+    timeout — downstream assertions produce clearer failure messages pointing
+    at the missing telemetry data.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if collector.get_trace_requests() or collector.get_metric_requests():
+            return
+        time.sleep(0.05)
+
+
 def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
     """Send the MCP initialize handshake (request + notification) over stdin."""
     request = {
@@ -189,6 +221,7 @@ def _send_mcp_initialize(proc: subprocess.Popen[str]) -> None:
 
 
 def _send_tool_call(
+    context: Context,
     proc: subprocess.Popen[str],
     tool_name: str,
     arguments: dict[str, Any],
@@ -197,8 +230,10 @@ def _send_tool_call(
     """Send a JSON-RPC tools/call request, wait for the response, then shut down.
 
     Closes stdin after reading the response to trigger a clean server shutdown
-    (which flushes the TelemetryGuard). Waits for the process to exit so all
-    OTLP exports complete before assertions run.
+    (which flushes the TelemetryGuard). Drains stdout and stderr via
+    ``proc.communicate()`` to avoid the canonical pipe-buffer deadlock that
+    bit this harness during PR #210 review. After shutdown, polls the mock
+    collector for OTLP delivery instead of sleeping.
     """
     request = {
         "jsonrpc": "2.0",
@@ -211,22 +246,31 @@ def _send_tool_call(
     proc.stdin.write(json.dumps(request) + "\n")
     proc.stdin.flush()
 
-    # Read the tool response (blocks until the server writes it).
-    # The initialize response was already written but not consumed;
-    # read and discard it, then read the tool response.
-    proc.stdout.readline()  # initialize response
-    proc.stdout.readline()  # tool call response
+    # Read the two JSON-RPC responses. readline() is used intentionally —
+    # MCP over stdio writes one JSON-RPC message per line.
+    init_line = proc.stdout.readline()
+    _assert_not_jsonrpc_error(init_line, "initialize")
+
+    tool_line = proc.stdout.readline()
+    _assert_not_jsonrpc_error(tool_line, "tools/call")
 
     # Close stdin to signal EOF → server shuts down → TelemetryGuard flushes.
-    proc.stdin.close()
     try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-        proc.wait(timeout=5)
+        proc.stdin.close()
+    except (BrokenPipeError, ValueError):
+        pass  # stdin may already be closed if the server exited
 
-    # Give the OTLP exporter a moment to deliver to the collector.
-    time.sleep(0.5)
+    # Drain remaining stdout + stderr with a timeout to avoid the canonical
+    # pipe-buffer deadlock that bit this test harness during PR #210 review.
+    try:
+        proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate(timeout=5)
+
+    # Poll the collector for OTLP delivery instead of sleeping — avoids
+    # flaky CI on slow runners while keeping a bounded upper wait.
+    _wait_for_export(_get_collector(context))
 
 
 def _spawn_server(
@@ -371,6 +415,7 @@ def step_start_server_and_call_tool(context: Context, tool_name: str) -> None:
     proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
     _send_mcp_initialize(proc)
     _send_tool_call(
+        context,
         proc,
         tool_name,
         {"base_ref": "HEAD~1", "head_ref": "HEAD", "repo_path": repo_path},
@@ -389,6 +434,7 @@ def step_start_server_and_call_tool_invalid_ref(
     proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
     _send_mcp_initialize(proc)
     _send_tool_call(
+        context,
         proc,
         tool_name,
         {
@@ -401,20 +447,23 @@ def step_start_server_and_call_tool_invalid_ref(
 
 @when("I wait {seconds:d} seconds for any exports")
 def step_wait(context: Context, seconds: int) -> None:
-    # Close stdin on all server procs to trigger shutdown → telemetry flush.
+    # Close stdin on all server procs to trigger shutdown → telemetry flush,
+    # then drain stdout + stderr via communicate() so we don't deadlock on
+    # a full pipe buffer (the canonical proc.wait() hazard).
     for proc in getattr(context, "server_procs", []):
         if proc.stdin and not proc.stdin.closed:
-            proc.stdin.close()
-        try:
-            proc.wait(timeout=seconds)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
             try:
-                proc.wait(timeout=2)
+                proc.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass
+        try:
+            proc.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
-    # Give the OTLP exporter time to deliver.
-    time.sleep(1)
 
 
 # ---------- Assertions: metrics ----------
