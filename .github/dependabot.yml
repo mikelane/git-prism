@@ -10,10 +10,8 @@ updates:
     groups:
       opentelemetry:
         patterns:
-          - "opentelemetry"
-          - "opentelemetry_sdk"
-          - "opentelemetry-otlp"
-          - "tracing-opentelemetry"
+          - "opentelemetry*"
+          - "tracing-opentelemetry*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
