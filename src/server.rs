@@ -65,10 +65,7 @@ impl GitPrismServer {
     ///
     /// This is the cheapest tool in the toolkit and should be your first call
     /// for any "what changed between X and Y" question.
-    #[tool(
-        name = "get_change_manifest",
-        description = "Returns structured metadata about what changed between two git refs"
-    )]
+    #[tool(name = "get_change_manifest")]
     async fn get_change_manifest(
         &self,
         Parameters(args): Parameters<ManifestArgs>,
@@ -380,10 +377,7 @@ impl GitPrismServer {
     ///
     /// Returns complete before/after file content at two git refs for
     /// specified file paths.
-    #[tool(
-        name = "get_file_snapshots",
-        description = "Returns complete before/after file content at two git refs"
-    )]
+    #[tool(name = "get_file_snapshots")]
     async fn get_file_snapshots(
         &self,
         Parameters(args): Parameters<SnapshotArgs>,
@@ -498,10 +492,7 @@ impl GitPrismServer {
     /// This is the recommended second call after `get_change_manifest` when
     /// you need to assess blast radius or understand how changed functions
     /// are used.
-    #[tool(
-        name = "get_function_context",
-        description = "Returns callers, callees, and test references for each function that changed between two git refs"
-    )]
+    #[tool(name = "get_function_context")]
     async fn get_function_context(
         &self,
         Parameters(args): Parameters<ContextArgs>,
@@ -816,6 +807,57 @@ mod tests {
         assert_eq!(change_scope_label(ChangeScope::Committed), "committed");
         assert_eq!(change_scope_label(ChangeScope::Staged), "staged");
         assert_eq!(change_scope_label(ChangeScope::Unstaged), "unstaged");
+    }
+
+    /// Look up the MCP schema description for `tool_name` via the actual
+    /// router, so assertions run against the same metadata MCP clients see
+    /// over the wire (not just the doc comments in source).
+    fn schema_description_for(tool_name: &str) -> String {
+        let router = GitPrismServer::tool_router();
+        let tools = router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name.as_ref() == tool_name)
+            .unwrap_or_else(|| panic!("tool {tool_name} must be registered"));
+        tool.description
+            .as_deref()
+            .unwrap_or_else(|| panic!("tool {tool_name} must have a description in its MCP schema"))
+            .to_string()
+    }
+
+    #[test]
+    fn it_publishes_cost_warning_in_get_file_snapshots_schema() {
+        let desc = schema_description_for("get_file_snapshots");
+        assert!(
+            desc.contains("COST WARNING"),
+            "get_file_snapshots MCP schema description must include the cost warning \
+             (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("get_change_manifest"),
+            "get_file_snapshots MCP schema description must name the cheaper alternatives \
+             (issue #211). Got: {desc}"
+        );
+    }
+
+    #[test]
+    fn it_publishes_first_resort_hint_in_get_change_manifest_schema() {
+        let desc = schema_description_for("get_change_manifest");
+        assert!(
+            desc.contains("cheapest tool"),
+            "get_change_manifest MCP schema description must identify itself as the cheapest \
+             first-resort tool (issue #211). Got: {desc}"
+        );
+    }
+
+    #[test]
+    fn it_publishes_second_call_hint_in_get_function_context_schema() {
+        let desc = schema_description_for("get_function_context");
+        assert!(
+            desc.contains("recommended second call"),
+            "get_function_context MCP schema description must identify itself as the recommended \
+             second call (issue #211). Got: {desc}"
+        );
     }
 
     #[test]
