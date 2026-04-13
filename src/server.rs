@@ -838,6 +838,32 @@ mod tests {
             "get_file_snapshots MCP schema description must name the cheaper alternatives \
              (issue #211). Got: {desc}"
         );
+        assert!(
+            desc.contains("get_function_context"),
+            "get_file_snapshots MCP schema description must name get_function_context as the \
+             cheaper second-call alternative (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("line_range"),
+            "get_file_snapshots MCP schema description must mention line_range as a narrowing \
+             lever (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("include_before"),
+            "get_file_snapshots MCP schema description must mention include_before as a \
+             half-cost lever (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("one path at a time") || desc.contains("linearly"),
+            "get_file_snapshots MCP schema description must instruct agents to call with one \
+             path at a time / note that cost scales linearly (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("1.") && desc.contains("2.") && desc.contains("3."),
+            "get_file_snapshots MCP schema description must preserve the numbered 1/2/3 call \
+             ordering that tells agents to try get_change_manifest first, then \
+             get_function_context, then get_file_snapshots (issue #211). Got: {desc}"
+        );
     }
 
     #[test]
@@ -848,6 +874,21 @@ mod tests {
             "get_change_manifest MCP schema description must identify itself as the cheapest \
              first-resort tool (issue #211). Got: {desc}"
         );
+        assert!(
+            desc.contains("function-level") || desc.contains("function"),
+            "get_change_manifest MCP schema description must describe its function-level value \
+             proposition (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("import"),
+            "get_change_manifest MCP schema description must mention that it reports import \
+             changes (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("what changed"),
+            "get_change_manifest MCP schema description must use the 'what changed between X \
+             and Y' phrasing that orients agents (issue #211). Got: {desc}"
+        );
     }
 
     #[test]
@@ -857,6 +898,60 @@ mod tests {
             desc.contains("recommended second call"),
             "get_function_context MCP schema description must identify itself as the recommended \
              second call (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("callers"),
+            "get_function_context MCP schema description must mention callers — a core part of \
+             its value prop (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("callees"),
+            "get_function_context MCP schema description must mention callees — a core part of \
+             its value prop (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("get_change_manifest"),
+            "get_function_context MCP schema description must name get_change_manifest as its \
+             predecessor in the call order (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("blast radius"),
+            "get_function_context MCP schema description must mention blast radius as the \
+             reason to make the second call (issue #211). Got: {desc}"
+        );
+    }
+
+    #[test]
+    fn it_keeps_cost_warning_scoped_to_get_file_snapshots() {
+        // Regression: if a future copy-paste leaks the cost-warning banner to
+        // a different tool's description, catch it here. Only get_file_snapshots
+        // should carry the COST WARNING banner — the other tools are cheap
+        // first/second-resort and must not inherit it.
+        for tool_name in [
+            "get_change_manifest",
+            "get_function_context",
+            "get_commit_history",
+        ] {
+            let desc = schema_description_for(tool_name);
+            assert!(
+                !desc.contains("COST WARNING"),
+                "{tool_name} MCP schema description must NOT contain the cost-warning banner; \
+                 that text belongs only to get_file_snapshots. Got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn it_does_not_market_get_file_snapshots_as_a_first_or_second_resort() {
+        let desc = schema_description_for("get_file_snapshots");
+        assert!(
+            !desc.contains("cheapest tool"),
+            "get_file_snapshots description must NOT claim to be the cheapest tool. Got: {desc}"
+        );
+        assert!(
+            !desc.contains("recommended second call"),
+            "get_file_snapshots description must NOT claim to be the recommended second call. \
+             Got: {desc}"
         );
     }
 
