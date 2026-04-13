@@ -8,6 +8,16 @@ Agent-optimized git data MCP server. Four tools: `get_change_manifest` (structur
 
 Supports both commit-to-commit comparison (`main..HEAD`) and working tree comparison (`HEAD` alone), which shows staged and unstaged changes vs a base ref.
 
+## Tool Discipline (for agents calling git-prism)
+
+The three read tools have very different cost profiles. Agents should call them in this order:
+
+1. **`get_change_manifest`** — cheapest, first resort. Function-level change types, line counts, signature diffs, and import changes. Answers most "what changed?" questions in a few hundred tokens.
+2. **`get_function_context`** — second call. Callers, callees, test references, and blast radius for each changed function. Combined with (1), answers "what changed and what might break".
+3. **`get_file_snapshots`** — last resort, narrow use only. Returns raw before/after file content; a single default call can easily burn 5–20k tokens per file. Always pass `line_range` when you can, pass `include_before: false` when you don't need the comparison, and call with one path at a time.
+
+The `#[tool]` doc comments in `src/server.rs` encode this guidance so it reaches MCP clients directly — keep those in sync with any changes here.
+
 ## Build & Test
 
 ```bash

@@ -62,10 +62,10 @@ impl GitPrismServer {
     /// Returns structured metadata about what changed between two git refs,
     /// including file changes, function-level diffs, import changes, and
     /// dependency updates.
-    #[tool(
-        name = "get_change_manifest",
-        description = "Returns structured metadata about what changed between two git refs"
-    )]
+    ///
+    /// This is the cheapest tool in the toolkit and should be your first call
+    /// for any "what changed between X and Y" question.
+    #[tool(name = "get_change_manifest")]
     async fn get_change_manifest(
         &self,
         Parameters(args): Parameters<ManifestArgs>,
@@ -358,12 +358,26 @@ impl GitPrismServer {
         result
     }
 
+    /// ⚠ COST WARNING: This is the most expensive tool in the toolkit. A single
+    /// call with default flags returns (before_len + after_len) bytes PER path —
+    /// typically 5–20k tokens for a single modified source file.
+    ///
+    /// Before calling this tool:
+    /// 1. Call `get_change_manifest` first — it returns function-level change
+    ///    types, line counts, signature diffs, and import changes. For most
+    ///    "what changed?" questions this is all you need.
+    /// 2. Call `get_function_context` next — it returns callers, callees, and
+    ///    test references for every changed function. Combined with (1), this
+    ///    answers "what changed and what might break".
+    /// 3. Only call `get_file_snapshots` when you need to read the actual
+    ///    source of a specific hunk — and when you do:
+    ///    - Pass `line_range: [start, end]` to narrow the response
+    ///    - Pass `include_before: false` if you only need the current state
+    ///    - Call with one path at a time; token cost scales linearly
+    ///
     /// Returns complete before/after file content at two git refs for
     /// specified file paths.
-    #[tool(
-        name = "get_file_snapshots",
-        description = "Returns complete before/after file content at two git refs"
-    )]
+    #[tool(name = "get_file_snapshots")]
     async fn get_file_snapshots(
         &self,
         Parameters(args): Parameters<SnapshotArgs>,
@@ -474,10 +488,11 @@ impl GitPrismServer {
     /// Returns callers, callees, and test references for each function that
     /// changed between two git refs. Answers "what calls this function?" and
     /// "what does this function call?" without the agent having to grep.
-    #[tool(
-        name = "get_function_context",
-        description = "Returns callers, callees, and test references for each function that changed between two git refs"
-    )]
+    ///
+    /// This is the recommended second call after `get_change_manifest` when
+    /// you need to assess blast radius or understand how changed functions
+    /// are used.
+    #[tool(name = "get_function_context")]
     async fn get_function_context(
         &self,
         Parameters(args): Parameters<ContextArgs>,
@@ -792,6 +807,152 @@ mod tests {
         assert_eq!(change_scope_label(ChangeScope::Committed), "committed");
         assert_eq!(change_scope_label(ChangeScope::Staged), "staged");
         assert_eq!(change_scope_label(ChangeScope::Unstaged), "unstaged");
+    }
+
+    /// Look up the MCP schema description for `tool_name` via the actual
+    /// router, so assertions run against the same metadata MCP clients see
+    /// over the wire (not just the doc comments in source).
+    fn schema_description_for(tool_name: &str) -> String {
+        let router = GitPrismServer::tool_router();
+        let tools = router.list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name.as_ref() == tool_name)
+            .unwrap_or_else(|| panic!("tool {tool_name} must be registered"));
+        tool.description
+            .as_deref()
+            .unwrap_or_else(|| panic!("tool {tool_name} must have a description in its MCP schema"))
+            .to_string()
+    }
+
+    #[test]
+    fn it_publishes_cost_warning_in_get_file_snapshots_schema() {
+        let desc = schema_description_for("get_file_snapshots");
+        assert!(
+            desc.contains("COST WARNING"),
+            "get_file_snapshots MCP schema description must include the cost warning \
+             (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("get_change_manifest"),
+            "get_file_snapshots MCP schema description must name the cheaper alternatives \
+             (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("get_function_context"),
+            "get_file_snapshots MCP schema description must name get_function_context as the \
+             cheaper second-call alternative (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("line_range"),
+            "get_file_snapshots MCP schema description must mention line_range as a narrowing \
+             lever (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("include_before"),
+            "get_file_snapshots MCP schema description must mention include_before as a \
+             half-cost lever (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("one path at a time") || desc.contains("linearly"),
+            "get_file_snapshots MCP schema description must instruct agents to call with one \
+             path at a time / note that cost scales linearly (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("1.") && desc.contains("2.") && desc.contains("3."),
+            "get_file_snapshots MCP schema description must preserve the numbered 1/2/3 call \
+             ordering that tells agents to try get_change_manifest first, then \
+             get_function_context, then get_file_snapshots (issue #211). Got: {desc}"
+        );
+    }
+
+    #[test]
+    fn it_publishes_first_resort_hint_in_get_change_manifest_schema() {
+        let desc = schema_description_for("get_change_manifest");
+        assert!(
+            desc.contains("cheapest tool"),
+            "get_change_manifest MCP schema description must identify itself as the cheapest \
+             first-resort tool (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("function-level") || desc.contains("function"),
+            "get_change_manifest MCP schema description must describe its function-level value \
+             proposition (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("import"),
+            "get_change_manifest MCP schema description must mention that it reports import \
+             changes (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("what changed"),
+            "get_change_manifest MCP schema description must use the 'what changed between X \
+             and Y' phrasing that orients agents (issue #211). Got: {desc}"
+        );
+    }
+
+    #[test]
+    fn it_publishes_second_call_hint_in_get_function_context_schema() {
+        let desc = schema_description_for("get_function_context");
+        assert!(
+            desc.contains("recommended second call"),
+            "get_function_context MCP schema description must identify itself as the recommended \
+             second call (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("callers"),
+            "get_function_context MCP schema description must mention callers — a core part of \
+             its value prop (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("callees"),
+            "get_function_context MCP schema description must mention callees — a core part of \
+             its value prop (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("get_change_manifest"),
+            "get_function_context MCP schema description must name get_change_manifest as its \
+             predecessor in the call order (issue #211). Got: {desc}"
+        );
+        assert!(
+            desc.contains("blast radius"),
+            "get_function_context MCP schema description must mention blast radius as the \
+             reason to make the second call (issue #211). Got: {desc}"
+        );
+    }
+
+    #[test]
+    fn it_keeps_cost_warning_scoped_to_get_file_snapshots() {
+        // Regression: if a future copy-paste leaks the cost-warning banner to
+        // a different tool's description, catch it here. Only get_file_snapshots
+        // should carry the COST WARNING banner — the other tools are cheap
+        // first/second-resort and must not inherit it.
+        for tool_name in [
+            "get_change_manifest",
+            "get_function_context",
+            "get_commit_history",
+        ] {
+            let desc = schema_description_for(tool_name);
+            assert!(
+                !desc.contains("COST WARNING"),
+                "{tool_name} MCP schema description must NOT contain the cost-warning banner; \
+                 that text belongs only to get_file_snapshots. Got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn it_does_not_market_get_file_snapshots_as_a_first_or_second_resort() {
+        let desc = schema_description_for("get_file_snapshots");
+        assert!(
+            !desc.contains("cheapest tool"),
+            "get_file_snapshots description must NOT claim to be the cheapest tool. Got: {desc}"
+        );
+        assert!(
+            !desc.contains("recommended second call"),
+            "get_file_snapshots description must NOT claim to be the recommended second call. \
+             Got: {desc}"
+        );
     }
 
     #[test]
