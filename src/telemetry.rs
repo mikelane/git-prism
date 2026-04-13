@@ -18,7 +18,7 @@ const ENV_SERVICE_VERSION: &str = "GIT_PRISM_SERVICE_VERSION";
 
 /// Compute the per-signal OTLP HTTP endpoints from a base URL.
 ///
-/// `opentelemetry-otlp` 0.28's HTTP exporter does not auto-append the
+/// `opentelemetry-otlp`'s HTTP exporter does not auto-append the
 /// per-signal path (`/v1/traces`, `/v1/metrics`) when the endpoint is
 /// supplied via `with_endpoint()` — only the env-var-driven path
 /// (`OTEL_EXPORTER_OTLP_ENDPOINT`) triggers that behavior. We construct
