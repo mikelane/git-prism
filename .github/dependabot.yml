@@ -7,6 +7,11 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    groups:
+      opentelemetry:
+        patterns:
+          - "opentelemetry*"
+          - "tracing-opentelemetry*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
