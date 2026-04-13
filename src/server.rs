@@ -62,6 +62,9 @@ impl GitPrismServer {
     /// Returns structured metadata about what changed between two git refs,
     /// including file changes, function-level diffs, import changes, and
     /// dependency updates.
+    ///
+    /// This is the cheapest tool in the toolkit and should be your first call
+    /// for any "what changed between X and Y" question.
     #[tool(
         name = "get_change_manifest",
         description = "Returns structured metadata about what changed between two git refs"
@@ -358,6 +361,23 @@ impl GitPrismServer {
         result
     }
 
+    /// ⚠ COST WARNING: This is the most expensive tool in the toolkit. A single
+    /// call with default flags returns (before_len + after_len) bytes PER path —
+    /// typically 5–20k tokens for a single modified source file.
+    ///
+    /// Before calling this tool:
+    /// 1. Call `get_change_manifest` first — it returns function-level change
+    ///    types, line counts, signature diffs, and import changes. For most
+    ///    "what changed?" questions this is all you need.
+    /// 2. Call `get_function_context` next — it returns callers, callees, and
+    ///    test references for every changed function. Combined with (1), this
+    ///    answers "what changed and what might break".
+    /// 3. Only call `get_file_snapshots` when you need to read the actual
+    ///    source of a specific hunk — and when you do:
+    ///    - Pass `line_range: [start, end]` to narrow the response
+    ///    - Pass `include_before: false` if you only need the current state
+    ///    - Call with one path at a time; token cost scales linearly
+    ///
     /// Returns complete before/after file content at two git refs for
     /// specified file paths.
     #[tool(
@@ -474,6 +494,10 @@ impl GitPrismServer {
     /// Returns callers, callees, and test references for each function that
     /// changed between two git refs. Answers "what calls this function?" and
     /// "what does this function call?" without the agent having to grep.
+    ///
+    /// This is the recommended second call after `get_change_manifest` when
+    /// you need to assess blast radius or understand how changed functions
+    /// are used.
     #[tool(
         name = "get_function_context",
         description = "Returns callers, callees, and test references for each function that changed between two git refs"
