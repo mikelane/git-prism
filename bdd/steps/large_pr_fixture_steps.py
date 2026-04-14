@@ -1,8 +1,8 @@
 """Fixture builder for large-PR scenarios in the response-size guardrails feature.
 
 Builds a deterministic Rust repository with `file_count` source files, each
-containing `fns_per_file` functions with stable names (`function_01`,
-`function_02`, ...). Two commits are created: an initial commit with all
+containing `fns_per_file` functions with stable names (`function_0001`,
+`function_0002`, ...). Two commits are created: an initial commit with all
 functions returning `1`, and a modified commit where every function body is
 changed to return `2`. The git ref range between the two commits drives the
 When-steps for the ISSUE-212 scenarios.
@@ -23,19 +23,20 @@ from repo_setup_steps import _commit, _init_repo, _write_file
 def _rust_function(index: int, body_value: int) -> str:
     """Render one Rust function definition with a deterministic name.
 
-    Function names are zero-padded so lexicographic sort matches numeric sort
-    up to `function_99`. Bodies are just integer literals — tree-sitter does
-    not care about semantics.
+    Function names are zero-padded to four digits so lexicographic sort
+    matches numeric sort all the way up to `function_9999` — wide enough for
+    the 1000-function stress fixture. Bodies are just integer literals —
+    tree-sitter does not care about semantics.
     """
-    name = f"function_{index:02d}"
+    name = f"function_{index:04d}"
     return f"pub fn {name}() -> i32 {{ {body_value} }}\n"
 
 
 def _rust_source_file(start_index: int, fns_per_file: int, body_value: int) -> str:
     """Render the full content of a single Rust source file.
 
-    Functions in the file are numbered `function_{start_index:02d}` through
-    `function_{start_index + fns_per_file - 1:02d}`, each with a body of
+    Functions in the file are numbered `function_{start_index:04d}` through
+    `function_{start_index + fns_per_file - 1:04d}`, each with a body of
     `body_value`. Distinct body values across commits produce real function
     diffs that git-prism's content-aware differ will surface.
     """
@@ -66,7 +67,7 @@ def _build_large_pr_fixture(
     initial_filenames: list[str] = []
     for file_index in range(file_count):
         start = file_index * fns_per_file + 1
-        filename = f"src/src_{file_index + 1:03d}.rs"
+        filename = f"src/src_{file_index + 1:04d}.rs"
         _write_file(repo_dir, filename, _rust_source_file(start, fns_per_file, 1))
         initial_filenames.append(filename)
     _commit(repo_dir, "initial: seed functions", initial_filenames)
@@ -74,7 +75,7 @@ def _build_large_pr_fixture(
     modified_filenames: list[str] = []
     for file_index in range(file_count):
         start = file_index * fns_per_file + 1
-        filename = f"src/src_{file_index + 1:03d}.rs"
+        filename = f"src/src_{file_index + 1:04d}.rs"
         _write_file(repo_dir, filename, _rust_source_file(start, fns_per_file, 2))
         modified_filenames.append(filename)
     _commit(repo_dir, "modified: bump every function body", modified_filenames)
@@ -84,7 +85,7 @@ def _build_large_pr_fixture(
     "a git repository with a change affecting {file_count:d} files "
     "and {fn_count:d} modified functions",
 )
-def step_impl_large_pr_fixture(
+def step_build_large_pr_fixture(
     context: Context, file_count: int, fn_count: int,
 ) -> None:
     """Create the deterministic large-PR fixture for the ISSUE-212 scenarios.

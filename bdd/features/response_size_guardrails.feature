@@ -35,7 +35,7 @@ Feature: Bounded tool responses
       When an agent requests the change manifest with function analysis enabled and a 512 token budget
       Then the git_prism.response.truncated metric records a token_budget event for get_change_manifest
 
-    Scenario: Change manifest surfaces token_estimate in the response metadata
+    Scenario: Change manifest reports its payload size for budgeting follow-up calls
       When an agent requests the change manifest
       Then the response metadata includes a token_estimate for the payload
 
@@ -52,8 +52,8 @@ Feature: Bounded tool responses
       Then the response contains the next page of changed functions
       And no function appears in both pages
 
-    Scenario: Function name filter scopes the response to named functions
-      When an agent requests function context scoped to "function_01" and "function_02"
+    Scenario: Agents can scope function context to a specific name list
+      When an agent requests function context scoped to "function_0001" and "function_0002"
       Then the response contains exactly those two functions
       And functions outside the filter are not included
 
@@ -69,11 +69,11 @@ Feature: Bounded tool responses
       When an agent requests function context with a 512 token budget
       Then the git_prism.response.truncated metric records a token_budget event for get_function_context
 
-    Scenario: Function context surfaces token_estimate in the response metadata
+    Scenario: Function context reports its payload size for budgeting follow-up calls
       When an agent requests function context
       Then the response metadata includes a token_estimate for the payload
 
-  Rule: Both read tools stay within budget on an extreme change
+  Rule: Read tools stay within their token budget regardless of change size
 
     Scenario: Change manifest stays within the 8192 token budget on an extreme change
       Given a git repository with a change affecting 200 files and 1000 modified functions

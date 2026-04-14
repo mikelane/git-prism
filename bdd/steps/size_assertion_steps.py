@@ -15,9 +15,7 @@ implementation PRs that will wire the real assertion.
 
 from __future__ import annotations
 
-import json
 import subprocess
-from typing import Any
 
 from behave import given, then, when
 from behave.runner import Context
@@ -64,24 +62,26 @@ def _context_args() -> list[str]:
 
 @when("an agent requests the change manifest")
 def step_request_change_manifest(context: Context) -> None:
+    """Invoke `git-prism manifest` with default flags to exercise the baseline
+    MCP change-manifest path agents hit first."""
     _run_cli(context, _manifest_args())
 
 
 @when("an agent requests the change manifest without opting in to function analysis")
 def step_request_manifest_without_function_analysis(context: Context) -> None:
-    # Default-off semantics are what PR 3 will introduce. Today the CLI
-    # hardcodes `include_function_analysis: true` in src/main.rs, so this
-    # call returns function analysis and the paired Then step will fail
-    # (RED). That is the intended state.
+    """Invoke the default manifest path to assert that function analysis is
+    off by default. RED today because the CLI hardcodes
+    `include_function_analysis: true` in src/main.rs; PR 3 will introduce the
+    default-off semantics that make the paired Then step pass."""
     _run_cli(context, _manifest_args())
 
 
 @when("an agent requests the change manifest with function analysis enabled")
 def step_request_manifest_with_function_analysis(context: Context) -> None:
-    # `--include-function-analysis` is not yet a real CLI flag. Passing it
-    # today produces a non-zero exit and an empty stdout, which causes the
-    # paired Then step to KeyError / JSONDecodeError when it tries to
-    # navigate the response. RED.
+    """Invoke the manifest with the opt-in flag to exercise the function-
+    analysis path. RED today because `--include-function-analysis` is not yet
+    a real CLI flag — passing it produces a non-zero exit and empty stdout,
+    and the paired Then step fails when it tries to navigate the response."""
     _run_cli(context, [*_manifest_args(), "--include-function-analysis"])
 
 
@@ -90,6 +90,8 @@ def step_request_manifest_with_function_analysis(context: Context) -> None:
     "and a {budget:d} token budget",
 )
 def step_request_manifest_with_budget(context: Context, budget: int) -> None:
+    """Invoke the manifest with function analysis and an explicit token
+    budget to exercise the budget-clamping path."""
     _run_cli(
         context,
         [
@@ -106,16 +108,22 @@ def step_request_manifest_with_budget(context: Context, budget: int) -> None:
 
 @when("an agent requests function context")
 def step_request_function_context(context: Context) -> None:
+    """Invoke `git-prism context` with default flags to exercise the baseline
+    function-context path agents hit after seeing a manifest."""
     _run_cli(context, _context_args())
 
 
 @when("an agent requests function context without a cursor")
 def step_request_function_context_without_cursor(context: Context) -> None:
+    """Invoke the context call with no cursor argument to exercise the
+    first-page pagination path."""
     _run_cli(context, _context_args())
 
 
 @when("an agent requests function context without a function name filter")
 def step_request_function_context_without_filter(context: Context) -> None:
+    """Invoke the context call with no name filter to exercise the unfiltered
+    response path on an extreme-change fixture."""
     _run_cli(context, _context_args())
 
 
@@ -135,6 +143,8 @@ def step_request_function_context_with_cursor(context: Context) -> None:
 def step_request_function_context_scoped(
     context: Context, name1: str, name2: str,
 ) -> None:
+    """Invoke the context call with an explicit two-name filter to exercise
+    the name-scoping path."""
     _run_cli(
         context,
         [*_context_args(), "--function-names", f"{name1},{name2}"],
@@ -145,6 +155,8 @@ def step_request_function_context_scoped(
 def step_request_function_context_with_budget(
     context: Context, budget: int,
 ) -> None:
+    """Invoke the context call with an explicit token budget to exercise the
+    budget-clamping path for callers and callees."""
     _run_cli(context, [*_context_args(), "--max-response-tokens", str(budget)])
 
 
@@ -210,10 +222,11 @@ def step_response_omits_function_diffs(context: Context) -> None:
 def step_response_includes_function_diffs(context: Context) -> None:
     data = _ensure_json_parsed(context)
     files = _navigate_dotted_path(data, "files")
-    has_diff = any(entry.get("functions_changed") for entry in files)
-    assert has_diff, (
-        "Opt-in manifest call should include at least one file with a "
-        "populated functions_changed list, but none were found"
+    with_diffs = sum(1 for entry in files if entry.get("functions_changed"))
+    total = len(files)
+    assert with_diffs == total, (
+        f"expected every changed file to carry function detail when opted in; "
+        f"got {with_diffs} of {total}. RED until PR 3 lands the opt-in handler."
     )
 
 
@@ -269,8 +282,9 @@ def step_response_trimmed_files_preserve_signatures(context: Context) -> None:
 def step_response_metadata_token_estimate(context: Context) -> None:
     data = _ensure_json_parsed(context)
     estimate = _navigate_dotted_path(data, "metadata.token_estimate")
-    assert isinstance(estimate, int) and estimate >= 0, (
-        f"metadata.token_estimate should be a non-negative int, got {estimate!r}"
+    assert isinstance(estimate, int) and estimate > 0, (
+        f"expected a positive integer token_estimate, got {estimate!r} "
+        f"(type {type(estimate).__name__}). RED until PR 2 lands token_estimate metadata."
     )
 
 
@@ -294,8 +308,9 @@ def step_response_first_page_deterministic(context: Context) -> None:
 def step_response_metadata_next_cursor(context: Context) -> None:
     data = _ensure_json_parsed(context)
     cursor = _navigate_dotted_path(data, "metadata.next_cursor")
-    assert cursor, (
-        f"metadata.next_cursor should be a non-empty string, got {cursor!r}"
+    assert isinstance(cursor, str) and cursor, (
+        f"expected a non-empty string cursor, got {cursor!r} "
+        f"(type {type(cursor).__name__}). RED until PR 4 lands pagination."
     )
 
 
@@ -327,9 +342,9 @@ def step_response_no_overlap(context: Context) -> None:
 def step_response_contains_exact_two(context: Context) -> None:
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
-    names = sorted(fn.get("name") for fn in functions)
-    assert names == ["function_01", "function_02"], (
-        f"Filter should return exactly ['function_01', 'function_02'], "
+    names = sorted(fn.get("name") or "" for fn in functions)
+    assert names == ["function_0001", "function_0002"], (
+        f"Filter should return exactly ['function_0001', 'function_0002'], "
         f"got {names}"
     )
 
@@ -341,7 +356,7 @@ def step_response_functions_outside_filter_excluded(context: Context) -> None:
     offenders = [
         fn.get("name")
         for fn in functions
-        if fn.get("name") not in {"function_01", "function_02"}
+        if fn.get("name") not in {"function_0001", "function_0002"}
     ]
     assert not offenders, (
         f"Filter leaked functions outside the allow-list: {offenders}"
