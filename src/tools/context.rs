@@ -262,16 +262,20 @@ pub fn build_function_context(
     _root_span.record("files_scanned", file_calls.len() as i64);
     _root_span.record("total_callers_found", total_callers as i64);
 
-    Ok(FunctionContextResponse {
+    let mut response = FunctionContextResponse {
         metadata: ContextMetadata {
             base_ref: base_ref.to_string(),
             head_ref: head_ref.to_string(),
             base_sha: base_commit.sha,
             head_sha: head_commit.sha,
             generated_at: Utc::now(),
+            // Placeholder; see build_manifest for the two-pass estimate trick.
+            token_estimate: 0,
         },
         functions: function_entries,
-    })
+    };
+    response.metadata.token_estimate = crate::tools::size::estimate_response_tokens(&response);
+    Ok(response)
 }
 
 /// Extract the callees (functions called) from a specific function's body.

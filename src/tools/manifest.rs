@@ -8,6 +8,7 @@ use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
 use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
+use crate::tools::size;
 use crate::tools::types::{
     FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
     ManifestOptions, ManifestResponse, ManifestSummary, ToolError, detect_language,
@@ -368,7 +369,7 @@ pub fn build_manifest(
         languages_affected: all_languages_affected,
     };
 
-    Ok(ManifestResponse {
+    let mut response = ManifestResponse {
         metadata: ManifestMetadata {
             repo_path: repo_path.display().to_string(),
             base_ref: base_ref.to_string(),
@@ -377,6 +378,10 @@ pub fn build_manifest(
             head_sha: head_commit.sha,
             generated_at: Utc::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            // Placeholder; overwritten below via a two-pass estimate so the
+            // final value reflects the fully-populated response. See the
+            // ManifestMetadata::token_estimate doc comment for the caveat.
+            token_estimate: 0,
         },
         summary,
         files: manifest_files,
@@ -387,7 +392,9 @@ pub fn build_manifest(
             page_size,
             next_cursor,
         },
-    })
+    };
+    response.metadata.token_estimate = size::estimate_response_tokens(&response);
+    Ok(response)
 }
 
 /// Build a manifest comparing a committed ref against the current working tree.
@@ -591,7 +598,7 @@ pub fn build_worktree_manifest(
         languages_affected: all_languages_affected,
     };
 
-    Ok(ManifestResponse {
+    let mut response = ManifestResponse {
         metadata: ManifestMetadata {
             repo_path: repo_path.display().to_string(),
             base_ref: base_ref.to_string(),
@@ -600,6 +607,8 @@ pub fn build_worktree_manifest(
             head_sha: "WORKTREE".to_string(),
             generated_at: Utc::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            // Placeholder; see build_manifest for the two-pass rationale.
+            token_estimate: 0,
         },
         summary,
         files: manifest_files,
@@ -610,7 +619,9 @@ pub fn build_worktree_manifest(
             page_size,
             next_cursor,
         },
-    })
+    };
+    response.metadata.token_estimate = size::estimate_response_tokens(&response);
+    Ok(response)
 }
 
 fn read_worktree_file(repo_path: &Path, file_path: &str) -> Option<String> {
@@ -1196,6 +1207,27 @@ mod tests {
             .unwrap();
 
         (dir, path)
+    }
+
+    #[test]
+    fn it_reports_a_positive_token_estimate_for_a_non_trivial_manifest() {
+        let (_dir, path) = create_repo_with_go_file();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        // The response includes two changed files plus function/import detail,
+        // so the serialized JSON is well over 4 characters and the estimate
+        // must be strictly positive. Exact value is not asserted because it
+        // depends on metadata fields like `generated_at` that vary at runtime.
+        assert!(
+            manifest.metadata.token_estimate > 0,
+            "expected a positive token_estimate on a non-trivial manifest response, got {}",
+            manifest.metadata.token_estimate,
+        );
     }
 
     #[test]

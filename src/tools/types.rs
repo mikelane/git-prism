@@ -66,6 +66,16 @@ pub struct ManifestMetadata {
     pub head_sha: String,
     pub generated_at: DateTime<Utc>,
     pub version: String,
+    /// Estimated token count of the serialized response, via the ~4-chars-
+    /// per-token heuristic in [`crate::tools::size::estimate_response_tokens`].
+    /// Agents use this as a cheap pre-flight hint before requesting a follow-
+    /// up call (e.g., `get_function_context` on the same range). Populated in
+    /// a two-pass build: the response is first constructed with `0`, then the
+    /// estimate is computed on that struct and written back. The final value
+    /// is therefore a lower bound that undercounts by the single-digit
+    /// character delta between `"token_estimate":0` and the real value, which
+    /// is acceptable for a budgeting hint.
+    pub token_estimate: usize,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -322,6 +332,10 @@ pub struct ContextMetadata {
     pub base_sha: String,
     pub head_sha: String,
     pub generated_at: DateTime<Utc>,
+    /// Estimated token count of the serialized response. See
+    /// [`ManifestMetadata::token_estimate`] for the semantics and caveats;
+    /// the same two-pass construction trick applies.
+    pub token_estimate: usize,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -514,6 +528,7 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
                 version: "0.1.0".into(),
+                token_estimate: 0,
             },
             summary: ManifestSummary {
                 total_files_changed: 1,
@@ -540,6 +555,7 @@ mod tests {
         assert_eq!(json["summary"]["total_files_changed"], 1);
         assert!(json["summary"]["total_functions_changed"].is_null());
         assert!(json["pagination"]["next_cursor"].is_null());
+        assert_eq!(json["metadata"]["token_estimate"], 0);
     }
 
     #[test]
