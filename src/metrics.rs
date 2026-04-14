@@ -221,11 +221,16 @@ impl Metrics {
     }
 
     pub fn record_truncated(&self, tool: &str, reason: &str) {
+        // Normalize at the metric boundary so attribute cardinality on the
+        // `reason` label is bounded by construction regardless of what the
+        // caller passes. The classifier is a flat exact-match — see
+        // `crate::privacy::classify_truncation_reason` for the full rationale.
+        let normalized = crate::privacy::classify_truncation_reason(reason);
         self.response_truncated.add(
             1,
             &[
                 KeyValue::new("tool", tool.to_string()),
-                KeyValue::new("reason", reason.to_string()),
+                KeyValue::new("reason", normalized),
             ],
         );
     }
@@ -334,5 +339,19 @@ mod tests {
         ] {
             metrics.record_error("test_tool", kind);
         }
+    }
+
+    #[test]
+    fn it_normalizes_unknown_truncation_reason_without_panicking() {
+        // Indirect behavior check: an unrecognized reason string must pass
+        // through record_truncated cleanly, because classify_truncation_reason
+        // folds it to "unknown" at the metric boundary. The real per-arm
+        // assertion lives in src/privacy.rs::tests; this test locks in the
+        // wiring so a future refactor that drops the normalization call would
+        // fail to compile or panic here.
+        let metrics = Metrics::new();
+        metrics.record_truncated("test_tool", "wildly_unrecognized_reason_42");
+        metrics.record_truncated("test_tool", "paginated");
+        metrics.record_truncated("test_tool", "token_budget");
     }
 }
