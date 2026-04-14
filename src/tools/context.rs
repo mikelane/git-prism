@@ -497,6 +497,27 @@ mod tests {
     }
 
     #[test]
+    fn it_reports_a_positive_token_estimate_for_a_non_trivial_context_response() {
+        // Symmetric with manifest.rs::it_reports_a_positive_token_estimate_for_a_non_trivial_manifest.
+        // The fixture repo produces several changed functions plus callers
+        // and callees, so the serialized response is well over 4 characters
+        // and the two-pass estimate must be strictly positive. Without this
+        // test, a mutation that replaced the `estimate_response_tokens`
+        // call in build_function_context with a hardcoded `0` would escape:
+        // no other test reads metadata.token_estimate on the context path.
+        // Exact value is not asserted because metadata.generated_at varies
+        // at runtime; we only lock in the "wired and > 0" contract.
+        let (_dir, path) = create_context_test_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        assert!(
+            result.metadata.token_estimate > 0,
+            "expected a positive token_estimate on a non-trivial function context response, got {}",
+            result.metadata.token_estimate,
+        );
+    }
+
+    #[test]
     fn leaf_function_name_extracts_simple() {
         assert_eq!(leaf_function_name("foo"), "foo");
     }

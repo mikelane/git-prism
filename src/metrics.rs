@@ -343,13 +343,39 @@ mod tests {
 
     #[test]
     fn it_normalizes_unknown_truncation_reason_without_panicking() {
-        // Indirect behavior check: an unrecognized reason string must pass
-        // through record_truncated cleanly, because classify_truncation_reason
-        // folds it to "unknown" at the metric boundary. The real per-arm
-        // assertion lives in src/privacy.rs::tests; this test locks in the
-        // wiring so a future refactor that drops the normalization call would
-        // fail to compile or panic here.
+        // The global meter is a no-op in unit tests, so we cannot read back
+        // the attribute value record_truncated emits. That makes the final
+        // three calls below a smoke test for the call path, NOT a substitute
+        // for the per-arm assertions on classify_truncation_reason that live
+        // in src/privacy.rs::tests.
+        //
+        // To keep the "record_truncated goes through the classifier" wiring
+        // honest without observing the meter, the assertions below also
+        // exercise the classifier directly on the same inputs. A mutation
+        // that removed the classify_truncation_reason call from
+        // record_truncated would leave the emitted label unbounded — and
+        // while THIS test cannot observe that directly, the type signature
+        // of `KeyValue::new("reason", normalized)` inside record_truncated
+        // requires a `&'static str`, so any mutant that tried to substitute
+        // the raw `reason: &str` parameter would fail to compile.
         let metrics = Metrics::new();
+
+        // Known labels must pass through unchanged.
+        assert_eq!(
+            crate::privacy::classify_truncation_reason("paginated"),
+            "paginated",
+        );
+        assert_eq!(
+            crate::privacy::classify_truncation_reason("token_budget"),
+            "token_budget",
+        );
+        // Unrecognized labels must fold to the "unknown" safety-net arm so
+        // metric cardinality stays bounded.
+        assert_eq!(
+            crate::privacy::classify_truncation_reason("wildly_unrecognized_reason_42"),
+            "unknown",
+        );
+
         metrics.record_truncated("test_tool", "wildly_unrecognized_reason_42");
         metrics.record_truncated("test_tool", "paginated");
         metrics.record_truncated("test_tool", "token_budget");
