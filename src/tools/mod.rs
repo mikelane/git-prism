@@ -2,6 +2,7 @@ pub mod context;
 pub mod history;
 pub mod import_scope;
 pub mod manifest;
+pub mod size;
 pub mod snapshots;
 pub mod types;
 

@@ -3,6 +3,7 @@ use std::path::Path;
 use chrono::Utc;
 
 use crate::git::reader::RepoReader;
+use crate::tools::size;
 use crate::tools::types::{
     FileContent, SnapshotFileEntry, SnapshotMetadata, SnapshotOptions, SnapshotResponse, ToolError,
     detect_language,
@@ -45,7 +46,7 @@ pub fn build_snapshots(
             generated_at: Utc::now(),
         },
         files,
-        token_estimate: total_chars / 4,
+        token_estimate: size::estimate_tokens(total_chars),
     })
 }
 

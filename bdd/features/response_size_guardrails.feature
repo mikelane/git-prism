@@ -1,4 +1,4 @@
-@ISSUE-212 @not_implemented
+@ISSUE-212
 Feature: Bounded tool responses
   The cheap read tools `get_change_manifest` and `get_function_context` advertise
   themselves as first- and second-resort calls that should fit comfortably inside
@@ -14,23 +14,27 @@ Feature: Bounded tool responses
 
   Rule: get_change_manifest defaults to a cheap response; function analysis is opt-in
 
+    @not_implemented
     Scenario: Default manifest call omits function analysis
       When an agent requests the change manifest without opting in to function analysis
       Then the response lists every changed file with summary counts
       And the response omits per-function signature diffs
 
+    @not_implemented
     Scenario: Opt-in manifest call includes function analysis
       When an agent requests the change manifest with function analysis enabled
       Then the response includes per-function signature diffs for files within the budget
 
   Rule: get_change_manifest clamps function detail to its token budget
 
+    @not_implemented
     Scenario: Over-budget manifest trims function detail to signatures only
       When an agent requests the change manifest with function analysis enabled and a 512 token budget
       Then the response token_estimate is at most 512
       And the response metadata lists every file whose function detail was trimmed
       And the trimmed files preserve their function signatures
 
+    @not_implemented
     Scenario: Over-budget manifest emits the token_budget truncation metric
       When an agent requests the change manifest with function analysis enabled and a 512 token budget
       Then the git_prism.response.truncated metric records a token_budget event for get_change_manifest
@@ -41,17 +45,20 @@ Feature: Bounded tool responses
 
   Rule: get_function_context paginates over changed functions
 
+    @not_implemented
     Scenario: Default function context call returns the first page with a next-page cursor
       When an agent requests function context without a cursor
       Then the response contains the first page of changed functions in deterministic order
       And the response metadata includes a next-page cursor
 
+    @not_implemented
     Scenario: Cursor advances through remaining functions
       Given an agent has retrieved the first page of function context and received a next-page cursor
       When the agent requests function context with that cursor
       Then the response contains the next page of changed functions
       And no function appears in both pages
 
+    @not_implemented
     Scenario: Agents can scope function context to a specific name list
       When an agent requests function context scoped to "function_0001" and "function_0002"
       Then the response contains exactly those two functions
@@ -59,12 +66,14 @@ Feature: Bounded tool responses
 
   Rule: get_function_context clamps caller and callee detail to its token budget
 
+    @not_implemented
     Scenario: Over-budget context trims per-function caller and callee lists
       When an agent requests function context with a 512 token budget
       Then the response token_estimate is at most 512
       And at least one function entry is marked as truncated
       And the truncated entries have shortened caller and callee lists
 
+    @not_implemented
     Scenario: Over-budget context emits the token_budget truncation metric
       When an agent requests function context with a 512 token budget
       Then the git_prism.response.truncated metric records a token_budget event for get_function_context
@@ -75,6 +84,7 @@ Feature: Bounded tool responses
 
   Rule: Read tools stay within their token budget regardless of change size
 
+    @not_implemented
     Scenario: Change manifest stays within the 8192 token budget on an extreme change
       Given a git repository with a change affecting 200 files and 1000 modified functions
       When an agent requests the change manifest with function analysis enabled
@@ -82,6 +92,7 @@ Feature: Bounded tool responses
       And the response metadata lists every file whose function detail was trimmed
       And the git_prism.response.truncated metric records a token_budget event for get_change_manifest
 
+    @not_implemented
     Scenario: Function context stays within the 8192 token budget on an extreme change
       Given a git repository with a change affecting 200 files and 1000 modified functions
       When an agent requests function context without a function name filter
