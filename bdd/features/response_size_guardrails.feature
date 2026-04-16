@@ -14,27 +14,23 @@ Feature: Bounded tool responses
 
   Rule: get_change_manifest defaults to a cheap response; function analysis is opt-in
 
-    @not_implemented
     Scenario: Default manifest call omits function analysis
       When an agent requests the change manifest without opting in to function analysis
       Then the response lists every changed file with summary counts
       And the response omits per-function signature diffs
 
-    @not_implemented
     Scenario: Opt-in manifest call includes function analysis
       When an agent requests the change manifest with function analysis enabled
       Then the response includes per-function signature diffs for files within the budget
 
   Rule: get_change_manifest clamps function detail to its token budget
 
-    @not_implemented
     Scenario: Over-budget manifest trims function detail to signatures only
       When an agent requests the change manifest with function analysis enabled and a 512 token budget
       Then the response token_estimate is at most 512
       And the response metadata lists every file whose function detail was trimmed
       And the trimmed files preserve their function signatures
 
-    @not_implemented
     Scenario: Over-budget manifest emits the token_budget truncation metric
       When an agent requests the change manifest with function analysis enabled and a 512 token budget
       Then the git_prism.response.truncated metric records a token_budget event for get_change_manifest
@@ -84,7 +80,6 @@ Feature: Bounded tool responses
 
   Rule: Read tools stay within their token budget regardless of change size
 
-    @not_implemented
     Scenario: Change manifest stays within the 8192 token budget on an extreme change
       Given a git repository with a change affecting 200 files and 1000 modified functions
       When an agent requests the change manifest with function analysis enabled
