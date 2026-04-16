@@ -76,6 +76,11 @@ pub struct ManifestMetadata {
     /// character delta between `"token_estimate":0` and the real value, which
     /// is acceptable for a budgeting hint.
     pub token_estimate: usize,
+    /// Paths of files whose function analysis was trimmed to fit the token
+    /// budget. Only includes "tier 1" files (signatures preserved, imports
+    /// stripped). Files stripped to bare entries are not listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_analysis_truncated: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -163,8 +168,13 @@ pub struct ManifestArgs {
     pub include_patterns: Vec<String>,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub include_function_analysis: bool,
+    /// Maximum estimated tokens for the full response. When exceeded,
+    /// function/import analysis is progressively stripped per file.
+    /// Default 8192. Pass 0 to disable budget enforcement.
+    #[serde(default = "default_token_budget")]
+    pub max_response_tokens: usize,
     /// Opaque pagination cursor from a previous response.
     pub cursor: Option<String>,
     /// Maximum file entries per page (1-500, default 100).
@@ -212,6 +222,10 @@ pub struct ContextArgs {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_token_budget() -> usize {
+    8192
 }
 
 fn default_max_file_size() -> usize {
@@ -351,6 +365,10 @@ pub struct ManifestOptions {
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub include_function_analysis: bool,
+    /// Token budget for the response. `None` disables enforcement (used by
+    /// internal callers like `context.rs` that need full data). `Some(n)`
+    /// triggers per-file tiered trimming when the response exceeds `n` tokens.
+    pub max_response_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +547,7 @@ mod tests {
                     .with_timezone(&Utc),
                 version: "0.1.0".into(),
                 token_estimate: 0,
+                function_analysis_truncated: vec![],
             },
             summary: ManifestSummary {
                 total_files_changed: 1,
@@ -627,7 +646,8 @@ mod tests {
         let args: ManifestArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.base_ref, "main");
         assert!(args.head_ref.is_none());
-        assert!(args.include_function_analysis);
+        assert!(!args.include_function_analysis);
+        assert_eq!(args.max_response_tokens, 8192);
         assert!(args.include_patterns.is_empty());
     }
 

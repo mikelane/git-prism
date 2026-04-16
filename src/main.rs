@@ -42,6 +42,12 @@ enum Commands {
         /// Page size for internal pagination (default 500)
         #[arg(long, default_value_t = 500)]
         page_size: usize,
+        /// Include function-level analysis (off by default)
+        #[arg(long)]
+        include_function_analysis: bool,
+        /// Maximum estimated tokens for the response (default 8192, 0 to disable)
+        #[arg(long, default_value_t = 8192)]
+        max_response_tokens: usize,
     },
     /// Output file snapshots as JSON (CLI mode, no MCP)
     Snapshot {
@@ -234,6 +240,8 @@ async fn main() -> anyhow::Result<()> {
             range,
             repo,
             page_size,
+            include_function_analysis,
+            max_response_tokens,
         } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
@@ -241,7 +249,12 @@ async fn main() -> anyhow::Result<()> {
             let options = ManifestOptions {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
-                include_function_analysis: true,
+                include_function_analysis,
+                max_response_tokens: if max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(max_response_tokens)
+                },
             };
             let manifest = match parse_range(&range) {
                 RefRange::CommitRange { base, head } => {
@@ -271,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
                 include_function_analysis: true,
+                max_response_tokens: None,
             };
             let history =
                 collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
@@ -552,6 +566,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 500).unwrap();
@@ -568,6 +583,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // Use page_size=2, so we need 3 pages for 5 files
@@ -585,6 +601,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 2).unwrap();
@@ -602,6 +619,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // page_size=1 forces 3 pages
@@ -618,6 +636,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 500).unwrap();
@@ -634,6 +653,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // page_size=2 forces 3 pages for 5 commits
@@ -651,6 +671,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_history_pages(&path, "HEAD~4", "HEAD", &options, 2).unwrap();
@@ -669,6 +690,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 1).unwrap();

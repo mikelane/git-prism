@@ -139,6 +139,11 @@ impl GitPrismServer {
                 include_patterns: args.include_patterns,
                 exclude_patterns: args.exclude_patterns,
                 include_function_analysis: args.include_function_analysis,
+                max_response_tokens: if args.max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(args.max_response_tokens)
+                },
             };
             let result = match args.head_ref {
                 Some(head) => build_manifest(
@@ -290,6 +295,7 @@ impl GitPrismServer {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
                 include_function_analysis: true,
+                max_response_tokens: None,
             };
             let result = build_history(
                 &repo_path,

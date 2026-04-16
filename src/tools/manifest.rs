@@ -382,6 +382,7 @@ pub fn build_manifest(
             // final value reflects the fully-populated response. See the
             // ManifestMetadata::token_estimate doc comment for the caveat.
             token_estimate: 0,
+            function_analysis_truncated: vec![],
         },
         summary,
         files: manifest_files,
@@ -609,6 +610,7 @@ pub fn build_worktree_manifest(
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Placeholder; see build_manifest for the two-pass rationale.
             token_estimate: 0,
+            function_analysis_truncated: vec![],
         },
         summary,
         files: manifest_files,
@@ -1216,6 +1218,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1237,6 +1240,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1272,6 +1276,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec!["*.md".to_string()],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1286,6 +1291,7 @@ mod tests {
             include_patterns: vec!["*.go".to_string()],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1300,6 +1306,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1378,6 +1385,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1454,6 +1462,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1530,6 +1539,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1606,6 +1616,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1792,6 +1803,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -1865,6 +1877,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -1939,6 +1952,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1957,6 +1971,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
 
@@ -1982,6 +1997,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2061,6 +2077,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2129,6 +2146,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2199,6 +2217,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2267,6 +2286,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2339,6 +2359,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2410,6 +2431,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2482,6 +2504,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec!["*.log".to_string()],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options_exclude, 0, 200).unwrap();
 
@@ -2499,6 +2522,7 @@ mod tests {
             include_patterns: vec!["*.txt".to_string()],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options_include, 0, 200).unwrap();
 
@@ -2572,6 +2596,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -2590,6 +2615,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
 
@@ -2654,6 +2680,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -2731,6 +2758,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -2785,6 +2813,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // First page
@@ -2805,6 +2834,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let page1 = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
@@ -2830,6 +2860,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // Request page starting at offset 3 with page_size 3 => covers files 3,4 (indices)
@@ -2852,6 +2883,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // With a page_size of 1 and 2 total files, we are paginating
@@ -2869,6 +2901,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // page_size 200 with 2 files => no pagination
@@ -2931,6 +2964,7 @@ mod tests {
             include_patterns: vec!["*.go".to_string()],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // Page 1: only first Go file
@@ -2955,6 +2989,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let page1 = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
@@ -2974,6 +3009,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 3, 3).unwrap();
@@ -2991,6 +3027,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
@@ -3060,6 +3097,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // Even with page_size=1, dependency changes should be present
@@ -3077,6 +3115,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         // The repo has ~2 changed files; offset 999 is way past the end
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 999, 100).unwrap();
@@ -3095,6 +3134,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // 2 files, page_size=2 → NOT paginating, total_functions_changed present
@@ -3170,6 +3210,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         // Use a small page to ensure we're paginating but summary is still complete
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
@@ -3235,6 +3276,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
         // Dep analysis should show added deps even though page_size=1
@@ -3254,6 +3296,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // offset at last file
@@ -3315,6 +3358,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // 3 staged files, page_size=3 → not paginating, no cursor
@@ -3377,6 +3421,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // page_size=1 to force pagination, but summary must reflect all 3 changes
@@ -3396,6 +3441,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // offset at last file
