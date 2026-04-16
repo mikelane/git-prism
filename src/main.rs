@@ -179,6 +179,12 @@ fn collect_all_manifest_pages(
     {
         let trimmed = enforce_token_budget(&mut response, budget);
         response.metadata.function_analysis_truncated = trimmed;
+        // Sync page_size to the actual returned file count so callers can detect
+        // file dropping: response.files.len() < pagination.total_items means
+        // some files were dropped by the token budget. next_cursor is not set
+        // in combined mode; callers must re-request with a larger budget or
+        // without enforcement (max_response_tokens: 0) to get all files.
+        response.pagination.page_size = response.files.len();
     }
     response.metadata.token_estimate = tools::size::estimate_response_tokens(&response);
 
@@ -237,6 +243,12 @@ fn collect_all_worktree_manifest_pages(
     {
         let trimmed = enforce_token_budget(&mut response, budget);
         response.metadata.function_analysis_truncated = trimmed;
+        // Sync page_size to the actual returned file count so callers can detect
+        // file dropping: response.files.len() < pagination.total_items means
+        // some files were dropped by the token budget. next_cursor is not set
+        // in combined mode; callers must re-request with a larger budget or
+        // without enforcement (max_response_tokens: 0) to get all files.
+        response.pagination.page_size = response.files.len();
     }
     response.metadata.token_estimate = tools::size::estimate_response_tokens(&response);
 

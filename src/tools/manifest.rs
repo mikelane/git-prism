@@ -702,7 +702,7 @@ pub fn enforce_token_budget(response: &mut ManifestResponse, budget: usize) -> V
     // chars (path + JSON quoting + comma), and large changes can produce
     // dozens of trimmed paths, adding hundreds of tokens we didn't budget for.
     // Reserve ~5% of the budget (min 256 tokens) as headroom.
-    let safety_margin = budget / 20;
+    let safety_margin = (budget / 20).max(16);
     let file_budget = budget
         .saturating_sub(skeleton_cost)
         .saturating_sub(safety_margin);
@@ -781,7 +781,11 @@ pub fn enforce_token_budget(response: &mut ManifestResponse, budget: usize) -> V
             remaining -= c.bare;
             decisions.push(TierChoice::Bare);
         } else {
-            // File doesn't fit even bare — stop adding files
+            // File doesn't fit even at bare cost — stop. Files are returned in
+            // page order (matching the git diff order), so we preserve ordering
+            // rather than skipping to find smaller files that might fit.
+            // Agents needing files beyond this point should re-request with a
+            // larger budget or without enforcement (max_response_tokens: 0).
             break;
         }
     }
@@ -3813,15 +3817,18 @@ mod tests {
 
     #[test]
     fn enforce_token_budget_zero_budget_returns_empty() {
-        // budget=0 is handled by the caller (not calling enforce_token_budget),
-        // but if it were called, the function should still not crash
+        // budget=0 is not called by production code (callers filter b > 0 first),
+        // but the function must not panic and must deterministically drop all files.
         let files = vec![make_test_file_entry("a.rs", true, true)];
         let mut response = make_test_response(files);
         let trimmed = enforce_token_budget(&mut response, 0);
-        // With budget 0, everything gets stripped but the function still returns
         assert!(
-            trimmed.is_empty() || !trimmed.is_empty(),
-            "should not panic"
+            trimmed.is_empty(),
+            "zero budget produces no tier-1 trimmed paths"
+        );
+        assert!(
+            response.files.is_empty(),
+            "zero budget drops all files from the response"
         );
     }
 

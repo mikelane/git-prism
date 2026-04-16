@@ -419,9 +419,22 @@ def step_telemetry_metric_truncation(
     context: Context, reason: str, tool: str,
 ) -> None:
     """Verify that budget enforcement ran by checking response metadata.
-    Full OTLP metric verification requires a collector harness (out of scope
-    for CLI-level BDD). We proxy the metric assertion by confirming the
-    response carries evidence that the budget was hit."""
+
+    Full OTLP metric verification requires a live collector harness, which is
+    out of scope for CLI-level BDD tests. We proxy the metric assertion via
+    ``metadata.function_analysis_truncated``:
+
+        non-empty truncated list  ->  server.rs emits record_truncated(tool, "token_budget")
+
+    The invariant is enforced in server.rs:
+        if !response.metadata.function_analysis_truncated.is_empty() {
+            metrics.record_truncated(tool_name, "token_budget");
+        }
+
+    If that guard ever breaks, this proxy will still pass even though the real
+    metric was not recorded. A future telemetry integration test should verify
+    the actual counter.
+    """
     data = _ensure_json_parsed(context)
     truncated = _navigate_dotted_path(data, "metadata.function_analysis_truncated")
     # Budget enforcement emits the metric when this list is non-empty
