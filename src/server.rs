@@ -211,6 +211,10 @@ impl GitPrismServer {
                     metrics.record_truncated(tool_name, "paginated");
                 }
 
+                if !response.metadata.function_analysis_truncated.is_empty() {
+                    metrics.record_truncated(tool_name, "token_budget");
+                }
+
                 // Ref pattern classification
                 metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
                     &base_ref_clone,
