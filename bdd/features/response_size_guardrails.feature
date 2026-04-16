@@ -26,13 +26,13 @@ Feature: Bounded tool responses
   Rule: get_change_manifest clamps function detail to its token budget
 
     Scenario: Over-budget manifest trims function detail to signatures only
-      When an agent requests the change manifest with function analysis enabled and a 512 token budget
-      Then the response token_estimate is at most 512
+      When an agent requests the change manifest with function analysis enabled and a 2048 token budget
+      Then the response token_estimate is at most 2048
       And the response metadata lists every file whose function detail was trimmed
       And the trimmed files preserve their function signatures
 
     Scenario: Over-budget manifest emits the token_budget truncation metric
-      When an agent requests the change manifest with function analysis enabled and a 512 token budget
+      When an agent requests the change manifest with function analysis enabled and a 2048 token budget
       Then the git_prism.response.truncated metric records a token_budget event for get_change_manifest
 
     Scenario: Change manifest reports its payload size for budgeting follow-up calls

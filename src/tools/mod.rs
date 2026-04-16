@@ -8,7 +8,7 @@ pub mod types;
 
 pub use context::build_function_context;
 pub use history::build_history;
-pub use manifest::{build_manifest, build_worktree_manifest};
+pub use manifest::{build_manifest, build_worktree_manifest, enforce_token_budget};
 pub use snapshots::build_snapshots;
 pub use types::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,

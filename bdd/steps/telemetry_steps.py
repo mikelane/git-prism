@@ -411,12 +411,13 @@ def step_start_server_and_call_tool(context: Context, tool_name: str) -> None:
     repo_path = context.repo_path
     proc = _spawn_server(context, endpoint=endpoint, cwd=repo_path)
     _send_mcp_initialize(proc)
-    _send_tool_call(
-        context,
-        proc,
-        tool_name,
-        {"base_ref": "HEAD~1", "head_ref": "HEAD", "repo_path": repo_path},
-    )
+    args = {"base_ref": "HEAD~1", "head_ref": "HEAD", "repo_path": repo_path}
+    # get_change_manifest's default for include_function_analysis flipped to
+    # false in PR 3 of issue #212. Telemetry scenarios that assert on
+    # treesitter.parse spans need to opt in explicitly.
+    if tool_name == "get_change_manifest":
+        args["include_function_analysis"] = True
+    _send_tool_call(context, proc, tool_name, args)
 
 
 @when(

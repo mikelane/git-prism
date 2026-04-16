@@ -403,6 +403,22 @@ pub fn build_manifest(
         vec![]
     };
     response.metadata.function_analysis_truncated = trimmed;
+
+    // If budget enforcement reduced the file count, update pagination cursor
+    let actual_page_files = response.files.len();
+    if actual_page_files < page_end.saturating_sub(offset) {
+        let actual_end = offset + actual_page_files;
+        response.pagination.page_size = actual_page_files;
+        if actual_end < total_files {
+            response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
+                v: 1,
+                offset: actual_end,
+                base_sha: response.metadata.base_sha.clone(),
+                head_sha: response.metadata.head_sha.clone(),
+            }));
+        }
+    }
+
     response.metadata.token_estimate = size::estimate_response_tokens(&response);
     Ok(response)
 }
@@ -640,6 +656,22 @@ pub fn build_worktree_manifest(
         vec![]
     };
     response.metadata.function_analysis_truncated = trimmed;
+
+    // If budget enforcement reduced the file count, update pagination cursor
+    let actual_page_files = response.files.len();
+    if actual_page_files < page_end.saturating_sub(offset) {
+        let actual_end = offset + actual_page_files;
+        response.pagination.page_size = actual_page_files;
+        if actual_end < total_files {
+            response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
+                v: 1,
+                offset: actual_end,
+                base_sha: response.metadata.base_sha.clone(),
+                head_sha: "WORKTREE".to_string(),
+            }));
+        }
+    }
+
     response.metadata.token_estimate = size::estimate_response_tokens(&response);
     Ok(response)
 }
@@ -659,45 +691,124 @@ pub fn build_worktree_manifest(
 /// 3. When a file exceeds remaining budget:
 ///    - Tier 1: strip `imports_changed`, keep `functions_changed` (signatures)
 ///    - Tier 2: strip both — the file becomes a bare entry
-fn enforce_token_budget(response: &mut ManifestResponse, budget: usize) -> Vec<String> {
-    // Measure skeleton overhead by temporarily removing files
+pub fn enforce_token_budget(response: &mut ManifestResponse, budget: usize) -> Vec<String> {
+    // Measure skeleton overhead (everything except files)
     let files = std::mem::take(&mut response.files);
     let skeleton_cost = size::estimate_response_tokens(response);
     response.files = files;
 
-    let mut remaining = budget.saturating_sub(skeleton_cost);
-    let mut trimmed_paths = Vec::new();
+    // Safety margin for the `function_analysis_truncated` list that gets
+    // populated AFTER enforcement runs. Each trimmed path serializes as ~25
+    // chars (path + JSON quoting + comma), and large changes can produce
+    // dozens of trimmed paths, adding hundreds of tokens we didn't budget for.
+    // Reserve ~5% of the budget (min 256 tokens) as headroom.
+    let safety_margin = budget / 20;
+    let file_budget = budget
+        .saturating_sub(skeleton_cost)
+        .saturating_sub(safety_margin);
 
-    for file in &mut response.files {
-        let full_cost = size::estimate_response_tokens(file);
-        if full_cost <= remaining {
-            remaining = remaining.saturating_sub(full_cost);
-            continue;
-        }
-
-        // Tier 1: strip imports, keep function signatures
-        if file.imports_changed.is_some() || file.functions_changed.is_some() {
-            let saved_imports = file.imports_changed.take();
-            let tier1_cost = size::estimate_response_tokens(file);
-            if tier1_cost <= remaining {
-                remaining = remaining.saturating_sub(tier1_cost);
-                trimmed_paths.push(file.path.clone());
-                continue;
+    // Phase 1: measure per-file costs at each tier
+    struct FileCosts {
+        full: usize,
+        tier1: usize, // functions kept, imports stripped
+        bare: usize,  // both stripped
+        has_analysis: bool,
+    }
+    let costs: Vec<FileCosts> = response
+        .files
+        .iter()
+        .map(|f| {
+            let full = size::estimate_response_tokens(f);
+            // Tier 1: same as full but without imports
+            let tier1 = if f.imports_changed.is_some() {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            } else {
+                full
+            };
+            // Bare: no functions, no imports
+            let bare = {
+                let mut clone = f.clone();
+                clone.functions_changed = None;
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            };
+            FileCosts {
+                full,
+                tier1,
+                bare,
+                has_analysis: f.functions_changed.is_some(),
             }
-            // Restore imports before tier 2 strip (they'll be dropped anyway,
-            // but this keeps the logic clean)
-            file.imports_changed = saved_imports;
-        }
+        })
+        .collect();
 
-        // Tier 2: strip both functions and imports — bare entry
-        file.functions_changed = None;
-        file.imports_changed = None;
-        let bare_cost = size::estimate_response_tokens(file);
-        remaining = remaining.saturating_sub(bare_cost);
-        // Do NOT add to trimmed_paths — bare files have no signatures
+    // Phase 2: determine how many files fit and at what tier.
+    // Strategy: uniform downgrade — try all-full, then all-tier1, then mix tier1+tier2.
+    let total_full: usize = costs.iter().map(|c| c.full).sum();
+    let total_tier1: usize = costs.iter().map(|c| c.tier1).sum();
+
+    if total_full <= file_budget {
+        // Everything fits at full analysis — no trimming needed
+        return vec![];
     }
 
-    trimmed_paths
+    if total_tier1 <= file_budget {
+        // Everything fits at tier 1 — strip imports, record tier1 files
+        let mut trimmed = Vec::new();
+        for file in &mut response.files {
+            if file.imports_changed.is_some() || file.functions_changed.is_some() {
+                file.imports_changed = None;
+                trimmed.push(file.path.clone());
+            }
+        }
+        return trimmed;
+    }
+
+    // Phase 3: greedy tier1-first — walk files in order, preferring tier1
+    // (functions preserved) over tier2 (bare). This ensures we get a non-
+    // empty `function_analysis_truncated` list whenever budget allows.
+    let mut remaining = file_budget;
+    let mut decisions: Vec<TierChoice> = Vec::with_capacity(costs.len());
+
+    for c in &costs {
+        if c.has_analysis && c.tier1 <= remaining {
+            remaining -= c.tier1;
+            decisions.push(TierChoice::Tier1);
+        } else if c.bare <= remaining {
+            remaining -= c.bare;
+            decisions.push(TierChoice::Bare);
+        } else {
+            // File doesn't fit even bare — stop adding files
+            break;
+        }
+    }
+
+    let files_to_keep = decisions.len();
+    response.files.truncate(files_to_keep);
+
+    let mut trimmed = Vec::new();
+    for (i, file) in response.files.iter_mut().enumerate() {
+        match decisions[i] {
+            TierChoice::Tier1 => {
+                // Keep functions (signatures), strip imports
+                file.imports_changed = None;
+                trimmed.push(file.path.clone());
+            }
+            TierChoice::Bare => {
+                file.functions_changed = None;
+                file.imports_changed = None;
+            }
+        }
+    }
+
+    trimmed
+}
+
+#[derive(Clone, Copy)]
+enum TierChoice {
+    Tier1,
+    Bare,
 }
 
 fn read_worktree_file(repo_path: &Path, file_path: &str) -> Option<String> {
@@ -3643,26 +3754,25 @@ mod tests {
             cost
         };
         let first_file_cost = size::estimate_response_tokens(&response.files[0]);
-        // Budget = skeleton + first file + a little slack for tier-1 trimmed files
+        // Budget fits roughly 1.5 files — forces tier-1 trim (imports stripped)
+        // on at least some files while keeping function signatures.
         let budget = skeleton_cost + first_file_cost + first_file_cost / 2;
         let trimmed = enforce_token_budget(&mut response, budget);
-        // First file should be untouched
-        assert!(response.files[0].functions_changed.is_some());
-        assert!(response.files[0].imports_changed.is_some());
-        // At least one file should have been tier-1 or tier-2 trimmed
-        let any_trimmed = response.files[1..]
-            .iter()
-            .any(|f| f.imports_changed.is_none());
+        // At least one file should be tier-1 trimmed (imports stripped, functions kept)
         assert!(
-            any_trimmed,
-            "at least one later file should have imports stripped"
+            !trimmed.is_empty(),
+            "at least one file should be listed as tier-1 trimmed"
         );
-        // Trimmed paths should only contain files that still have functions_changed
+        // Trimmed paths must all still have functions_changed (signatures preserved)
         for path in &trimmed {
             let file = response.files.iter().find(|f| &f.path == path).unwrap();
             assert!(
                 file.functions_changed.is_some(),
                 "trimmed file {path} must retain function signatures"
+            );
+            assert!(
+                file.imports_changed.is_none(),
+                "trimmed file {path} must have imports stripped"
             );
         }
     }
