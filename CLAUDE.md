@@ -12,8 +12,8 @@ Supports both commit-to-commit comparison (`main..HEAD`) and working tree compar
 
 The three read tools have very different cost profiles. Agents should call them in this order:
 
-1. **`get_change_manifest`** — cheapest, first resort. Function-level change types, line counts, signature diffs, and import changes. Answers most "what changed?" questions in a few hundred tokens.
-2. **`get_function_context`** — second call. Callers, callees, test references, and blast radius for each changed function. Combined with (1), answers "what changed and what might break".
+1. **`get_change_manifest`** — cheapest, first resort. Default response is file-level metadata, line counts, and dependency updates — a few hundred tokens for typical PRs. Function-level diffs and import changes are opt-in via `include_function_analysis: true` (default: false, as of issue #212 PR 3). Responses are bounded by `max_response_tokens` (default 8192); when the budget is exceeded, function/import detail is trimmed per file and affected paths are listed in `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0` to disable enforcement when you genuinely need the full payload.
+2. **`get_function_context`** — second call. Callers, callees, test references, and blast radius for each changed function. Combined with (1), answers "what changed and what might break". This tool reads the full manifest internally (bypassing the budget) so it always gets complete function data.
 3. **`get_file_snapshots`** — last resort, narrow use only. Returns raw before/after file content; a single default call can easily burn 5–20k tokens per file. Always pass `line_range` when you can, pass `include_before: false` when you don't need the comparison, and call with one path at a time.
 
 The `#[tool]` doc comments in `src/server.rs` encode this guidance so it reaches MCP clients directly — keep those in sync with any changes here.

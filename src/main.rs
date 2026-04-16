@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use pagination::decode_cursor;
 use tools::{
     HistoryResponse, ManifestOptions, ManifestResponse, SnapshotOptions, build_function_context,
-    build_history, build_manifest, build_snapshots, build_worktree_manifest,
+    build_history, build_manifest, build_snapshots, build_worktree_manifest, enforce_token_budget,
 };
 
 #[derive(Parser)]
@@ -42,6 +42,12 @@ enum Commands {
         /// Page size for internal pagination (default 500)
         #[arg(long, default_value_t = 500)]
         page_size: usize,
+        /// Include function-level analysis (off by default)
+        #[arg(long)]
+        include_function_analysis: bool,
+        /// Maximum estimated tokens for the response (default 8192, 0 to disable)
+        #[arg(long, default_value_t = 8192)]
+        max_response_tokens: usize,
     },
     /// Output file snapshots as JSON (CLI mode, no MCP)
     Snapshot {
@@ -124,21 +130,37 @@ fn collect_all_manifest_pages(
     page_size: usize,
 ) -> anyhow::Result<ManifestResponse> {
     let page_size = crate::pagination::clamp_page_size(page_size);
+
+    // Disable per-page budget enforcement during collection — we enforce once
+    // on the combined response below. Without this, each page is individually
+    // capped but collect re-assembles them all, defeating the budget.
+    let collection_options = ManifestOptions {
+        max_response_tokens: None,
+        ..options.clone()
+    };
+
     let mut all_files = Vec::new();
 
-    let first_page = build_manifest(repo_path, base, head, options, 0, page_size)?;
+    let first_page = build_manifest(repo_path, base, head, &collection_options, 0, page_size)?;
     all_files.extend(first_page.files);
 
     let mut next_cursor = first_page.pagination.next_cursor.clone();
     while let Some(ref cursor_str) = next_cursor {
         let cursor = decode_cursor(cursor_str)?;
-        let page = build_manifest(repo_path, base, head, options, cursor.offset, page_size)?;
+        let page = build_manifest(
+            repo_path,
+            base,
+            head,
+            &collection_options,
+            cursor.offset,
+            page_size,
+        )?;
         all_files.extend(page.files);
         next_cursor = page.pagination.next_cursor.clone();
     }
 
     let total_items = all_files.len();
-    Ok(ManifestResponse {
+    let mut response = ManifestResponse {
         metadata: first_page.metadata,
         summary: first_page.summary,
         files: all_files,
@@ -149,7 +171,24 @@ fn collect_all_manifest_pages(
             page_size: total_items,
             next_cursor: None,
         },
-    })
+    };
+
+    // Apply budget enforcement on the combined response
+    if let Some(budget) = options.max_response_tokens.filter(|&b| b > 0)
+        && options.include_function_analysis
+    {
+        let trimmed = enforce_token_budget(&mut response, budget);
+        response.metadata.function_analysis_truncated = trimmed;
+        // Sync page_size to the actual returned file count so callers can detect
+        // file dropping: response.files.len() < pagination.total_items means
+        // some files were dropped by the token budget. next_cursor is not set
+        // in combined mode; callers must re-request with a larger budget or
+        // without enforcement (max_response_tokens: 0) to get all files.
+        response.pagination.page_size = response.files.len();
+    }
+    response.metadata.token_estimate = tools::size::estimate_response_tokens(&response);
+
+    Ok(response)
 }
 
 /// Collect all manifest pages in worktree mode into a single combined response.
@@ -160,21 +199,33 @@ fn collect_all_worktree_manifest_pages(
     page_size: usize,
 ) -> anyhow::Result<ManifestResponse> {
     let page_size = crate::pagination::clamp_page_size(page_size);
+
+    let collection_options = ManifestOptions {
+        max_response_tokens: None,
+        ..options.clone()
+    };
+
     let mut all_files = Vec::new();
 
-    let first_page = build_worktree_manifest(repo_path, base, options, 0, page_size)?;
+    let first_page = build_worktree_manifest(repo_path, base, &collection_options, 0, page_size)?;
     all_files.extend(first_page.files);
 
     let mut next_cursor = first_page.pagination.next_cursor.clone();
     while let Some(ref cursor_str) = next_cursor {
         let cursor = decode_cursor(cursor_str)?;
-        let page = build_worktree_manifest(repo_path, base, options, cursor.offset, page_size)?;
+        let page = build_worktree_manifest(
+            repo_path,
+            base,
+            &collection_options,
+            cursor.offset,
+            page_size,
+        )?;
         all_files.extend(page.files);
         next_cursor = page.pagination.next_cursor.clone();
     }
 
     let total_items = all_files.len();
-    Ok(ManifestResponse {
+    let mut response = ManifestResponse {
         metadata: first_page.metadata,
         summary: first_page.summary,
         files: all_files,
@@ -185,7 +236,23 @@ fn collect_all_worktree_manifest_pages(
             page_size: total_items,
             next_cursor: None,
         },
-    })
+    };
+
+    if let Some(budget) = options.max_response_tokens.filter(|&b| b > 0)
+        && options.include_function_analysis
+    {
+        let trimmed = enforce_token_budget(&mut response, budget);
+        response.metadata.function_analysis_truncated = trimmed;
+        // Sync page_size to the actual returned file count so callers can detect
+        // file dropping: response.files.len() < pagination.total_items means
+        // some files were dropped by the token budget. next_cursor is not set
+        // in combined mode; callers must re-request with a larger budget or
+        // without enforcement (max_response_tokens: 0) to get all files.
+        response.pagination.page_size = response.files.len();
+    }
+    response.metadata.token_estimate = tools::size::estimate_response_tokens(&response);
+
+    Ok(response)
 }
 
 /// Collect all history pages into a single combined response.
@@ -234,6 +301,8 @@ async fn main() -> anyhow::Result<()> {
             range,
             repo,
             page_size,
+            include_function_analysis,
+            max_response_tokens,
         } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
@@ -241,7 +310,12 @@ async fn main() -> anyhow::Result<()> {
             let options = ManifestOptions {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
-                include_function_analysis: true,
+                include_function_analysis,
+                max_response_tokens: if max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(max_response_tokens)
+                },
             };
             let manifest = match parse_range(&range) {
                 RefRange::CommitRange { base, head } => {
@@ -271,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
                 include_function_analysis: true,
+                max_response_tokens: None,
             };
             let history =
                 collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
@@ -552,6 +627,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 500).unwrap();
@@ -568,6 +644,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // Use page_size=2, so we need 3 pages for 5 files
@@ -585,6 +662,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 2).unwrap();
@@ -602,6 +680,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // page_size=1 forces 3 pages
@@ -618,6 +697,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 500).unwrap();
@@ -634,6 +714,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // page_size=2 forces 3 pages for 5 commits
@@ -651,6 +732,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_history_pages(&path, "HEAD~4", "HEAD", &options, 2).unwrap();
@@ -669,6 +751,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 1).unwrap();

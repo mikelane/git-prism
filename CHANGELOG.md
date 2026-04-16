@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`get_change_manifest` default for `include_function_analysis` flipped to `false`.** Function-level diffs are now opt-in, aligning the tool's default with its "cheap first-resort" contract. Pass `include_function_analysis: true` to restore the previous behavior. The CLI adds an `--include-function-analysis` flag with the same effect.
+- **`get_change_manifest` enforces a token budget (default 8192).** When the response would exceed the budget, function/import analysis is progressively stripped per file via a three-tier algorithm (full → signatures-only → bare). Trimmed files that preserved their function signatures are listed in `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0` (or the CLI `--max-response-tokens 0`) to disable enforcement. Internal callers (e.g. `get_function_context`) bypass enforcement via `ManifestOptions.max_response_tokens = None`.
+- **`record_truncated` metric now carries a `reason` label.** New `reason="token_budget"` events are emitted whenever the manifest budget trims any file detail. Cardinality is bounded via `classify_truncation_reason` in `src/privacy.rs`.
+
 ## [0.6.0] — 2026-04-09
 
 > Released 2026-04-10 (retroactively tagged; see ADR 0007 for history).

@@ -59,12 +59,22 @@ impl Default for GitPrismServer {
 
 #[tool_router]
 impl GitPrismServer {
-    /// Returns structured metadata about what changed between two git refs,
-    /// including file changes, function-level diffs, import changes, and
-    /// dependency updates.
+    /// Returns structured metadata about what changed between two git refs:
+    /// file changes, line counts, and dependency updates. Function-level
+    /// diffs and import changes are opt-in via `include_function_analysis:
+    /// true` (default: false) — the default response is deliberately small
+    /// so this tool stays cheap as a first call.
     ///
-    /// This is the cheapest tool in the toolkit and should be your first call
-    /// for any "what changed between X and Y" question.
+    /// Responses are bounded by `max_response_tokens` (default 8192). When
+    /// the response would exceed the budget, function/import detail is
+    /// progressively trimmed per file; affected paths are listed in
+    /// `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0`
+    /// to disable enforcement (use with care — large diffs can overflow
+    /// MCP context limits).
+    ///
+    /// This is the cheapest tool in the toolkit and should be your first
+    /// call for any "what changed between X and Y" question. Follow up with
+    /// `get_function_context` for caller/callee detail on specific functions.
     #[tool(name = "get_change_manifest")]
     async fn get_change_manifest(
         &self,
@@ -139,6 +149,11 @@ impl GitPrismServer {
                 include_patterns: args.include_patterns,
                 exclude_patterns: args.exclude_patterns,
                 include_function_analysis: args.include_function_analysis,
+                max_response_tokens: if args.max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(args.max_response_tokens)
+                },
             };
             let result = match args.head_ref {
                 Some(head) => build_manifest(
@@ -204,6 +219,10 @@ impl GitPrismServer {
 
                 if response.pagination.next_cursor.is_some() {
                     metrics.record_truncated(tool_name, "paginated");
+                }
+
+                if !response.metadata.function_analysis_truncated.is_empty() {
+                    metrics.record_truncated(tool_name, "token_budget");
                 }
 
                 // Ref pattern classification
@@ -290,6 +309,7 @@ impl GitPrismServer {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
                 include_function_analysis: true,
+                max_response_tokens: None,
             };
             let result = build_history(
                 &repo_path,

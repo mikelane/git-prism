@@ -65,6 +65,7 @@ pub fn build_function_context(
         include_patterns: vec![],
         exclude_patterns: vec![],
         include_function_analysis: true,
+        max_response_tokens: None,
     };
     let manifest = build_manifest(repo_path, base_ref, head_ref, &options, 0, 10_000)?;
 
