@@ -754,10 +754,12 @@ pub fn enforce_token_budget(response: &mut ManifestResponse, budget: usize) -> V
     }
 
     if total_tier1 <= file_budget {
-        // Everything fits at tier 1 — strip imports, record tier1 files
+        // Everything fits at tier 1 — strip imports from files that had them,
+        // record only those as trimmed (files without imports aren't actually
+        // altered and shouldn't be listed).
         let mut trimmed = Vec::new();
         for file in &mut response.files {
-            if file.imports_changed.is_some() || file.functions_changed.is_some() {
+            if file.imports_changed.is_some() {
                 file.imports_changed = None;
                 trimmed.push(file.path.clone());
             }
