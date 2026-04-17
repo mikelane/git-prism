@@ -404,12 +404,7 @@ pub fn build_function_context_with_options(
     } else {
         None
     };
-    let next_cursor_offset = match (budget_cutoff, page_cutoff) {
-        (Some(b), Some(p)) => Some(b.min(p)),
-        (Some(b), None) => Some(b),
-        (None, Some(p)) => Some(p),
-        (None, None) => None,
-    };
+    let next_cursor_offset = resolve_next_cursor_offset(budget_cutoff, page_cutoff);
     if let Some(offset) = next_cursor_offset {
         let cursor = FunctionPaginationCursor {
             version: FUNCTION_CURSOR_VERSION,
@@ -447,6 +442,25 @@ pub fn build_function_context_with_options(
 
     response.metadata.token_estimate = size::estimate_response_tokens(&response);
     Ok(response)
+}
+
+/// Resolve the next-page cursor offset from the two independent truncation
+/// signals. `budget_cutoff` is the global offset of the first entry dropped
+/// by token-budget enforcement; `page_cutoff` is the global offset just past
+/// the page-size boundary. Both may fire on the same response, in which case
+/// the earlier offset wins so a follow-up call picks up exactly where this
+/// one stopped. `Option::min` cannot be used directly: stdlib's
+/// `Option: Ord` orders `None < Some`, which inverts the intent here.
+fn resolve_next_cursor_offset(
+    budget_cutoff: Option<usize>,
+    page_cutoff: Option<usize>,
+) -> Option<usize> {
+    match (budget_cutoff, page_cutoff) {
+        (Some(b), Some(p)) => Some(b.min(p)),
+        (Some(b), None) => Some(b),
+        (None, Some(p)) => Some(p),
+        (None, None) => None,
+    }
 }
 
 /// Two-tier per-function token budget.
@@ -934,5 +948,312 @@ mod tests {
         assert_eq!(opts.page_size, 25);
         assert!(opts.function_names.is_none());
         assert!(opts.max_response_tokens.is_none());
+    }
+
+    // --- resolve_next_cursor_offset ---
+
+    #[test]
+    fn next_cursor_resolution_both_none_returns_none() {
+        assert_eq!(resolve_next_cursor_offset(None, None), None);
+    }
+
+    #[test]
+    fn next_cursor_resolution_budget_only_returns_budget() {
+        assert_eq!(resolve_next_cursor_offset(Some(7), None), Some(7));
+    }
+
+    #[test]
+    fn next_cursor_resolution_page_only_returns_page() {
+        assert_eq!(resolve_next_cursor_offset(None, Some(42)), Some(42));
+    }
+
+    #[test]
+    fn next_cursor_resolution_budget_wins_when_smaller() {
+        // Budget-induced cutoff lands earlier than the page-size rollover;
+        // the follow-up call must resume at the budget cutoff so nothing is
+        // skipped.
+        assert_eq!(resolve_next_cursor_offset(Some(3), Some(10)), Some(3));
+    }
+
+    #[test]
+    fn next_cursor_resolution_page_wins_when_smaller() {
+        // Page-size rollover lands earlier than the budget cutoff; the
+        // remaining entries are deferred to the next page rather than being
+        // silently lost to the budget.
+        assert_eq!(resolve_next_cursor_offset(Some(20), Some(5)), Some(5));
+    }
+
+    // --- clamp_entry_lists ---
+
+    fn make_clamp_fixture_entry(
+        name: &str,
+        caller_count: usize,
+        callee_count: usize,
+        test_ref_count: usize,
+    ) -> FunctionContextEntry {
+        let callers = (0..caller_count)
+            .map(|i| CallerEntry {
+                file: format!("src/caller_{i}.rs"),
+                line: i + 1,
+                caller: format!("caller_fn_{i}"),
+                is_test: false,
+            })
+            .collect();
+        let callees = (0..callee_count)
+            .map(|i| CalleeEntry {
+                callee: format!("callee_{i}"),
+                line: i + 1,
+            })
+            .collect();
+        let test_references = (0..test_ref_count)
+            .map(|i| CallerEntry {
+                file: format!("tests/test_{i}.rs"),
+                line: i + 1,
+                caller: format!("test_caller_{i}"),
+                is_test: true,
+            })
+            .collect();
+        FunctionContextEntry {
+            name: name.to_string(),
+            file: "src/lib.rs".to_string(),
+            change_type: FunctionChangeType::Modified,
+            blast_radius: BlastRadius::compute(caller_count, test_ref_count),
+            scoping_mode: ScopingMode::Fallback,
+            callers,
+            callees,
+            test_references,
+            caller_count: caller_count + test_ref_count,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn clamp_entry_lists_truncates_callers_to_five() {
+        let mut entry = make_clamp_fixture_entry("calc", 8, 2, 1);
+        clamp_entry_lists(&mut entry, 5, 5, 3);
+        assert_eq!(entry.callers.len(), 5);
+        assert_eq!(entry.callees.len(), 2);
+        assert_eq!(entry.test_references.len(), 1);
+    }
+
+    #[test]
+    fn clamp_entry_lists_truncates_callees_to_five() {
+        let mut entry = make_clamp_fixture_entry("calc", 2, 8, 1);
+        clamp_entry_lists(&mut entry, 5, 5, 3);
+        assert_eq!(entry.callers.len(), 2);
+        assert_eq!(entry.callees.len(), 5);
+        assert_eq!(entry.test_references.len(), 1);
+    }
+
+    #[test]
+    fn clamp_entry_lists_truncates_test_refs_to_three() {
+        let mut entry = make_clamp_fixture_entry("calc", 1, 1, 6);
+        clamp_entry_lists(&mut entry, 5, 5, 3);
+        assert_eq!(entry.callers.len(), 1);
+        assert_eq!(entry.callees.len(), 1);
+        assert_eq!(entry.test_references.len(), 3);
+    }
+
+    #[test]
+    fn clamp_entry_lists_leaves_under_cap_entries_unchanged() {
+        let mut entry = make_clamp_fixture_entry("calc", 5, 5, 3);
+        clamp_entry_lists(&mut entry, 5, 5, 3);
+        assert_eq!(entry.callers.len(), 5);
+        assert_eq!(entry.callees.len(), 5);
+        assert_eq!(entry.test_references.len(), 3);
+    }
+
+    // --- budget enforcement through the public API ---
+
+    fn create_many_callers_repo() -> (TempDir, std::path::PathBuf) {
+        // Build a fixture where `calculate` is called from many production
+        // files, so the function_context response for HEAD~1..HEAD carries a
+        // long callers list and exercises the budget clamp. A `Cargo.toml`
+        // is included so RepoContext picks up the crate name and the
+        // `use crate::lib::calculate` imports resolve correctly, letting
+        // caller discovery find all 10 call sites rather than zero.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"budget_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(path.join("src")).unwrap();
+        // Eight changed functions (calc_0..calc_7) so the page slice has
+        // enough entries that a tight budget has to drop some of them,
+        // triggering both the clamped-list path and the page-rollover
+        // next_cursor marker.
+        let initial_lib: String = (0..8)
+            .map(|i| format!("pub fn calc_{i}(x: i32) -> i32 {{\n    x + {i}\n}}\n\n"))
+            .collect();
+        std::fs::write(path.join("src/lib.rs"), initial_lib).unwrap();
+        // Several call sites per function so the per-entry cost is large
+        // enough to trip the budget once more than one entry is on the page.
+        for i in 0..8 {
+            std::fs::write(
+                path.join(format!("src/caller_{i}.rs")),
+                format!(
+                    "use crate::calc_{i};\n\n\
+                     pub fn caller_a_{i}() {{ let _ = calc_{i}({i}); }}\n\
+                     pub fn caller_b_{i}() {{ let _ = calc_{i}({i} + 1); }}\n\
+                     pub fn caller_c_{i}() {{ let _ = calc_{i}({i} + 2); }}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify every calc_N so they all appear in the manifest.
+        let modified_lib: String = (0..8)
+            .map(|i| format!("pub fn calc_{i}(x: i32) -> i32 {{\n    x + {i} + x\n}}\n\n"))
+            .collect();
+        std::fs::write(path.join("src/lib.rs"), modified_lib).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "modify all calc_N"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn it_returns_full_entries_when_budget_is_large() {
+        let (_dir, path) = create_many_callers_repo();
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 25,
+            function_names: None,
+            max_response_tokens: Some(100_000),
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // Nothing should be marked truncated at a very loose budget.
+        assert!(
+            result.metadata.function_analysis_truncated.is_empty(),
+            "expected no truncated entries at 100k-token budget, got: {:?}",
+            result.metadata.function_analysis_truncated,
+        );
+        assert!(
+            result.metadata.next_cursor.is_none(),
+            "expected no next_cursor at 100k-token budget, got: {:?}",
+            result.metadata.next_cursor,
+        );
+    }
+
+    #[test]
+    fn it_clamps_entries_when_budget_is_tight() {
+        let (_dir, path) = create_many_callers_repo();
+        // Pre-flight: compute the unbounded response size so the test can
+        // pick a budget that's guaranteed to be tight without hardcoding a
+        // fragile number. If the fixture ever grows / shrinks, this stays
+        // correct. A budget well below the unbounded estimate forces the
+        // response to drop functions on the page, which in turn populates
+        // `function_analysis_truncated` via the page-rollover marker.
+        let unbounded_opts = ContextOptions {
+            cursor: None,
+            page_size: 25,
+            function_names: None,
+            max_response_tokens: Some(100_000),
+        };
+        let unbounded =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &unbounded_opts).unwrap();
+        assert!(
+            !unbounded.functions.is_empty(),
+            "fixture must produce at least one function entry for the budget test to be meaningful",
+        );
+        // Intentionally ask for a tiny slice of the unbounded response so the
+        // enforce_context_token_budget greedy walk must drop entries and
+        // produce a next_cursor. Aim at ~70% of the unbounded estimate: big
+        // enough that the skeleton + safety margin doesn't eat it all (which
+        // would zero out entry_budget and drop EVERY entry silently), small
+        // enough that the walk hits a clamp/drop threshold on at least one
+        // entry with enough survivors that the "last kept entry" marker
+        // still fires.
+        let tight_budget = (unbounded.metadata.token_estimate * 7 / 10).max(400);
+
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 25,
+            function_names: None,
+            max_response_tokens: Some(tight_budget),
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        assert!(
+            !result.metadata.function_analysis_truncated.is_empty(),
+            "expected at least one truncated entry at a {tight_budget}-token budget \
+             (unbounded estimate: {}, unbounded function count: {}), got none",
+            unbounded.metadata.token_estimate,
+            unbounded.functions.len(),
+        );
+        // At least one entry must carry the truncated flag so agents see the
+        // budget pressure at the wire level, not just in metadata.
+        assert!(
+            result.functions.iter().any(|f| f.truncated),
+            "expected at least one FunctionContextEntry.truncated=true at tight budget",
+        );
+    }
+
+    #[test]
+    fn it_skips_budget_when_max_response_tokens_is_zero() {
+        // `Some(0)` is the "disabled" sentinel on the internal
+        // ContextOptions — it must bypass enforcement entirely, just like
+        // `None` does. Without this guard a zero budget would drop every
+        // entry and produce a permanently empty response.
+        let (_dir, path) = create_many_callers_repo();
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 25,
+            function_names: None,
+            max_response_tokens: Some(0),
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        assert!(
+            result.metadata.function_analysis_truncated.is_empty(),
+            "expected no truncated entries when max_response_tokens=Some(0), got: {:?}",
+            result.metadata.function_analysis_truncated,
+        );
+        assert!(
+            !result.functions.is_empty(),
+            "expected the response to still carry entries when budget is disabled",
+        );
     }
 }

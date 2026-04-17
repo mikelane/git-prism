@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -305,6 +305,25 @@ mod tests {
         assert_eq!(decoded.offset, 37);
         assert_eq!(decoded.base_sha, "abc123");
         assert_eq!(decoded.head_sha, "def456");
+    }
+
+    #[test]
+    fn function_cursor_encode_then_decode_round_trips_different_values() {
+        // Edge case: offset=0 (first page) with realistic 40-char SHAs. A
+        // mutation that stripped the offset from the serialized form would
+        // still pass the "37" round-trip above if it accidentally hardcoded
+        // that value; the zero offset lets us see that.
+        let cursor = make_function_cursor(
+            0,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5",
+        );
+        let encoded = encode_function_cursor(&cursor);
+        let decoded = decode_function_cursor(&encoded).unwrap();
+        assert_eq!(decoded.version, FUNCTION_CURSOR_VERSION);
+        assert_eq!(decoded.offset, 0);
+        assert_eq!(decoded.base_sha, cursor.base_sha);
+        assert_eq!(decoded.head_sha, cursor.head_sha);
     }
 
     #[test]
