@@ -928,9 +928,11 @@ mod tests {
         assert_eq!(json["metadata"]["token_estimate"], 42);
         assert!(json["metadata"]["next_cursor"].is_null());
         // function_analysis_truncated skipped when empty
-        assert!(json["metadata"]
-            .get("function_analysis_truncated")
-            .is_none());
+        assert!(
+            json["metadata"]
+                .get("function_analysis_truncated")
+                .is_none()
+        );
         assert_eq!(json["functions"].as_array().unwrap().len(), 0);
         assert_eq!(json["pagination"]["total_items"], 0);
         assert_eq!(json["pagination"]["page_size"], 25);
