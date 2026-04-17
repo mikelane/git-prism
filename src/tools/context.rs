@@ -7,6 +7,7 @@ use crate::pagination::{
     FUNCTION_CURSOR_VERSION, FunctionPaginationCursor, PaginationInfo, clamp_page_size,
     decode_function_cursor, encode_function_cursor, validate_function_cursor,
 };
+use crate::tools::extension_from_path;
 use crate::tools::import_scope::{self, RepoContext};
 use crate::tools::manifest::build_manifest;
 use crate::tools::size;
@@ -47,13 +48,6 @@ impl Default for ContextOptions {
             max_response_tokens: None,
         }
     }
-}
-
-fn extension_from_path(path: &str) -> &str {
-    path.rsplit('.')
-        .next()
-        .filter(|ext| path.len() > ext.len() + 1)
-        .unwrap_or("")
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -961,41 +955,6 @@ mod tests {
         // the is_test_path patterns (no leading `test_`, no `/test/` dir, etc.)
         assert!(!is_test_path("src/latest.rs"));
         assert!(!is_test_path("pkg/contest.go"));
-    }
-
-    // --- extension_from_path ---
-
-    #[test]
-    fn extension_from_path_returns_extension_for_simple_file() {
-        assert_eq!(extension_from_path("lib.rs"), "rs");
-    }
-
-    #[test]
-    fn extension_from_path_returns_last_extension_for_double_extension() {
-        // "foo.test.ts" → "ts" (last component after the final dot)
-        assert_eq!(extension_from_path("foo.test.ts"), "ts");
-    }
-
-    #[test]
-    fn extension_from_path_returns_empty_for_no_extension() {
-        assert_eq!(extension_from_path("Makefile"), "");
-    }
-
-    #[test]
-    fn extension_from_path_returns_empty_for_empty_string() {
-        assert_eq!(extension_from_path(""), "");
-    }
-
-    #[test]
-    fn extension_from_path_handles_nested_path() {
-        assert_eq!(extension_from_path("src/tools/context.rs"), "rs");
-    }
-
-    #[test]
-    fn extension_from_path_returns_empty_for_dotfile() {
-        // ".gitignore" splits as ("", "gitignore") but path.len() == ext.len() + 1
-        // so the filter rejects it and returns "".
-        assert_eq!(extension_from_path(".gitignore"), "");
     }
 
     // --- ContextOptions::default ---
