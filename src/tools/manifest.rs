@@ -344,7 +344,7 @@ pub fn build_manifest(
 
     let next_cursor = if page_end < total_files {
         Some(encode_cursor(&PaginationCursor {
-            v: 1,
+            version: 1,
             offset: page_end,
             base_sha: base_commit.sha.clone(),
             head_sha: head_commit.sha.clone(),
@@ -411,7 +411,7 @@ pub fn build_manifest(
         response.pagination.page_size = actual_page_files;
         if actual_end < total_files {
             response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
-                v: 1,
+                version: 1,
                 offset: actual_end,
                 base_sha: response.metadata.base_sha.clone(),
                 head_sha: response.metadata.head_sha.clone(),
@@ -599,7 +599,7 @@ pub fn build_worktree_manifest(
 
     let next_cursor = if page_end < total_files {
         Some(encode_cursor(&PaginationCursor {
-            v: 1,
+            version: 1,
             offset: page_end,
             base_sha: base_commit.sha.clone(),
             head_sha: "WORKTREE".to_string(),
@@ -664,7 +664,7 @@ pub fn build_worktree_manifest(
         response.pagination.page_size = actual_page_files;
         if actual_end < total_files {
             response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
-                v: 1,
+                version: 1,
                 offset: actual_end,
                 base_sha: response.metadata.base_sha.clone(),
                 head_sha: "WORKTREE".to_string(),
@@ -3226,7 +3226,7 @@ mod tests {
         let cursor_str = manifest.pagination.next_cursor.as_ref().unwrap();
         let cursor = crate::pagination::decode_cursor(cursor_str).unwrap();
         assert_eq!(cursor.offset, 3, "next cursor offset should be page_end");
-        assert_eq!(cursor.v, 1);
+        assert_eq!(cursor.version, 1);
         // SHAs should match the metadata
         assert_eq!(cursor.base_sha, manifest.metadata.base_sha);
         assert_eq!(cursor.head_sha, manifest.metadata.head_sha);

@@ -130,44 +130,32 @@ fn parse_range(range: &str) -> RefRange<'_> {
     }
 }
 
-/// Collect all manifest pages into a single combined response.
+/// Assemble paginated manifest pages into a single combined `ManifestResponse`,
+/// then apply token-budget enforcement on the combined result.
 ///
-/// Loops through pages using the given `page_size` until `next_cursor` is `None`,
-/// accumulating all file entries. Returns a single `ManifestResponse` with the
-/// first page's metadata/summary and all collected files.
-fn collect_all_manifest_pages(
-    repo_path: &Path,
-    base: &str,
-    head: &str,
+/// `fetch_page` is called with `(offset, page_size)` and must return one page.
+/// The first call is always at offset 0; subsequent calls use the cursor offset
+/// from the previous page's `pagination.next_cursor`.
+///
+/// Budget enforcement is intentionally deferred to the combined response:
+/// per-page enforcement would cap each page individually but the caller would
+/// re-assemble them all, defeating the budget.
+fn collect_manifest_pages(
+    fetch_page: impl Fn(usize, usize) -> anyhow::Result<ManifestResponse>,
     options: &ManifestOptions,
     page_size: usize,
 ) -> anyhow::Result<ManifestResponse> {
     let page_size = crate::pagination::clamp_page_size(page_size);
 
-    // Disable per-page budget enforcement during collection — we enforce once
-    // on the combined response below. Without this, each page is individually
-    // capped but collect re-assembles them all, defeating the budget.
-    let collection_options = ManifestOptions {
-        max_response_tokens: None,
-        ..options.clone()
-    };
-
     let mut all_files = Vec::new();
 
-    let first_page = build_manifest(repo_path, base, head, &collection_options, 0, page_size)?;
+    let first_page = fetch_page(0, page_size)?;
     all_files.extend(first_page.files);
 
     let mut next_cursor = first_page.pagination.next_cursor.clone();
     while let Some(ref cursor_str) = next_cursor {
         let cursor = decode_cursor(cursor_str)?;
-        let page = build_manifest(
-            repo_path,
-            base,
-            head,
-            &collection_options,
-            cursor.offset,
-            page_size,
-        )?;
+        let page = fetch_page(cursor.offset, page_size)?;
         all_files.extend(page.files);
         next_cursor = page.pagination.next_cursor.clone();
     }
@@ -204,6 +192,31 @@ fn collect_all_manifest_pages(
     Ok(response)
 }
 
+/// Collect all manifest pages into a single combined response.
+///
+/// Loops through pages using the given `page_size` until `next_cursor` is `None`,
+/// accumulating all file entries. Returns a single `ManifestResponse` with the
+/// first page's metadata/summary and all collected files.
+fn collect_all_manifest_pages(
+    repo_path: &Path,
+    base: &str,
+    head: &str,
+    options: &ManifestOptions,
+    page_size: usize,
+) -> anyhow::Result<ManifestResponse> {
+    // Disable per-page budget enforcement during collection — enforced once on
+    // the combined response inside `collect_manifest_pages`.
+    let collection_options = ManifestOptions {
+        max_response_tokens: None,
+        ..options.clone()
+    };
+    collect_manifest_pages(
+        |offset, ps| build_manifest(repo_path, base, head, &collection_options, offset, ps).map_err(anyhow::Error::from),
+        options,
+        page_size,
+    )
+}
+
 /// Collect all manifest pages in worktree mode into a single combined response.
 fn collect_all_worktree_manifest_pages(
     repo_path: &Path,
@@ -211,61 +224,17 @@ fn collect_all_worktree_manifest_pages(
     options: &ManifestOptions,
     page_size: usize,
 ) -> anyhow::Result<ManifestResponse> {
-    let page_size = crate::pagination::clamp_page_size(page_size);
-
+    // Disable per-page budget enforcement during collection — enforced once on
+    // the combined response inside `collect_manifest_pages`.
     let collection_options = ManifestOptions {
         max_response_tokens: None,
         ..options.clone()
     };
-
-    let mut all_files = Vec::new();
-
-    let first_page = build_worktree_manifest(repo_path, base, &collection_options, 0, page_size)?;
-    all_files.extend(first_page.files);
-
-    let mut next_cursor = first_page.pagination.next_cursor.clone();
-    while let Some(ref cursor_str) = next_cursor {
-        let cursor = decode_cursor(cursor_str)?;
-        let page = build_worktree_manifest(
-            repo_path,
-            base,
-            &collection_options,
-            cursor.offset,
-            page_size,
-        )?;
-        all_files.extend(page.files);
-        next_cursor = page.pagination.next_cursor.clone();
-    }
-
-    let total_items = all_files.len();
-    let mut response = ManifestResponse {
-        metadata: first_page.metadata,
-        summary: first_page.summary,
-        files: all_files,
-        dependency_changes: first_page.dependency_changes,
-        pagination: pagination::PaginationInfo {
-            total_items,
-            page_start: 0,
-            page_size: total_items,
-            next_cursor: None,
-        },
-    };
-
-    if let Some(budget) = options.max_response_tokens.filter(|&b| b > 0)
-        && options.include_function_analysis
-    {
-        let trimmed = enforce_token_budget(&mut response, budget);
-        response.metadata.function_analysis_truncated = trimmed;
-        // Sync page_size to the actual returned file count so callers can detect
-        // file dropping: response.files.len() < pagination.total_items means
-        // some files were dropped by the token budget. next_cursor is not set
-        // in combined mode; callers must re-request with a larger budget or
-        // without enforcement (max_response_tokens: 0) to get all files.
-        response.pagination.page_size = response.files.len();
-    }
-    response.metadata.token_estimate = tools::size::estimate_response_tokens(&response);
-
-    Ok(response)
+    collect_manifest_pages(
+        |offset, ps| build_worktree_manifest(repo_path, base, &collection_options, offset, ps).map_err(anyhow::Error::from),
+        options,
+        page_size,
+    )
 }
 
 /// Collect all history pages into a single combined response.

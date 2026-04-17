@@ -412,7 +412,7 @@ pub fn build_function_context_with_options(
     };
     if let Some(offset) = next_cursor_offset {
         let cursor = FunctionPaginationCursor {
-            v: FUNCTION_CURSOR_VERSION,
+            version: FUNCTION_CURSOR_VERSION,
             offset,
             base_sha: base_commit.sha.clone(),
             head_sha: head_commit.sha.clone(),
@@ -828,9 +828,111 @@ mod tests {
     }
 
     #[test]
+    fn is_test_path_detects_spec_directory() {
+        assert!(is_test_path("spec/models/user_spec.rb"));
+    }
+
+    #[test]
+    fn is_test_path_detects_go_test_suffix() {
+        assert!(is_test_path("pkg/handler_test.go"));
+    }
+
+    #[test]
+    fn is_test_path_detects_rust_test_suffix() {
+        assert!(is_test_path("src/lib_test.rs"));
+    }
+
+    #[test]
+    fn is_test_path_detects_dot_test_extensions() {
+        assert!(is_test_path("src/components/Button.test.ts"));
+        assert!(is_test_path("src/utils.test.js"));
+        assert!(is_test_path("src/App.test.tsx"));
+        assert!(is_test_path("src/App.test.jsx"));
+    }
+
+    #[test]
+    fn is_test_path_detects_spec_rb_suffix() {
+        assert!(is_test_path("models/user_spec.rb"));
+    }
+
+    #[test]
+    fn is_test_path_detects_java_test_suffix() {
+        assert!(is_test_path("src/UserTest.java"));
+    }
+
+    #[test]
+    fn is_test_path_detects_csharp_tests_suffix() {
+        assert!(is_test_path("src/UserTests.cs"));
+    }
+
+    #[test]
+    fn is_test_path_detects_test_prefix_in_filename() {
+        // The is_test_path function matches `test_` anywhere in the lowercased
+        // path — including filenames like test_utils.py. This test documents
+        // the current behaviour so a mutation that removes the `test_` arm is
+        // caught immediately.
+        assert!(is_test_path("src/test_utils.py"));
+        assert!(is_test_path("test_helpers.go"));
+    }
+
+    #[test]
     fn is_test_path_rejects_production_paths() {
         assert!(!is_test_path("src/main.rs"));
         assert!(!is_test_path("src/server.py"));
         assert!(!is_test_path("pkg/handler.go"));
+    }
+
+    #[test]
+    fn is_test_path_rejects_path_with_test_only_in_component_name_not_matching_patterns() {
+        // "latest" contains "test" as a substring but does not match any of
+        // the is_test_path patterns (no leading `test_`, no `/test/` dir, etc.)
+        assert!(!is_test_path("src/latest.rs"));
+        assert!(!is_test_path("pkg/contest.go"));
+    }
+
+    // --- extension_from_path ---
+
+    #[test]
+    fn extension_from_path_returns_extension_for_simple_file() {
+        assert_eq!(extension_from_path("lib.rs"), "rs");
+    }
+
+    #[test]
+    fn extension_from_path_returns_last_extension_for_double_extension() {
+        // "foo.test.ts" → "ts" (last component after the final dot)
+        assert_eq!(extension_from_path("foo.test.ts"), "ts");
+    }
+
+    #[test]
+    fn extension_from_path_returns_empty_for_no_extension() {
+        assert_eq!(extension_from_path("Makefile"), "");
+    }
+
+    #[test]
+    fn extension_from_path_returns_empty_for_empty_string() {
+        assert_eq!(extension_from_path(""), "");
+    }
+
+    #[test]
+    fn extension_from_path_handles_nested_path() {
+        assert_eq!(extension_from_path("src/tools/context.rs"), "rs");
+    }
+
+    #[test]
+    fn extension_from_path_returns_empty_for_dotfile() {
+        // ".gitignore" splits as ("", "gitignore") but path.len() == ext.len() + 1
+        // so the filter rejects it and returns "".
+        assert_eq!(extension_from_path(".gitignore"), "");
+    }
+
+    // --- ContextOptions::default ---
+
+    #[test]
+    fn context_options_default_has_expected_values() {
+        let opts = ContextOptions::default();
+        assert!(opts.cursor.is_none());
+        assert_eq!(opts.page_size, 25);
+        assert!(opts.function_names.is_none());
+        assert!(opts.max_response_tokens.is_none());
     }
 }

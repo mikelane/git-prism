@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,9 @@ pub enum CursorError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PaginationCursor {
-    pub v: u32,
+    /// Serialized as `"v"` to keep the opaque cursor payload compact.
+    #[serde(rename = "v")]
+    pub version: u32,
     pub offset: usize,
     pub base_sha: String,
     pub head_sha: String,
@@ -52,9 +54,9 @@ pub fn validate_cursor(
     current_base_sha: &str,
     current_head_sha: &str,
 ) -> Result<(), CursorError> {
-    if cursor.v != CURSOR_VERSION {
+    if cursor.version != CURSOR_VERSION {
         return Err(CursorError::UnsupportedVersion {
-            got: cursor.v,
+            got: cursor.version,
             expected: CURSOR_VERSION,
         });
     }
@@ -79,7 +81,9 @@ pub fn decode_cursor(s: &str) -> Result<PaginationCursor, CursorError> {
 /// paginated calls; it is not serialized into the cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FunctionPaginationCursor {
-    pub v: u32,
+    /// Serialized as `"v"` to keep the opaque cursor payload compact.
+    #[serde(rename = "v")]
+    pub version: u32,
     pub offset: usize,
     pub base_sha: String,
     pub head_sha: String,
@@ -103,9 +107,9 @@ pub fn validate_function_cursor(
     current_base_sha: &str,
     current_head_sha: &str,
 ) -> Result<(), CursorError> {
-    if cursor.v != FUNCTION_CURSOR_VERSION {
+    if cursor.version != FUNCTION_CURSOR_VERSION {
         return Err(CursorError::UnsupportedVersion {
-            got: cursor.v,
+            got: cursor.version,
             expected: FUNCTION_CURSOR_VERSION,
         });
     }
@@ -121,7 +125,7 @@ mod tests {
 
     fn make_cursor(offset: usize, base_sha: &str, head_sha: &str) -> PaginationCursor {
         PaginationCursor {
-            v: CURSOR_VERSION,
+            version: CURSOR_VERSION,
             offset,
             base_sha: base_sha.into(),
             head_sha: head_sha.into(),
@@ -152,7 +156,7 @@ mod tests {
         let cursor = make_cursor(100, "abc123", "def456");
         let encoded = encode_cursor(&cursor);
         let decoded = decode_cursor(&encoded).unwrap();
-        assert_eq!(decoded.v, CURSOR_VERSION);
+        assert_eq!(decoded.version, CURSOR_VERSION);
         assert_eq!(decoded.offset, 100);
         assert_eq!(decoded.base_sha, "abc123");
         assert_eq!(decoded.head_sha, "def456");
@@ -199,7 +203,7 @@ mod tests {
     #[test]
     fn validate_cursor_rejects_wrong_version() {
         let cursor = PaginationCursor {
-            v: 99,
+            version: 99,
             offset: 0,
             base_sha: "abc".into(),
             head_sha: "def".into(),
@@ -266,7 +270,7 @@ mod tests {
         head_sha: &str,
     ) -> FunctionPaginationCursor {
         FunctionPaginationCursor {
-            v: FUNCTION_CURSOR_VERSION,
+            version: FUNCTION_CURSOR_VERSION,
             offset,
             base_sha: base_sha.into(),
             head_sha: head_sha.into(),
@@ -297,7 +301,7 @@ mod tests {
         let cursor = make_function_cursor(37, "abc123", "def456");
         let encoded = encode_function_cursor(&cursor);
         let decoded = decode_function_cursor(&encoded).unwrap();
-        assert_eq!(decoded.v, FUNCTION_CURSOR_VERSION);
+        assert_eq!(decoded.version, FUNCTION_CURSOR_VERSION);
         assert_eq!(decoded.offset, 37);
         assert_eq!(decoded.base_sha, "abc123");
         assert_eq!(decoded.head_sha, "def456");
@@ -330,7 +334,7 @@ mod tests {
     #[test]
     fn function_cursor_validate_rejects_wrong_version() {
         let cursor = FunctionPaginationCursor {
-            v: 99,
+            version: 99,
             offset: 0,
             base_sha: "abc".into(),
             head_sha: "def".into(),

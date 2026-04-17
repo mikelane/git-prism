@@ -846,4 +846,106 @@ mod tests {
         assert_eq!(low.risk, RiskLevel::Low);
         assert_eq!(medium.risk, RiskLevel::Medium);
     }
+
+    #[test]
+    fn context_args_deserializes_with_defaults() {
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD"}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.base_ref, "main");
+        assert_eq!(args.head_ref, "HEAD");
+        assert!(args.cursor.is_none());
+        assert_eq!(args.page_size, 25);
+        assert!(args.function_names.is_none());
+        assert_eq!(args.max_response_tokens, 8192);
+    }
+
+    #[test]
+    fn context_args_accepts_pagination_params() {
+        let json =
+            r#"{"base_ref": "main", "head_ref": "HEAD", "cursor": "tok123", "page_size": 10}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.cursor.as_deref(), Some("tok123"));
+        assert_eq!(args.page_size, 10);
+    }
+
+    #[test]
+    fn context_args_accepts_function_names_filter() {
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD", "function_names": ["foo", "bar"]}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            args.function_names.as_deref(),
+            Some(vec!["foo".to_string(), "bar".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn context_args_zero_max_response_tokens_deserializes() {
+        // Callers pass 0 to disable budget enforcement; must round-trip cleanly.
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD", "max_response_tokens": 0}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.max_response_tokens, 0);
+    }
+
+    #[test]
+    fn function_context_response_serializes_to_json() {
+        use chrono::Utc;
+        let response = FunctionContextResponse {
+            metadata: ContextMetadata {
+                base_ref: "HEAD~1".into(),
+                head_ref: "HEAD".into(),
+                base_sha: "abc123".into(),
+                head_sha: "def456".into(),
+                generated_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                token_estimate: 42,
+                function_analysis_truncated: vec![],
+                next_cursor: None,
+            },
+            functions: vec![],
+            pagination: PaginationInfo {
+                total_items: 0,
+                page_start: 0,
+                page_size: 25,
+                next_cursor: None,
+            },
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["metadata"]["base_ref"], "HEAD~1");
+        assert_eq!(json["metadata"]["head_ref"], "HEAD");
+        assert_eq!(json["metadata"]["token_estimate"], 42);
+        assert!(json["metadata"]["next_cursor"].is_null());
+        // function_analysis_truncated skipped when empty
+        assert!(json["metadata"]
+            .get("function_analysis_truncated")
+            .is_none());
+        assert_eq!(json["functions"].as_array().unwrap().len(), 0);
+        assert_eq!(json["pagination"]["total_items"], 0);
+        assert_eq!(json["pagination"]["page_size"], 25);
+    }
+
+    #[test]
+    fn context_metadata_serializes_next_cursor_when_present() {
+        use chrono::Utc;
+        let metadata = ContextMetadata {
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            base_sha: "a".into(),
+            head_sha: "b".into(),
+            generated_at: Utc::now(),
+            token_estimate: 0,
+            function_analysis_truncated: vec!["some_fn".into()],
+            next_cursor: Some("cursor_opaque_token".into()),
+        };
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["next_cursor"], "cursor_opaque_token");
+        assert_eq!(
+            json["function_analysis_truncated"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(json["function_analysis_truncated"][0], "some_fn");
+    }
 }

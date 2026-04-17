@@ -69,19 +69,23 @@ def step_request_change_manifest(context: Context) -> None:
 
 @when("an agent requests the change manifest without opting in to function analysis")
 def step_request_manifest_without_function_analysis(context: Context) -> None:
-    """Invoke the default manifest path to assert that function analysis is
-    off by default. RED today because the CLI hardcodes
-    `include_function_analysis: true` in src/main.rs; PR 3 will introduce the
-    default-off semantics that make the paired Then step pass."""
+    """Invoke the default manifest path to assert that function analysis is off by default.
+
+    RED today because the CLI hardcodes `include_function_analysis: true` in
+    src/main.rs; PR 3 will introduce the default-off semantics that make the
+    paired Then step pass.
+    """
     _run_cli(context, _manifest_args())
 
 
 @when("an agent requests the change manifest with function analysis enabled")
 def step_request_manifest_with_function_analysis(context: Context) -> None:
-    """Invoke the manifest with the opt-in flag to exercise the function-
-    analysis path. RED today because `--include-function-analysis` is not yet
-    a real CLI flag — passing it produces a non-zero exit and empty stdout,
-    and the paired Then step fails when it tries to navigate the response."""
+    """Invoke the manifest with the opt-in flag to exercise the function-analysis path.
+
+    RED today because `--include-function-analysis` is not yet a real CLI flag —
+    passing it produces a non-zero exit and empty stdout, and the paired Then
+    step fails when it tries to navigate the response.
+    """
     _run_cli(context, [*_manifest_args(), "--include-function-analysis"])
 
 
@@ -90,8 +94,11 @@ def step_request_manifest_with_function_analysis(context: Context) -> None:
     "and a {budget:d} token budget",
 )
 def step_request_manifest_with_budget(context: Context, budget: int) -> None:
-    """Invoke the manifest with function analysis and an explicit token
-    budget to exercise the budget-clamping path."""
+    """Invoke the manifest with function analysis and an explicit token budget.
+
+    Exercises the budget-clamping path where large responses are trimmed to fit
+    within the requested token envelope.
+    """
     _run_cli(
         context,
         [
@@ -129,6 +136,11 @@ def step_request_function_context_without_filter(context: Context) -> None:
 
 @when("the agent requests function context with that cursor")
 def step_request_function_context_with_cursor(context: Context) -> None:
+    """Invoke the context call using the cursor stashed by the preceding Given step.
+
+    Fails with AssertionError (not AttributeError) when no cursor was captured,
+    producing a legible failure message instead of a bare Python exception.
+    """
     cursor = getattr(context, "next_cursor", None)
     assert cursor is not None, (
         "No next_cursor stashed on context -- the preceding Given step "
@@ -186,6 +198,7 @@ def step_precondition_first_page_cursor(context: Context) -> None:
 
 @then("the response lists every changed file with summary counts")
 def step_response_lists_every_changed_file(context: Context) -> None:
+    """Assert that the manifest response contains a non-empty files list with per-file line counts."""
     data = _ensure_json_parsed(context)
     files = _navigate_dotted_path(data, "files")
     assert isinstance(files, list) and files, (
@@ -205,6 +218,7 @@ def step_response_lists_every_changed_file(context: Context) -> None:
 
 @then("the response omits per-function signature diffs")
 def step_response_omits_function_diffs(context: Context) -> None:
+    """Assert that the default manifest response carries no populated functions_changed lists."""
     data = _ensure_json_parsed(context)
     files = _navigate_dotted_path(data, "files")
     offenders = [
@@ -220,6 +234,7 @@ def step_response_omits_function_diffs(context: Context) -> None:
 
 @then("the response includes per-function signature diffs for files within the budget")
 def step_response_includes_function_diffs(context: Context) -> None:
+    """Assert that every supported-language file carries a populated functions_changed list."""
     data = _ensure_json_parsed(context)
     files = _navigate_dotted_path(data, "files")
     # Only check files with a supported language — tree-sitter returns null
@@ -236,6 +251,7 @@ def step_response_includes_function_diffs(context: Context) -> None:
 
 @then("the response token_estimate is at most {limit:d}")
 def step_response_token_estimate_at_most(context: Context, limit: int) -> None:
+    """Assert that metadata.token_estimate does not exceed the requested budget."""
     data = _ensure_json_parsed(context)
     actual = _navigate_dotted_path(data, "metadata.token_estimate")
     assert isinstance(actual, int), (
@@ -248,6 +264,7 @@ def step_response_token_estimate_at_most(context: Context, limit: int) -> None:
 
 @then("the response metadata lists every file whose function detail was trimmed")
 def step_response_lists_trimmed_files(context: Context) -> None:
+    """Assert that metadata.function_analysis_truncated is a non-empty list of file paths."""
     data = _ensure_json_parsed(context)
     trimmed = _navigate_dotted_path(data, "metadata.function_analysis_truncated")
     assert isinstance(trimmed, list) and trimmed, (
@@ -258,6 +275,7 @@ def step_response_lists_trimmed_files(context: Context) -> None:
 
 @then("the trimmed files preserve their function signatures")
 def step_response_trimmed_files_preserve_signatures(context: Context) -> None:
+    """Assert that budget-trimmed files retain function signatures but have bodies dropped."""
     data = _ensure_json_parsed(context)
     trimmed_paths = _navigate_dotted_path(data, "metadata.function_analysis_truncated")
     files_by_path = {entry.get("path"): entry for entry in data.get("files", [])}
@@ -284,6 +302,10 @@ def step_response_trimmed_files_preserve_signatures(context: Context) -> None:
 
 @then("the response metadata includes a token_estimate for the payload")
 def step_response_metadata_token_estimate(context: Context) -> None:
+    """Assert that metadata.token_estimate is a positive integer.
+
+    RED until PR 2 lands token_estimate in the response metadata.
+    """
     data = _ensure_json_parsed(context)
     estimate = _navigate_dotted_path(data, "metadata.token_estimate")
     assert isinstance(estimate, int) and estimate > 0, (
@@ -297,6 +319,7 @@ def step_response_metadata_token_estimate(context: Context) -> None:
 
 @then("the response contains the first page of changed functions in deterministic order")
 def step_response_first_page_deterministic(context: Context) -> None:
+    """Assert that the functions list is non-empty and sorted lexicographically by name."""
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
     assert isinstance(functions, list) and functions, (
@@ -310,6 +333,10 @@ def step_response_first_page_deterministic(context: Context) -> None:
 
 @then("the response metadata includes a next-page cursor")
 def step_response_metadata_next_cursor(context: Context) -> None:
+    """Assert that metadata.next_cursor is a non-empty string.
+
+    RED until PR 4 lands pagination support.
+    """
     data = _ensure_json_parsed(context)
     cursor = _navigate_dotted_path(data, "metadata.next_cursor")
     assert isinstance(cursor, str) and cursor, (
@@ -320,6 +347,7 @@ def step_response_metadata_next_cursor(context: Context) -> None:
 
 @then("the response contains the next page of changed functions")
 def step_response_next_page(context: Context) -> None:
+    """Assert that the second-page response contains a non-empty functions list."""
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
     assert isinstance(functions, list) and functions, (
@@ -330,6 +358,7 @@ def step_response_next_page(context: Context) -> None:
 
 @then("no function appears in both pages")
 def step_response_no_overlap(context: Context) -> None:
+    """Assert that the set of function names on page 1 and page 2 are disjoint."""
     first_page = getattr(context, "first_page_response", None)
     assert first_page is not None, (
         "first_page_response missing -- the Given step that captures the "
@@ -344,6 +373,7 @@ def step_response_no_overlap(context: Context) -> None:
 
 @then("the response contains exactly those two functions")
 def step_response_contains_exact_two(context: Context) -> None:
+    """Assert that the name-filtered response contains exactly function_0001 and function_0002."""
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
     names = sorted(fn.get("name") or "" for fn in functions)
@@ -355,6 +385,7 @@ def step_response_contains_exact_two(context: Context) -> None:
 
 @then("functions outside the filter are not included")
 def step_response_functions_outside_filter_excluded(context: Context) -> None:
+    """Assert that no function names outside the allow-list appear in the response."""
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
     offenders = [
@@ -369,6 +400,7 @@ def step_response_functions_outside_filter_excluded(context: Context) -> None:
 
 @then("at least one function entry is marked as truncated")
 def step_response_at_least_one_truncated(context: Context) -> None:
+    """Assert that the budget-clamped response flags at least one entry with truncated=true."""
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
     truncated = [fn for fn in functions if fn.get("truncated")]
@@ -380,6 +412,15 @@ def step_response_at_least_one_truncated(context: Context) -> None:
 
 @then("the truncated entries have shortened caller and callee lists")
 def step_response_truncated_entries_shortened(context: Context) -> None:
+    """Assert that truncated entries have fewer callers/callees than non-truncated entries.
+
+    Handles three degenerate fixture cases:
+    - All entries are truncated (no baseline): verifies each entry's visible caller
+      count does not exceed its recorded caller_count sentinel.
+    - Non-truncated baseline exists but has zero callers/callees: degenerates to
+      "not longer than baseline" (trivially satisfied at zero).
+    - Normal case: at least one truncated entry must be shorter than the baseline.
+    """
     data = _ensure_json_parsed(context)
     functions = _navigate_dotted_path(data, "functions")
     truncated = [fn for fn in functions if fn.get("truncated")]

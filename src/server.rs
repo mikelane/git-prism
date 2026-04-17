@@ -11,6 +11,7 @@ use crate::tools::{
     build_function_context_with_options, build_history, build_manifest, build_snapshots,
     build_worktree_manifest,
 };
+use crate::tools::types::{FunctionContextEntry, detect_language};
 
 /// Convert a `ChangeScope` variant to a static metric label string.
 fn change_scope_label(scope: ChangeScope) -> &'static str {
@@ -26,11 +27,11 @@ fn change_scope_label(scope: ChangeScope) -> &'static str {
 /// be detected from the extension are excluded to keep metric label cardinality
 /// bounded and consistent with the manifest tool's `functions_changed` signal.
 fn functions_per_language_counts(
-    entries: &[crate::tools::types::FunctionContextEntry],
+    entries: &[FunctionContextEntry],
 ) -> std::collections::HashMap<&'static str, u64> {
     let mut counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
     for entry in entries {
-        let language = crate::tools::types::detect_language(&entry.file);
+        let language = detect_language(&entry.file);
         if language != "unknown" {
             *counts.entry(language).or_insert(0) += 1;
         }
@@ -198,8 +199,10 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. The double cost is acceptable at
+                // current scale; a response cache could eliminate it if it becomes
+                // measurable.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -349,8 +352,9 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. Double cost is acceptable at
+                // current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -477,7 +481,8 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized again by rmcp — consider caching or estimating size
+                // Response is serialized again by rmcp for transport. Double cost is
+                // acceptable at current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
