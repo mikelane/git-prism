@@ -211,7 +211,10 @@ fn collect_all_manifest_pages(
         ..options.clone()
     };
     collect_manifest_pages(
-        |offset, ps| build_manifest(repo_path, base, head, &collection_options, offset, ps).map_err(anyhow::Error::from),
+        |offset, ps| {
+            build_manifest(repo_path, base, head, &collection_options, offset, ps)
+                .map_err(anyhow::Error::from)
+        },
         options,
         page_size,
     )
@@ -231,7 +234,10 @@ fn collect_all_worktree_manifest_pages(
         ..options.clone()
     };
     collect_manifest_pages(
-        |offset, ps| build_worktree_manifest(repo_path, base, &collection_options, offset, ps).map_err(anyhow::Error::from),
+        |offset, ps| {
+            build_worktree_manifest(repo_path, base, &collection_options, offset, ps)
+                .map_err(anyhow::Error::from)
+        },
         options,
         page_size,
     )

@@ -5,13 +5,13 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use crate::git::diff::ChangeScope;
+use crate::tools::types::{FunctionContextEntry, detect_language};
 use crate::tools::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,
     ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions, SnapshotResponse,
     build_function_context_with_options, build_history, build_manifest, build_snapshots,
     build_worktree_manifest,
 };
-use crate::tools::types::{FunctionContextEntry, detect_language};
 
 /// Convert a `ChangeScope` variant to a static metric label string.
 fn change_scope_label(scope: ChangeScope) -> &'static str {

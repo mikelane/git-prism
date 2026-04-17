@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::git::reader::RepoReader;
-use crate::pagination::{encode_cursor, PaginationCursor, PaginationInfo};
+use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
 use crate::tools::manifest::build_manifest;
 use crate::tools::types::{
     CommitManifest, CommitMetadata, HistoryResponse, ManifestOptions, ToolError,
