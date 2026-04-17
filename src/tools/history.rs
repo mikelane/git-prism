@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::git::reader::RepoReader;
-use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
+use crate::pagination::{CURSOR_VERSION, PaginationCursor, PaginationInfo, encode_cursor};
 use crate::tools::manifest::build_manifest;
 use crate::tools::types::{
     CommitManifest, CommitMetadata, HistoryResponse, ManifestOptions, ToolError,
@@ -53,7 +53,7 @@ pub fn build_history(
 
     let next_cursor = if page_end < total_commits {
         Some(encode_cursor(&PaginationCursor {
-            version: 1,
+            version: CURSOR_VERSION,
             offset: page_end,
             base_sha,
             head_sha,

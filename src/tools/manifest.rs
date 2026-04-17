@@ -7,7 +7,7 @@ use crate::git::depfiles::{diff_dependencies, is_dependency_file};
 use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
-use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
+use crate::pagination::{CURSOR_VERSION, PaginationCursor, PaginationInfo, encode_cursor};
 use crate::tools::size;
 use crate::tools::types::{
     FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
@@ -344,7 +344,7 @@ pub fn build_manifest(
 
     let next_cursor = if page_end < total_files {
         Some(encode_cursor(&PaginationCursor {
-            version: 1,
+            version: CURSOR_VERSION,
             offset: page_end,
             base_sha: base_commit.sha.clone(),
             head_sha: head_commit.sha.clone(),
@@ -411,7 +411,7 @@ pub fn build_manifest(
         response.pagination.page_size = actual_page_files;
         if actual_end < total_files {
             response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
-                version: 1,
+                version: CURSOR_VERSION,
                 offset: actual_end,
                 base_sha: response.metadata.base_sha.clone(),
                 head_sha: response.metadata.head_sha.clone(),
@@ -599,7 +599,7 @@ pub fn build_worktree_manifest(
 
     let next_cursor = if page_end < total_files {
         Some(encode_cursor(&PaginationCursor {
-            version: 1,
+            version: CURSOR_VERSION,
             offset: page_end,
             base_sha: base_commit.sha.clone(),
             head_sha: "WORKTREE".to_string(),
@@ -664,7 +664,7 @@ pub fn build_worktree_manifest(
         response.pagination.page_size = actual_page_files;
         if actual_end < total_files {
             response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
-                version: 1,
+                version: CURSOR_VERSION,
                 offset: actual_end,
                 base_sha: response.metadata.base_sha.clone(),
                 head_sha: "WORKTREE".to_string(),

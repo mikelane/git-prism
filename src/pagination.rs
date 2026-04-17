@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const CURSOR_VERSION: u32 = 1;
+pub(crate) const CURSOR_VERSION: u32 = 1;
 
 /// Version tag for [`FunctionPaginationCursor`]. Kept separate from
 /// [`CURSOR_VERSION`] so the file- and function-level cursor shapes can evolve
