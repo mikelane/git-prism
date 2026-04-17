@@ -294,9 +294,18 @@ def step_response_trimmed_files_preserve_signatures(context: Context) -> None:
             assert signature, (
                 f"Trimmed function in {path!r} is missing its signature: {fn}"
             )
-            assert not fn.get("body"), (
-                f"Trimmed function in {path!r} should have its body dropped, "
-                f"but body is still present: {fn.get('body')!r}"
+            # FunctionChange has no `body` field (see src/tools/types.rs —
+            # the real fields are name, old_name, change_type, start_line,
+            # end_line, signature). Assert on what DOES exist so trimming
+            # is actually validated: the identity fields (name, change_type)
+            # must survive even when the file is in function_analysis_truncated.
+            assert fn.get("name"), (
+                f"Trimmed function in {path!r} should still carry its name, "
+                f"but 'name' is absent: {fn!r}"
+            )
+            assert fn.get("change_type"), (
+                f"Trimmed function in {path!r} should preserve its change_type, "
+                f"but 'change_type' is absent: {fn!r}"
             )
 
 
