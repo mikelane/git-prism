@@ -542,12 +542,18 @@ impl GitPrismServer {
                 repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
                 ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
                 ref_head = crate::privacy::normalize_ref_pattern(&args.head_ref).as_str(),
+                response_functions_count = tracing::field::Empty,
                 response_files_count = tracing::field::Empty,
                 response_bytes = tracing::field::Empty,
                 response_truncated = tracing::field::Empty,
             );
             let _enter = root_span.enter();
 
+            // Pagination metric: mirror the manifest and history handlers —
+            // any follow-up page request (cursor present) counts as a page
+            // traversal. The per-request counter helps agents spot when
+            // pagination chains are long enough to warrant a bigger page_size.
+            let has_cursor = args.cursor.is_some();
             let context_options = crate::tools::ContextOptions {
                 cursor: args.cursor,
                 page_size: args.page_size,
@@ -558,6 +564,9 @@ impl GitPrismServer {
                     Some(args.max_response_tokens)
                 },
             };
+            if has_cursor {
+                crate::metrics::get().record_pagination_page(tool_name);
+            }
             let result = build_function_context_with_options(
                 &repo_path,
                 &args.base_ref,
@@ -567,10 +576,15 @@ impl GitPrismServer {
 
             match &result {
                 Ok(response) => {
-                    root_span.record("response_files_count", response.functions.len() as i64);
-                    let truncated = !response.metadata.function_analysis_truncated.is_empty();
-                    let paginated = response.pagination.next_cursor.is_some();
-                    root_span.record("response_truncated", truncated || paginated);
+                    root_span.record("response_functions_count", response.functions.len() as i64);
+                    // Count unique files so the "files returned" span field
+                    // stays consistent with the manifest tool's semantics.
+                    let unique_files: std::collections::HashSet<&str> =
+                        response.functions.iter().map(|f| f.file.as_str()).collect();
+                    root_span.record("response_files_count", unique_files.len() as i64);
+                    let is_truncated = !response.metadata.function_analysis_truncated.is_empty();
+                    let is_paginated = response.pagination.next_cursor.is_some();
+                    root_span.record("response_truncated", is_truncated || is_paginated);
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }

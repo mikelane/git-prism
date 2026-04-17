@@ -227,7 +227,14 @@ pub fn build_function_context_with_options(
         };
         let content = match reader.read_file_at_ref(head_ref, file_path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    file = %file_path,
+                    error = %e,
+                    "skipping file: read_file_at_ref failed"
+                );
+                continue;
+            }
         };
 
         // Check if this file should be scanned via import scoping
@@ -259,7 +266,15 @@ pub fn build_function_context_with_options(
                 // Lightweight import extraction to check relationship
                 let imports = analyzer
                     .extract_imports(content.as_bytes())
-                    .unwrap_or_default();
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            file = %file_path,
+                            language = ext,
+                            error = %e,
+                            "extract_imports failed; skipping import scope"
+                        );
+                        Vec::new()
+                    });
                 changed_modules.iter().any(|(_, module_path, _)| {
                     if let Some(mp) = module_path {
                         import_scope::imports_reference_module(
@@ -275,10 +290,26 @@ pub fn build_function_context_with_options(
         if should_scan {
             let calls = analyzer
                 .extract_calls(content.as_bytes())
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        file = %file_path,
+                        language = ext,
+                        error = %e,
+                        "extract_calls failed; treating as no calls"
+                    );
+                    Vec::new()
+                });
             let functions = analyzer
                 .extract_functions(content.as_bytes())
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        file = %file_path,
+                        language = ext,
+                        error = %e,
+                        "extract_functions failed; treating as no functions"
+                    );
+                    Vec::new()
+                });
             if !calls.is_empty() || !functions.is_empty() {
                 file_calls.push((file_path.clone(), calls, functions));
             }
