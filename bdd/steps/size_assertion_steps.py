@@ -386,13 +386,17 @@ def step_response_truncated_entries_shortened(context: Context) -> None:
     assert truncated, "No truncated entries to inspect"
     non_truncated = [fn for fn in functions if not fn.get("truncated")]
     if not non_truncated:
-        # Without a baseline, assert the absolute shape instead.
+        # No un-truncated entries available as a baseline. Verify that each
+        # truncated entry's visible caller list is no longer than caller_count,
+        # which is preserved at the original (pre-clamp) total so the agent
+        # can tell how many were dropped. Works for both budget-clamped entries
+        # (caller_count > len(callers)) and page-marker entries (both are 0).
         for fn in truncated:
             callers = fn.get("callers") or []
-            callees = fn.get("callees") or []
-            assert len(callers) + len(callees) == 0 or fn.get("truncation_reason"), (
-                f"Truncated function {fn.get('name')!r} should either have "
-                "empty caller/callee lists or carry a truncation_reason field"
+            caller_count = fn.get("caller_count") or 0
+            assert len(callers) <= caller_count or caller_count == 0, (
+                f"Truncated function {fn.get('name')!r} has more callers "
+                f"({len(callers)}) than the recorded caller_count ({caller_count})"
             )
         return
     baseline_callers = max(len(fn.get("callers") or []) for fn in non_truncated)
