@@ -324,12 +324,24 @@ pub struct FunctionContextEntry {
     pub callers: Vec<CallerEntry>,
     pub callees: Vec<CalleeEntry>,
     pub test_references: Vec<CallerEntry>,
+    /// Total callers (production + test) before any budget clamping. Preserved
+    /// so agents can compute how many entries were omitted once `truncated`
+    /// fires: `omitted = caller_count - callers.len() - test_references.len()`.
     pub caller_count: usize,
     /// True when this entry's caller / callee / test-reference lists were
     /// clamped by the response-size budget. The full lists can be recovered
     /// by re-querying with `function_names: [name]`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+}
+
+/// `skip_serializing_if` predicate used on the `truncated` flag — named so
+/// the derive macro reads as intent ("skip when false") instead of the
+/// opaque `std::ops::Not::not`. Takes `&bool` because serde's contract
+/// requires the predicate accept a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -916,11 +928,9 @@ mod tests {
         assert_eq!(json["metadata"]["token_estimate"], 42);
         assert!(json["metadata"]["next_cursor"].is_null());
         // function_analysis_truncated skipped when empty
-        assert!(
-            json["metadata"]
-                .get("function_analysis_truncated")
-                .is_none()
-        );
+        assert!(json["metadata"]
+            .get("function_analysis_truncated")
+            .is_none());
         assert_eq!(json["functions"].as_array().unwrap().len(), 0);
         assert_eq!(json["pagination"]["total_items"], 0);
         assert_eq!(json["pagination"]["page_size"], 25);

@@ -753,7 +753,29 @@ mod tests {
     fn it_returns_context_for_changed_functions() {
         let (_dir, path) = create_context_test_repo();
         let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
-        assert!(!result.functions.is_empty());
+
+        // The fixture's HEAD~1..HEAD range modifies `calculate` and `helper`
+        // and adds `process`. All three must appear in the context response
+        // — asserting on specific names guards against a mutation that
+        // silently drops added or modified functions while still leaving
+        // the vec non-empty.
+        let names: std::collections::HashSet<&str> =
+            result.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains("calculate"),
+            "calculate should be in function context, got: {:?}",
+            names,
+        );
+        assert!(
+            names.contains("helper"),
+            "helper should be in function context, got: {:?}",
+            names,
+        );
+        assert!(
+            names.contains("process"),
+            "process should be in function context, got: {:?}",
+            names,
+        );
     }
 
     #[test]
@@ -806,16 +828,22 @@ mod tests {
         let (_dir, path) = create_context_test_repo();
         let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
 
-        let process_ctx = result.functions.iter().find(|f| f.name == "process");
+        let process_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "process")
+            .expect("process function context should be present");
 
-        if let Some(ctx) = process_ctx {
-            let callee_names: Vec<&str> = ctx.callees.iter().map(|c| c.callee.as_str()).collect();
-            assert!(
-                callee_names.contains(&"calculate"),
-                "process should call calculate, got: {:?}",
-                callee_names
-            );
-        }
+        let callee_names: Vec<&str> = process_ctx
+            .callees
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert!(
+            callee_names.contains(&"calculate"),
+            "process should call calculate, got: {:?}",
+            callee_names
+        );
     }
 
     #[test]
