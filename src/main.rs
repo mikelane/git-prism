@@ -13,8 +13,9 @@ use clap::{Parser, Subcommand};
 
 use pagination::decode_cursor;
 use tools::{
-    HistoryResponse, ManifestOptions, ManifestResponse, SnapshotOptions, build_function_context,
-    build_history, build_manifest, build_snapshots, build_worktree_manifest, enforce_token_budget,
+    ContextOptions, FunctionContextResponse, HistoryResponse, ManifestOptions, ManifestResponse,
+    SnapshotOptions, build_function_context_with_options, build_history, build_manifest,
+    build_snapshots, build_worktree_manifest, enforce_token_budget,
 };
 
 #[derive(Parser)]
@@ -78,6 +79,18 @@ enum Commands {
         /// Path to the git repository (defaults to current directory)
         #[arg(long)]
         repo: Option<String>,
+        /// Opaque pagination cursor from a previous response.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Maximum functions per page (1–500, default 25).
+        #[arg(long, default_value_t = 25)]
+        page_size: usize,
+        /// Comma-separated list of function names to scope the response to.
+        #[arg(long)]
+        function_names: Option<String>,
+        /// Maximum estimated tokens for the response (default 8192, 0 to disable).
+        #[arg(long, default_value_t = 8192)]
+        max_response_tokens: usize,
     },
     /// List supported languages for function-level analysis
     Languages,
@@ -370,7 +383,14 @@ async fn main() -> anyhow::Result<()> {
             let snapshots = build_snapshots(&repo_path, base_ref, head_ref, &paths, &options)?;
             println!("{}", serde_json::to_string_pretty(&snapshots)?);
         }
-        Commands::Context { range, repo } => {
+        Commands::Context {
+            range,
+            repo,
+            cursor,
+            page_size,
+            function_names,
+            max_response_tokens,
+        } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
             });
@@ -380,7 +400,19 @@ async fn main() -> anyhow::Result<()> {
                 RefRange::CommitRange { base, head } => (base, head),
                 RefRange::WorktreeCompare { .. } => unreachable!("validated above"),
             };
-            let context = build_function_context(&repo_path, base_ref, head_ref)?;
+            let options = ContextOptions {
+                cursor,
+                page_size,
+                function_names: function_names
+                    .map(|s| s.split(',').map(|n| n.trim().to_string()).collect()),
+                max_response_tokens: if max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(max_response_tokens)
+                },
+            };
+            let context: FunctionContextResponse =
+                build_function_context_with_options(&repo_path, base_ref, head_ref, &options)?;
             println!("{}", serde_json::to_string_pretty(&context)?);
         }
         Commands::Languages => {

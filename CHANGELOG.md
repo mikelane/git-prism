@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_change_manifest` enforces a token budget (default 8192).** When the response would exceed the budget, function/import analysis is progressively stripped per file via a three-tier algorithm (full → signatures-only → bare). Trimmed files that preserved their function signatures are listed in `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0` (or the CLI `--max-response-tokens 0`) to disable enforcement. Internal callers (e.g. `get_function_context`) bypass enforcement via `ManifestOptions.max_response_tokens = None`.
 - **`record_truncated` metric now carries a `reason` label.** New `reason="token_budget"` events are emitted whenever the manifest budget trims any file detail. Cardinality is bounded via `classify_truncation_reason` in `src/privacy.rs`.
 
+### Added
+
+- **`get_function_context` gains pagination, a name filter, and a response-size budget.** Four new `ContextArgs` fields — `cursor`, `page_size` (1–500, default 25), `function_names`, `max_response_tokens` (default 8192, `0` disables) — mirror the manifest tool's guardrails so the second-resort read tool can no longer exceed MCP context limits. The CLI exposes the same knobs: `--cursor`, `--page-size`, `--function-names=a,b`, `--max-response-tokens`.
+- **Per-entry `truncated` flag on `FunctionContextEntry`.** When the budget clamps an entry's caller / callee / test-reference lists (top 5 callers, top 5 callees, top 3 test references are kept), the entry's `truncated` flag is set and its name lands in `metadata.function_analysis_truncated`. The flag is also set on the last kept entry when the response was cut short by the budget or page-size, so `function_analysis_truncated` is never empty on a truncated response.
+- **`function_names` as the escape hatch for re-querying clamped entries.** Agents that need the full caller / callee list for an entry that was clamped on a prior paginated call should re-request with `function_names: ["name"]` — the filtered response fits comfortably within the budget.
+- **Metadata mirrors pagination cursor.** `ContextMetadata.next_cursor` duplicates `pagination.next_cursor` for agents reading only the metadata block.
+- **Bounded-cardinality truncation metric.** `get_function_context` now emits `record_truncated(tool, reason)` with `reason="paginated"` when a next-page cursor is returned and `reason="token_budget"` when any entry was clamped, matching the manifest tool's signalling contract.
+
 ## [0.6.0] — 2026-04-09
 
 > Released 2026-04-10 (retroactively tagged; see ADR 0007 for history).

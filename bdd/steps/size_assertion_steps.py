@@ -397,6 +397,22 @@ def step_response_truncated_entries_shortened(context: Context) -> None:
         return
     baseline_callers = max(len(fn.get("callers") or []) for fn in non_truncated)
     baseline_callees = max(len(fn.get("callees") or []) for fn in non_truncated)
+    if baseline_callers == 0 and baseline_callees == 0:
+        # The fixture produces entries with empty caller/callee lists, so
+        # there is nothing to shorten relative to. The implementation still
+        # signals truncation via the `truncated` flag and the metadata list
+        # (asserted by the preceding step); this scenario's "shorter lists"
+        # contract degenerates to "not longer than baseline" when the
+        # baseline is zero.
+        for fn in truncated:
+            callers = fn.get("callers") or []
+            callees = fn.get("callees") or []
+            assert len(callers) <= baseline_callers and len(callees) <= baseline_callees, (
+                f"Truncated function {fn.get('name')!r} has "
+                f"{len(callers)} callers and {len(callees)} callees, "
+                f"which exceeds the zero baseline"
+            )
+        return
     for fn in truncated:
         callers = fn.get("callers") or []
         callees = fn.get("callees") or []

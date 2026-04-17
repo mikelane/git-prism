@@ -6,7 +6,7 @@ pub mod size;
 pub mod snapshots;
 pub mod types;
 
-pub use context::build_function_context;
+pub use context::{ContextOptions, build_function_context_with_options};
 pub use history::build_history;
 pub use manifest::{build_manifest, build_worktree_manifest, enforce_token_budget};
 pub use snapshots::build_snapshots;

@@ -8,7 +8,7 @@ use crate::git::diff::ChangeScope;
 use crate::tools::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,
     ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions, SnapshotResponse,
-    build_function_context, build_history, build_manifest, build_snapshots,
+    build_function_context_with_options, build_history, build_manifest, build_snapshots,
     build_worktree_manifest,
 };
 
@@ -543,12 +543,29 @@ impl GitPrismServer {
             );
             let _enter = root_span.enter();
 
-            let result = build_function_context(&repo_path, &args.base_ref, &args.head_ref);
+            let context_options = crate::tools::ContextOptions {
+                cursor: args.cursor,
+                page_size: args.page_size,
+                function_names: args.function_names,
+                max_response_tokens: if args.max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(args.max_response_tokens)
+                },
+            };
+            let result = build_function_context_with_options(
+                &repo_path,
+                &args.base_ref,
+                &args.head_ref,
+                &context_options,
+            );
 
             match &result {
                 Ok(response) => {
                     root_span.record("response_files_count", response.functions.len() as i64);
-                    root_span.record("response_truncated", false);
+                    let truncated = !response.metadata.function_analysis_truncated.is_empty();
+                    let paginated = response.pagination.next_cursor.is_some();
+                    root_span.record("response_truncated", truncated || paginated);
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }
@@ -599,6 +616,13 @@ impl GitPrismServer {
                     &base_ref_clone,
                     Some(&head_ref_clone),
                 ));
+
+                if response.pagination.next_cursor.is_some() {
+                    metrics.record_truncated(tool_name, "paginated");
+                }
+                if !response.metadata.function_analysis_truncated.is_empty() {
+                    metrics.record_truncated(tool_name, "token_budget");
+                }
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");
@@ -732,6 +756,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
             FunctionContextEntry {
                 name: "helper".to_string(),
@@ -743,6 +768,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
             FunctionContextEntry {
                 name: "process_data".to_string(),
@@ -754,6 +780,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
             FunctionContextEntry {
                 name: "Binary".to_string(),
@@ -765,6 +792,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
         ];
 

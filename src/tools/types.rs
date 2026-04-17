@@ -218,6 +218,23 @@ pub struct ContextArgs {
     pub head_ref: String,
     /// Path to the git repository (defaults to the server's working directory).
     pub repo_path: Option<String>,
+    /// Opaque pagination cursor from a prior response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Maximum functions per page (1–500, default 25). Function-context
+    /// entries carry caller/callee/test lists that are expensive per entry,
+    /// so the default is smaller than the manifest tool's 100-file default.
+    #[serde(default = "default_context_page_size")]
+    pub page_size: usize,
+    /// When set, restrict the response to functions with these names. Useful
+    /// for re-querying a function that was clamped on a prior paginated call.
+    /// Must be identical across paginated calls (not validated by the cursor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_names: Option<Vec<String>>,
+    /// Response-size budget in estimated tokens. `0` disables the budget.
+    /// Default 8192.
+    #[serde(default = "default_context_max_tokens")]
+    pub max_response_tokens: usize,
 }
 
 fn default_true() -> bool {
@@ -234,6 +251,14 @@ fn default_max_file_size() -> usize {
 
 fn default_page_size() -> usize {
     100
+}
+
+fn default_context_max_tokens() -> usize {
+    8192
+}
+
+fn default_context_page_size() -> usize {
+    25
 }
 
 // --- History types ---
@@ -300,6 +325,11 @@ pub struct FunctionContextEntry {
     pub callees: Vec<CalleeEntry>,
     pub test_references: Vec<CallerEntry>,
     pub caller_count: usize,
+    /// True when this entry's caller / callee / test-reference lists were
+    /// clamped by the response-size budget. The full lists can be recovered
+    /// by re-querying with `function_names: [name]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -350,12 +380,29 @@ pub struct ContextMetadata {
     /// [`ManifestMetadata::token_estimate`] for the semantics and caveats;
     /// the same two-pass construction trick applies.
     pub token_estimate: usize,
+    /// Names of function entries whose caller / callee / test-reference lists
+    /// were clamped by the response-size budget. Each entry in this list
+    /// corresponds to a `FunctionContextEntry` with `truncated = true`; use
+    /// `function_names` to re-query individual entries with the full lists.
+    ///
+    /// Shares the field name with [`ManifestMetadata::function_analysis_truncated`]
+    /// so the two budget-bearing tools emit the same shape and a single
+    /// telemetry/metric assertion can key on one path across both tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_analysis_truncated: Vec<String>,
+    /// Opaque pagination cursor to request the next page. `None` means this
+    /// is the last page. Mirrors `pagination.next_cursor`; duplicated in
+    /// metadata so agents reading only the metadata block can see whether
+    /// follow-up calls are required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FunctionContextResponse {
     pub metadata: ContextMetadata,
     pub functions: Vec<FunctionContextEntry>,
+    pub pagination: PaginationInfo,
 }
 
 // --- Tool options (for internal use) ---
@@ -385,6 +432,9 @@ pub struct SnapshotOptions {
 pub enum ToolError {
     #[error("git error: {0}")]
     Git(#[from] crate::git::reader::GitError),
+
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(#[from] crate::pagination::CursorError),
 }
 
 // --- Helper ---
