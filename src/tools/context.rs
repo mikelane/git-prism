@@ -1033,6 +1033,14 @@ mod tests {
         assert_eq!(resolve_next_cursor_offset(Some(20), Some(5)), Some(5));
     }
 
+    #[test]
+    fn it_returns_some_when_both_cutoffs_are_equal() {
+        // When the budget cutoff and the page cutoff land on the same index
+        // the function must still emit a next_cursor — the two constraints
+        // happen to agree rather than cancel.
+        assert_eq!(resolve_next_cursor_offset(Some(5), Some(5)), Some(5));
+    }
+
     // --- clamp_entry_lists ---
 
     fn make_clamp_fixture_entry(
@@ -1080,28 +1088,43 @@ mod tests {
     #[test]
     fn clamp_entry_lists_truncates_callers_to_five() {
         let mut entry = make_clamp_fixture_entry("calc", 8, 2, 1);
+        let original_caller_count = entry.caller_count;
         clamp_entry_lists(&mut entry, 5, 5, 3);
         assert_eq!(entry.callers.len(), 5);
         assert_eq!(entry.callees.len(), 2);
         assert_eq!(entry.test_references.len(), 1);
+        assert_eq!(
+            entry.caller_count, original_caller_count,
+            "clamp_entry_lists must not modify caller_count"
+        );
     }
 
     #[test]
     fn clamp_entry_lists_truncates_callees_to_five() {
         let mut entry = make_clamp_fixture_entry("calc", 2, 8, 1);
+        let original_caller_count = entry.caller_count;
         clamp_entry_lists(&mut entry, 5, 5, 3);
         assert_eq!(entry.callers.len(), 2);
         assert_eq!(entry.callees.len(), 5);
         assert_eq!(entry.test_references.len(), 1);
+        assert_eq!(
+            entry.caller_count, original_caller_count,
+            "clamp_entry_lists must not modify caller_count"
+        );
     }
 
     #[test]
     fn clamp_entry_lists_truncates_test_refs_to_three() {
         let mut entry = make_clamp_fixture_entry("calc", 1, 1, 6);
+        let original_caller_count = entry.caller_count;
         clamp_entry_lists(&mut entry, 5, 5, 3);
         assert_eq!(entry.callers.len(), 1);
         assert_eq!(entry.callees.len(), 1);
         assert_eq!(entry.test_references.len(), 3);
+        assert_eq!(
+            entry.caller_count, original_caller_count,
+            "clamp_entry_lists must not modify caller_count"
+        );
     }
 
     #[test]
@@ -1277,6 +1300,15 @@ mod tests {
         assert!(
             result.functions.iter().any(|f| f.truncated),
             "expected at least one FunctionContextEntry.truncated=true at tight budget",
+        );
+        // Budget enforcement must actually drop entries, not just set flags.
+        // A mutation that set `truncated: true` without shrinking the entry
+        // list would otherwise slip past the truncation assertions above.
+        assert!(
+            result.functions.len() < unbounded.functions.len(),
+            "budget enforcement must reduce entry count: got {} entries, unbounded had {}",
+            result.functions.len(),
+            unbounded.functions.len(),
         );
     }
 
