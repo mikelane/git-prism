@@ -372,6 +372,10 @@ impl GitPrismServer {
                         metrics.record_change_scope(change_scope_label(file.change_scope));
                     }
                 }
+
+                if response.pagination.next_cursor.is_some() {
+                    metrics.record_truncated(tool_name, "paginated");
+                }
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");

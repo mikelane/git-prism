@@ -58,7 +58,10 @@ fn is_test_path(path: &str) -> bool {
         || lower.contains("/spec/")
         || lower.ends_with("_test.go")
         || lower.ends_with("_test.rs")
-        || lower.contains("test_")
+        || lower
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("test_"))
         || lower.ends_with(".test.ts")
         || lower.ends_with(".test.js")
         || lower.ends_with(".test.tsx")
@@ -620,14 +623,35 @@ fn extract_callees_for_function(
     };
     let content = match reader.read_file_at_ref(head_ref, file_path) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            tracing::warn!(
+                file = %file_path,
+                error = %e,
+                "extract_callees: read_file_at_ref failed"
+            );
+            return vec![];
+        }
     };
     let functions = analyzer
         .extract_functions(content.as_bytes())
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                file = %file_path,
+                error = %e,
+                "extract_callees: extract_functions failed"
+            );
+            Vec::new()
+        });
     let calls = analyzer
         .extract_calls(content.as_bytes())
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                file = %file_path,
+                error = %e,
+                "extract_callees: extract_calls failed"
+            );
+            Vec::new()
+        });
 
     // Find the function by name
     let func = match functions.iter().find(|f| f.name == func_name) {
@@ -947,6 +971,14 @@ mod tests {
         assert!(!is_test_path("src/main.rs"));
         assert!(!is_test_path("src/server.py"));
         assert!(!is_test_path("pkg/handler.go"));
+    }
+
+    #[test]
+    fn is_test_path_rejects_test_infix_in_filename() {
+        // `test_` appearing mid-filename (e.g., `contest_utils`, `protest_utils`) must NOT
+        // classify a path as a test — only a leading `test_` on the filename should count.
+        assert!(!is_test_path("src/contest_utils.rs"));
+        assert!(!is_test_path("src/protest_utils.py"));
     }
 
     #[test]
