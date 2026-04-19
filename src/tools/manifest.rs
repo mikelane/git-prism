@@ -3868,9 +3868,9 @@ mod tests {
         // same decomposition internally.
         let skeleton_cost = {
             let saved = std::mem::take(&mut response.files);
-            let c = size::estimate_response_tokens(&response);
+            let token_count = size::estimate_response_tokens(&response);
             response.files = saved;
-            c
+            token_count
         };
         let per_file_full_total: usize = response
             .files
@@ -3977,9 +3977,9 @@ mod tests {
         // least two files can fit at tier1 (so `-=` and `+=` diverge visibly).
         let skeleton_cost = {
             let saved = std::mem::take(&mut response.files);
-            let s = size::estimate_response_tokens(&response);
+            let cost = size::estimate_response_tokens(&response);
             response.files = saved;
-            s
+            cost
         };
         // Measure one file's tier1 cost (imports stripped, functions kept).
         let one_tier1 = {
@@ -4005,9 +4005,7 @@ mod tests {
         // Invariant: with this budget, SOME files are tier1 (→ trimmed list
         // non-empty) AND SOME are bare (→ functions_changed=None on at least
         // one). `+=` breaks the "some bare" half; `/=` breaks "some tier1"
-        // half (trimmed list would be a single entry, but we can't easily
-        // assert on length without being flaky). The two-sided check is
-        // what kills both directional mutants.
+        // half. The two-sided check is what kills both directional mutants.
         let tier1_count = trimmed.len();
         let bare_count = response
             .files
@@ -4019,6 +4017,12 @@ mod tests {
             "at least one file must survive at tier1 (functions kept, imports \
              stripped) after a partial-fit budget; tier1_count={tier1_count}, \
              bare_count={bare_count}",
+        );
+        assert!(
+            tier1_count >= 2,
+            "at least two files must survive at tier1; under a /= mutant, remaining \
+             collapses to ~1 after the first tier1 decision so only one file can \
+             stay at tier1: tier1_count={tier1_count}",
         );
         assert!(
             bare_count >= 1,
@@ -4080,9 +4084,9 @@ mod tests {
         let mut response = make_test_response(files);
         let skeleton_cost = {
             let saved = std::mem::take(&mut response.files);
-            let s = size::estimate_response_tokens(&response);
+            let cost = size::estimate_response_tokens(&response);
             response.files = saved;
-            s
+            cost
         };
         let one_full = size::estimate_response_tokens(&response.files[0]);
         let one_bare = {
@@ -4218,9 +4222,9 @@ mod tests {
         let mut response = make_test_response(files);
         let skeleton_cost = {
             let saved = std::mem::take(&mut response.files);
-            let s = size::estimate_response_tokens(&response);
+            let cost = size::estimate_response_tokens(&response);
             response.files = saved;
-            s
+            cost
         };
         let total_full: usize = response
             .files
