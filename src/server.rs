@@ -5,10 +5,11 @@ use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
 use crate::git::diff::ChangeScope;
+use crate::tools::types::{FunctionContextEntry, detect_language};
 use crate::tools::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,
     ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions, SnapshotResponse,
-    build_function_context, build_history, build_manifest, build_snapshots,
+    build_function_context_with_options, build_history, build_manifest, build_snapshots,
     build_worktree_manifest,
 };
 
@@ -26,11 +27,11 @@ fn change_scope_label(scope: ChangeScope) -> &'static str {
 /// be detected from the extension are excluded to keep metric label cardinality
 /// bounded and consistent with the manifest tool's `functions_changed` signal.
 fn functions_per_language_counts(
-    entries: &[crate::tools::types::FunctionContextEntry],
+    entries: &[FunctionContextEntry],
 ) -> std::collections::HashMap<&'static str, u64> {
     let mut counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
     for entry in entries {
-        let language = crate::tools::types::detect_language(&entry.file);
+        let language = detect_language(&entry.file);
         if language != "unknown" {
             *counts.entry(language).or_insert(0) += 1;
         }
@@ -198,8 +199,10 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. The double cost is acceptable at
+                // current scale; a response cache could eliminate it if it becomes
+                // measurable.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -349,8 +352,9 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. Double cost is acceptable at
+                // current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -367,6 +371,10 @@ impl GitPrismServer {
                         }
                         metrics.record_change_scope(change_scope_label(file.change_scope));
                     }
+                }
+
+                if response.pagination.next_cursor.is_some() {
+                    metrics.record_truncated(tool_name, "paginated");
                 }
             }
             Err(e) => {
@@ -477,7 +485,8 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized again by rmcp — consider caching or estimating size
+                // Response is serialized again by rmcp for transport. Double cost is
+                // acceptable at current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -537,18 +546,49 @@ impl GitPrismServer {
                 repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
                 ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
                 ref_head = crate::privacy::normalize_ref_pattern(&args.head_ref).as_str(),
+                response_functions_count = tracing::field::Empty,
                 response_files_count = tracing::field::Empty,
                 response_bytes = tracing::field::Empty,
                 response_truncated = tracing::field::Empty,
             );
             let _enter = root_span.enter();
 
-            let result = build_function_context(&repo_path, &args.base_ref, &args.head_ref);
+            // Pagination metric: mirror the manifest and history handlers —
+            // any follow-up page request (cursor present) counts as a page
+            // traversal. The per-request counter helps agents spot when
+            // pagination chains are long enough to warrant a bigger page_size.
+            let has_cursor = args.cursor.is_some();
+            let context_options = crate::tools::ContextOptions {
+                cursor: args.cursor,
+                page_size: args.page_size,
+                function_names: args.function_names,
+                max_response_tokens: if args.max_response_tokens == 0 {
+                    None
+                } else {
+                    Some(args.max_response_tokens)
+                },
+            };
+            if has_cursor {
+                crate::metrics::get().record_pagination_page(tool_name);
+            }
+            let result = build_function_context_with_options(
+                &repo_path,
+                &args.base_ref,
+                &args.head_ref,
+                &context_options,
+            );
 
             match &result {
                 Ok(response) => {
-                    root_span.record("response_files_count", response.functions.len() as i64);
-                    root_span.record("response_truncated", false);
+                    root_span.record("response_functions_count", response.functions.len() as i64);
+                    // Count unique files so the "files returned" span field
+                    // stays consistent with the manifest tool's semantics.
+                    let unique_files: std::collections::HashSet<&str> =
+                        response.functions.iter().map(|f| f.file.as_str()).collect();
+                    root_span.record("response_files_count", unique_files.len() as i64);
+                    let is_truncated = !response.metadata.function_analysis_truncated.is_empty();
+                    let is_paginated = response.pagination.next_cursor.is_some();
+                    root_span.record("response_truncated", is_truncated || is_paginated);
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }
@@ -599,6 +639,13 @@ impl GitPrismServer {
                     &base_ref_clone,
                     Some(&head_ref_clone),
                 ));
+
+                if response.pagination.next_cursor.is_some() {
+                    metrics.record_truncated(tool_name, "paginated");
+                }
+                if !response.metadata.function_analysis_truncated.is_empty() {
+                    metrics.record_truncated(tool_name, "token_budget");
+                }
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");
@@ -732,6 +779,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
             FunctionContextEntry {
                 name: "helper".to_string(),
@@ -743,6 +791,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
             FunctionContextEntry {
                 name: "process_data".to_string(),
@@ -754,6 +803,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
             FunctionContextEntry {
                 name: "Binary".to_string(),
@@ -765,6 +815,7 @@ mod tests {
                 callees: Vec::<CalleeEntry>::new(),
                 test_references: Vec::<CallerEntry>::new(),
                 caller_count: 0,
+                truncated: false,
             },
         ];
 
