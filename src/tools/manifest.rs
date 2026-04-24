@@ -3833,4 +3833,509 @@ mod tests {
             }
         }
     }
+
+    // --- enforce_token_budget arithmetic and boundary mutants ---
+    //
+    // These tests target surviving mutants reported by cargo-mutants
+    // (issue #222 / CI run 24620558846, shard 1) in enforce_token_budget:
+    //   * `budget / 20` → `budget % 20` (safety margin uses division, not modulo)
+    //   * `remaining -= c.tier1` → `remaining += c.tier1` or `/=` (budget
+    //      accounting decreases the remaining budget, doesn't grow or shrink it
+    //      by division)
+    //   * `remaining -= c.bare` → `remaining += c.bare` or `/=`
+    // Each test is written so the mutant would flip the assertion outcome.
+
+    #[test]
+    fn it_uses_division_not_modulo_for_safety_margin() {
+        // The safety_margin is computed as `(budget / 20).max(16)`. A mutant
+        // that replaces `/` with `%` computes `budget % 20` — always < 20 —
+        // then clamps to 16. The `.max(16)` clamp masks the mutation for any
+        // budget < 320, so the test must use a larger budget to make the
+        // mutation observable.
+        //
+        // Strategy: many small files so per_file_full_total is in the
+        // thousands of tokens, then pick a budget that sits in the sweet
+        // spot where the ~400-token gap between `budget/20` and 16
+        // determines whether the `total_full <= file_budget` fast path
+        // fires.
+        let files = (0..80)
+            .map(|i| make_test_file_entry(&format!("f{i}.rs"), true, true))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+
+        // Measure the skeleton (response with files emptied) and the sum of
+        // per-file full costs independently — enforce_token_budget does the
+        // same decomposition internally.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let token_count = size::estimate_response_tokens(&response);
+            response.files = saved;
+            token_count
+        };
+        let per_file_full_total: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+
+        // We want:
+        //     budget - skeleton - budget/20 < per_file_full_total   (trim under /)
+        //     budget - skeleton - 16        >= per_file_full_total  (no trim under %)
+        // i.e. budget/20 - 16 > budget - skeleton - per_file_full_total >= 0
+        //
+        // Let target = skeleton + per_file_full_total. Pick budget so that
+        // budget/20 is between 17 and budget - target + 1 (some nonzero
+        // gap), and budget is at least 1 more than target so the % form
+        // satisfies the lower bound.
+        //
+        // Solve the two inequalities:
+        //     budget >= target + 16                   (modulo margin leaves
+        //                                              room for everything)
+        //     budget * 19 / 20 < target               (division margin eats
+        //                                              budget - target)
+        //     i.e. budget < target * 20 / 19
+        // Sweet spot: pick midpoint between (target + 16) and the upper bound.
+        let target = skeleton_cost + per_file_full_total;
+        let lower = target + 16;
+        let upper = target * 20 / 19; // exclusive upper bound
+        assert!(
+            upper > lower,
+            "fixture must be large enough for the safety-margin sweet spot \
+             to exist: target={target} needs target/19 > 16, i.e. target > 304",
+        );
+        let budget = (lower + upper) / 2;
+
+        // Verify construction: under the correct implementation the fast
+        // path should miss (trim required), under the mutant it should
+        // fire (no trim).
+        let margin_div = (budget / 20).max(16);
+        let margin_mod = (budget % 20).max(16);
+        assert!(
+            margin_div > margin_mod,
+            "test presumes budget/20 > budget%20 (clamped); \
+             budget={budget} /20={margin_div} %20={margin_mod}",
+        );
+        let file_budget_under_div = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_div);
+        let file_budget_under_mod = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_mod);
+        assert!(
+            file_budget_under_div < per_file_full_total,
+            "test construction invalid: under correct `/`, file_budget \
+             ({file_budget_under_div}) must be < per_file_full_total \
+             ({per_file_full_total}) so trimming is required. \
+             budget={budget} skeleton={skeleton_cost} margin_div={margin_div}",
+        );
+        assert!(
+            file_budget_under_mod >= per_file_full_total,
+            "test construction invalid: under mutant `%`, file_budget \
+             ({file_budget_under_mod}) must be ≥ per_file_full_total \
+             ({per_file_full_total}) so no trimming occurs. \
+             budget={budget} skeleton={skeleton_cost} margin_mod={margin_mod}",
+        );
+
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // Under correct `/`: trimming happens — imports stripped from at
+        // least one file, so trimmed is non-empty OR some file has
+        // functions_changed=None (bare tier). Under mutant `%`: fast path
+        // fires, trimmed is empty AND every file keeps imports.
+        let some_imports_stripped = response.files.iter().any(|f| f.imports_changed.is_none());
+        assert!(
+            !trimmed.is_empty(),
+            "with budget {budget} (skeleton={skeleton_cost}, \
+             per_file_full_total={per_file_full_total}) the /20 safety margin \
+             of {margin_div} tokens must force trimming; a modulo-based \
+             margin would be clamped to {margin_mod} and leave room for every file"
+        );
+        assert!(
+            some_imports_stripped,
+            "trimming must strip imports from at least one file; \
+             budget={budget} margin_div={margin_div}"
+        );
+    }
+
+    #[test]
+    fn it_decreases_remaining_budget_after_each_tier1_decision() {
+        // Target `remaining -= c.tier1` mutants (→ `+=` grows budget, → `/=`
+        // collapses it toward 1). We need a scenario where the greedy walk is
+        // actually used (not the "all fits at full" or "all fits at tier1"
+        // fast paths). That means total_tier1 > file_budget.
+        //
+        // Construction: several identical files, budget sized so only the
+        // first ~half fit at tier1 and the rest must be stripped to bare.
+        // Under `-=`: remaining shrinks after each kept file; eventually
+        // even tier1 cost > remaining, and subsequent files fall to bare.
+        // Under `+=`: remaining grows, every file stays at tier1, no file
+        // goes to bare. The presence of at least one bare file distinguishes.
+        // Under `/=`: after the first file remaining becomes tier1/tier1 = 1,
+        // every subsequent file must fall to bare (even weaker than `-=`),
+        // but the SAME file-count invariant fails differently — no files
+        // survive at tier1 beyond the first, so many more bare files appear.
+        let files = (0..6)
+            .map(|i| make_test_file_entry(&format!("f{i}.rs"), true, true))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+        // Sum of tier1 costs to target the middle. We want total_tier1 > budget
+        // (so the tier1 fast path is skipped) but budget large enough that at
+        // least two files can fit at tier1 (so `-=` and `+=` diverge visibly).
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        // Measure one file's tier1 cost (imports stripped, functions kept).
+        let one_tier1 = {
+            let mut clone = response.files[0].clone();
+            clone.imports_changed = None;
+            size::estimate_response_tokens(&clone)
+        };
+        // Budget fits ~3 tier1 files after skeleton + safety margin.
+        // Safety margin is (budget/20).max(16); account for that by over-
+        // budgeting the "fits 3" target.
+        let raw_budget = skeleton_cost + one_tier1 * 3;
+        // Inflate by 25% to absorb safety_margin without blowing past tier1
+        // for all 6 files. 6*tier1 would make the fast path fire; 3*tier1
+        // * 1.25 = 3.75*tier1 < 6*tier1.
+        let budget = raw_budget + raw_budget / 4;
+        // Pre-flight: confirm the greedy walk actually executes. If fixture cost
+        // ever drifts such that total_tier1 <= file_budget, enforce_token_budget
+        // short-circuits into the tier1 fast path and all three mutants survive
+        // silently. The assertion below is what the other budget tests in this
+        // file do explicitly — keep the invariant local.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        let total_tier1: usize = response
+            .files
+            .iter()
+            .map(|f| {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            })
+            .sum();
+        assert!(
+            total_tier1 > file_budget,
+            "construction invalid: greedy walk must execute; \
+             total_tier1={total_tier1} file_budget={file_budget} \
+             budget={budget} skeleton_cost={skeleton_cost} \
+             one_tier1={one_tier1}",
+        );
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // Under correct `-=`: remaining drains monotonically; once a file
+        // no longer fits at tier1, it falls to bare.
+        // Under `+=`: remaining grows, every file stays at tier1.
+        // Under `/=`: remaining collapses to ~1 after the first file, so
+        // only one file is tier1 and the rest go to bare.
+        //
+        // Invariant: with this budget, SOME files are tier1 (→ trimmed list
+        // non-empty) AND SOME are bare (→ functions_changed=None on at least
+        // one). `+=` breaks the "some bare" half; `/=` breaks "some tier1"
+        // half. The two-sided check is what kills both directional mutants.
+        let tier1_count = trimmed.len();
+        let bare_count = response
+            .files
+            .iter()
+            .filter(|f| f.functions_changed.is_none())
+            .count();
+        assert!(
+            tier1_count >= 1,
+            "at least one file must survive at tier1 (functions kept, imports \
+             stripped) after a partial-fit budget; tier1_count={tier1_count}, \
+             bare_count={bare_count}",
+        );
+        assert!(
+            tier1_count >= 2,
+            "at least two files must survive at tier1; under a /= mutant, remaining \
+             collapses to ~1 after the first tier1 decision so only one file can \
+             stay at tier1: tier1_count={tier1_count}",
+        );
+        assert!(
+            bare_count >= 1,
+            "at least one file must fall to bare once the remaining budget \
+             is drained by earlier tier1 decisions; tier1_count={tier1_count}, \
+             bare_count={bare_count}. If every file stayed at tier1, remaining \
+             is not being decreased (mutant: `remaining += c.tier1`)",
+        );
+    }
+
+    #[test]
+    fn it_decreases_remaining_budget_after_each_bare_decision() {
+        // Target `remaining -= c.bare` mutants. This branch fires when a file
+        // does not fit at tier1 but does fit at bare.
+        //
+        // To force every file through the bare arm we need `c.tier1 >
+        // remaining` from the very first iteration. The greedy walk clones
+        // each file and measures both tier1 (functions kept, imports
+        // stripped) and bare (both stripped) costs. If a file has MANY
+        // functions, tier1 ≫ bare — the gap is proportional to the
+        // function count. Pick file_budget so a single tier1 doesn't fit
+        // but several bares do.
+        //
+        // Build a fixture with many functions per file to widen tier1 vs
+        // bare.
+        fn make_many_fn_entry(path: &str, fn_count: usize) -> ManifestFileEntry {
+            let functions = (0..fn_count)
+                .map(|i| FunctionChange {
+                    name: format!("really_long_function_name_number_{i}"),
+                    old_name: None,
+                    change_type: FunctionChangeType::Modified,
+                    start_line: i * 10,
+                    end_line: i * 10 + 5,
+                    signature: format!(
+                        "pub fn really_long_function_name_number_{i}\
+                         (arg_alpha: i64, arg_beta: String) -> Result<usize, Box<dyn Error>>"
+                    ),
+                })
+                .collect();
+            ManifestFileEntry {
+                path: path.to_string(),
+                old_path: None,
+                change_type: ChangeType::Modified,
+                change_scope: ChangeScope::Committed,
+                language: "rust".to_string(),
+                is_binary: false,
+                is_generated: false,
+                lines_added: 10,
+                lines_removed: 5,
+                size_before: 100,
+                size_after: 120,
+                functions_changed: Some(functions),
+                imports_changed: None, // no imports → tier1 == full
+            }
+        }
+        let files = (0..8)
+            .map(|i| make_many_fn_entry(&format!("f{i}.rs"), 10))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.files[0]);
+        let one_bare = {
+            let mut clone = response.files[0].clone();
+            clone.functions_changed = None;
+            clone.imports_changed = None;
+            size::estimate_response_tokens(&clone)
+        };
+        assert!(
+            one_full >= 4 * one_bare,
+            "fixture construction requires full >> bare to leave room for \
+             a tight budget that admits several bare files but no tier1 \
+             file: full={one_full} bare={one_bare}",
+        );
+
+        // target_file_budget in the sweet spot: <= one_full - 1 (tier1
+        // branch misses even for the first file) and >= 3 * one_bare (at
+        // least 3 bares fit so dropping is observable).
+        // target_file_budget fits several bares but strictly less than
+        // one_full. Pick midpoint between 3*one_bare (minimum "observable"
+        // cutoff) and one_full - 1 (upper bound). The earlier
+        // `one_full >= 4 * one_bare` guard already implies `one_full >
+        // 3 * one_bare`, so no separate check is needed here.
+        let target_file_budget = (3 * one_bare + one_full - 1) / 2;
+        // Solve for budget so file_budget == target after safety_margin.
+        //   budget - skeleton - (budget/20) = target
+        //   budget * 19 / 20 = skeleton + target
+        //   budget = (skeleton + target) * 20 / 19
+        // Use ceiling division to stay consistent with the parallel
+        // construction in the tier1-fast-path test below; the explicit
+        // `file_budget < one_full` cross-check after this guards against
+        // the rounding pushing us above one_full.
+        let budget = ((skeleton_cost + target_file_budget) * 20).div_ceil(19);
+        // Cross-check construction.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        assert!(
+            file_budget < one_full,
+            "construction invalid: tier1 branch would fire for the first \
+             file (file_budget={file_budget} >= one_full={one_full})",
+        );
+        assert!(
+            file_budget >= 2 * one_bare,
+            "construction invalid: fewer than 2 bare files fit \
+             (file_budget={file_budget} < 2*one_bare={})",
+            2 * one_bare,
+        );
+
+        let files_before = response.files.len();
+        let _ = enforce_token_budget(&mut response, budget);
+        let files_after = response.files.len();
+        assert!(
+            files_after < files_before,
+            "with a tight budget that fits only a few bare entries, \
+             enforcement must drop files from the 8-file input: \
+             files_before={files_before} files_after={files_after}. \
+             If all files survive, remaining is not being decreased \
+             (mutant: `remaining += c.bare`)",
+        );
+        assert!(
+            files_after >= 2,
+            "at least two files should fit bare with this budget; \
+             files_after={files_after} suggests remaining collapsed to near \
+             zero after a single decision (mutant: `remaining /= c.bare`)",
+        );
+        for file in &response.files {
+            assert!(
+                file.functions_changed.is_none(),
+                "file {} survived at tier1 but construction forces bare path \
+                 (file_budget={file_budget} one_full={one_full})",
+                file.path,
+            );
+        }
+    }
+
+    #[test]
+    fn it_returns_empty_trimmed_and_keeps_all_files_when_everything_fits() {
+        // Matches existing enforce_token_budget_under_budget_returns_empty but
+        // triangulates on the specific early-return invariant: when
+        // total_full <= file_budget, the function returns an empty Vec AND
+        // leaves every file untouched. Pins down the "fast-path skip" branch.
+        let files = vec![
+            make_test_file_entry("a.rs", true, true),
+            make_test_file_entry("b.rs", true, true),
+        ];
+        let mut response = make_test_response(files);
+        let files_before: Vec<_> = response.files.iter().map(|f| f.path.clone()).collect();
+        // Budget is 100x the actual content cost — guaranteed to fit under any
+        // reasonable cost-estimator drift without being a magic constant.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let per_file_full_total: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+        let budget = (skeleton_cost + per_file_full_total) * 100;
+        let trimmed = enforce_token_budget(&mut response, budget);
+        assert!(trimmed.is_empty(), "nothing trimmed under huge budget");
+        assert_eq!(
+            response.files.len(),
+            files_before.len(),
+            "no files dropped under huge budget"
+        );
+        for (i, f) in response.files.iter().enumerate() {
+            assert_eq!(f.path, files_before[i], "file order unchanged");
+            assert!(
+                f.functions_changed.is_some(),
+                "functions_changed preserved for {}",
+                f.path
+            );
+            assert!(
+                f.imports_changed.is_some(),
+                "imports_changed preserved for {}",
+                f.path
+            );
+        }
+    }
+
+    #[test]
+    fn it_strips_imports_only_from_files_that_had_them_at_tier1_fast_path() {
+        // Pins the tier1 fast path (total_tier1 <= file_budget branch): only
+        // files that originally had imports are added to the returned list;
+        // files without imports are NOT reported even though they pass
+        // through the same loop. A mutant that always pushed to the trimmed
+        // list regardless of `imports_changed.is_some()` would fail this test.
+        //
+        // Construction: one file with imports, one without. Budget sized so
+        // total_tier1 <= file_budget < total_full, which means:
+        //   * total_full fast path misses (trimming required)
+        //   * total_tier1 fast path fires (everything fits once imports
+        //     stripped, no greedy walk)
+        // Under the fast path, imports_changed is cleared only on files that
+        // originally had them.
+        let files = vec![
+            make_test_file_entry("has_imports.rs", true, true),
+            make_test_file_entry("no_imports.rs", true, false),
+        ];
+        let mut response = make_test_response(files);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let total_full: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+        let total_tier1: usize = response
+            .files
+            .iter()
+            .map(|f| {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            })
+            .sum();
+        assert!(
+            total_tier1 < total_full,
+            "fixture must include a file with imports so total_tier1 \
+             ({total_tier1}) < total_full ({total_full})",
+        );
+        // Pick file_budget strictly between total_tier1 and total_full.
+        // Then pick budget so `budget - skeleton - safety_margin ==
+        // file_budget`. Safety margin is `(budget/20).max(16)`. For a
+        // sufficiently large budget (≥ 320), this is `budget/20`, giving a
+        // fixed-point equation: budget = skeleton + file_budget + budget/20
+        //   → budget * 19/20 = skeleton + file_budget
+        //   → budget = (skeleton + file_budget) * 20 / 19
+        // Use the midpoint of (total_tier1, total_full) as the file_budget
+        // target. Round up slightly so integer-division floor doesn't push
+        // us back under total_tier1.
+        let mid_file_budget = total_tier1 + (total_full - total_tier1) / 2 + 1;
+        let budget = ((skeleton_cost + mid_file_budget) * 20).div_ceil(19);
+        // Verify construction: under the correct implementation the fast
+        // tier1 path should fire.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        assert!(
+            total_full > file_budget,
+            "construction invalid: total_full ({total_full}) must exceed \
+             file_budget ({file_budget}) to skip the all-full fast path",
+        );
+        assert!(
+            total_tier1 <= file_budget,
+            "construction invalid: total_tier1 ({total_tier1}) must fit in \
+             file_budget ({file_budget}) to enter the tier1 fast path",
+        );
+
+        let trimmed = enforce_token_budget(&mut response, budget);
+        assert_eq!(trimmed.len(), 1, "exactly one file should be trimmed");
+        assert!(
+            trimmed.contains(&"has_imports.rs".to_string()),
+            "has_imports.rs must appear in the trimmed list; trimmed={trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains(&"no_imports.rs".to_string()),
+            "no_imports.rs was never altered and must not appear; trimmed={trimmed:?}"
+        );
+        // no_imports.rs still has functions_changed because we didn't drop
+        // to bare for either file.
+        let no_imports_entry = response
+            .files
+            .iter()
+            .find(|f| f.path == "no_imports.rs")
+            .expect("no_imports.rs must still be present");
+        assert!(
+            no_imports_entry.functions_changed.is_some(),
+            "no_imports.rs should keep its function signatures at tier1"
+        );
+    }
 }
