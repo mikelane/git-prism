@@ -3995,6 +3995,31 @@ mod tests {
         // for all 6 files. 6*tier1 would make the fast path fire; 3*tier1
         // * 1.25 = 3.75*tier1 < 6*tier1.
         let budget = raw_budget + raw_budget / 4;
+        // Pre-flight: confirm the greedy walk actually executes. If fixture cost
+        // ever drifts such that total_tier1 <= file_budget, enforce_token_budget
+        // short-circuits into the tier1 fast path and all three mutants survive
+        // silently. The assertion below is what the other budget tests in this
+        // file do explicitly — keep the invariant local.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        let total_tier1: usize = response
+            .files
+            .iter()
+            .map(|f| {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            })
+            .sum();
+        assert!(
+            total_tier1 > file_budget,
+            "construction invalid: greedy walk must execute; \
+             total_tier1={total_tier1} file_budget={file_budget} \
+             budget={budget} skeleton_cost={skeleton_cost} \
+             one_tier1={one_tier1}",
+        );
         let trimmed = enforce_token_budget(&mut response, budget);
         // Under correct `-=`: remaining drains monotonically; once a file
         // no longer fits at tier1, it falls to bare.
