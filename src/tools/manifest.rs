@@ -3943,11 +3943,16 @@ mod tests {
         // fires, trimmed is empty AND every file keeps imports.
         let some_imports_stripped = response.files.iter().any(|f| f.imports_changed.is_none());
         assert!(
-            !trimmed.is_empty() || some_imports_stripped,
+            !trimmed.is_empty(),
             "with budget {budget} (skeleton={skeleton_cost}, \
              per_file_full_total={per_file_full_total}) the /20 safety margin \
              of {margin_div} tokens must force trimming; a modulo-based \
-             margin would be clamped to {margin_mod} and leave room for every file",
+             margin would be clamped to {margin_mod} and leave room for every file"
+        );
+        assert!(
+            some_imports_stripped,
+            "trimming must strip imports from at least one file; \
+             budget={budget} margin_div={margin_div}"
         );
     }
 
@@ -4132,21 +4137,19 @@ mod tests {
         // least 3 bares fit so dropping is observable).
         // target_file_budget fits several bares but strictly less than
         // one_full. Pick midpoint between 3*one_bare (minimum "observable"
-        // cutoff) and one_full - 1 (upper bound).
-        assert!(
-            one_full > 3 * one_bare,
-            "fixture sizes don't admit the sweet spot: \
-             one_full={one_full} one_bare={one_bare}",
-        );
+        // cutoff) and one_full - 1 (upper bound). The earlier
+        // `one_full >= 4 * one_bare` guard already implies `one_full >
+        // 3 * one_bare`, so no separate check is needed here.
         let target_file_budget = (3 * one_bare + one_full - 1) / 2;
         // Solve for budget so file_budget == target after safety_margin.
         //   budget - skeleton - (budget/20) = target
         //   budget * 19 / 20 = skeleton + target
         //   budget = (skeleton + target) * 20 / 19
-        // Use floor division — this may round file_budget *slightly* below
-        // target, but never above one_full as long as the starting target
-        // is below one_full.
-        let budget = (skeleton_cost + target_file_budget) * 20 / 19;
+        // Use ceiling division to stay consistent with the parallel
+        // construction in the tier1-fast-path test below; the explicit
+        // `file_budget < one_full` cross-check after this guards against
+        // the rounding pushing us above one_full.
+        let budget = ((skeleton_cost + target_file_budget) * 20).div_ceil(19);
         // Cross-check construction.
         let safety_margin = (budget / 20).max(16);
         let file_budget = budget
@@ -4203,7 +4206,21 @@ mod tests {
         ];
         let mut response = make_test_response(files);
         let files_before: Vec<_> = response.files.iter().map(|f| f.path.clone()).collect();
-        let trimmed = enforce_token_budget(&mut response, 1_000_000);
+        // Budget is 100x the actual content cost — guaranteed to fit under any
+        // reasonable cost-estimator drift without being a magic constant.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let per_file_full_total: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+        let budget = (skeleton_cost + per_file_full_total) * 100;
+        let trimmed = enforce_token_budget(&mut response, budget);
         assert!(trimmed.is_empty(), "nothing trimmed under huge budget");
         assert_eq!(
             response.files.len(),
@@ -4300,12 +4317,14 @@ mod tests {
         );
 
         let trimmed = enforce_token_budget(&mut response, budget);
-        assert_eq!(
-            trimmed,
-            vec!["has_imports.rs".to_string()],
-            "only the file that actually had imports should be reported as \
-             tier-1 trimmed; no_imports.rs was never altered and must not \
-             appear"
+        assert_eq!(trimmed.len(), 1, "exactly one file should be trimmed");
+        assert!(
+            trimmed.contains(&"has_imports.rs".to_string()),
+            "has_imports.rs must appear in the trimmed list; trimmed={trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains(&"no_imports.rs".to_string()),
+            "no_imports.rs was never altered and must not appear; trimmed={trimmed:?}"
         );
         // no_imports.rs still has functions_changed because we didn't drop
         // to bare for either file.
