@@ -598,12 +598,18 @@ fn clamp_entry_lists(
     max_callees: usize,
     max_test_refs: usize,
 ) {
+    // cargo-mutants: skip -- equivalent mutant: Vec::truncate(N) on a Vec of len==N is a no-op,
+    // so `> cap` and `>= cap` are observably identical here.
     if entry.callers.len() > max_callers {
         entry.callers.truncate(max_callers);
     }
+    // cargo-mutants: skip -- equivalent mutant: Vec::truncate(N) on a Vec of len==N is a no-op,
+    // so `> cap` and `>= cap` are observably identical here.
     if entry.callees.len() > max_callees {
         entry.callees.truncate(max_callees);
     }
+    // cargo-mutants: skip -- equivalent mutant: Vec::truncate(N) on a Vec of len==N is a no-op,
+    // so `> cap` and `>= cap` are observably identical here.
     if entry.test_references.len() > max_test_refs {
         entry.test_references.truncate(max_test_refs);
     }
