@@ -999,20 +999,51 @@ mod tests {
     // Listing them all defends against future single-extension splits as well
     // as the reported full-arm deletion.
     #[test]
-    fn dispatcher_routes_each_ts_js_extension_to_ts_matcher() {
+    fn it_dispatches_ts_extension_to_typescript_matcher() {
         let imports = vec!["import { x } from './lib';".to_string()];
-        for ext in &["ts", "tsx", "js", "jsx"] {
-            assert!(
-                imports_reference_module(
-                    &imports,
-                    "lib",
-                    &format!("importer.{ext}"),
-                    ext,
-                    &empty_ctx()
-                ),
-                "expected dispatcher to route {ext} to ts_imports_reference"
-            );
-        }
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.ts",
+            "ts",
+            &empty_ctx()
+        ));
+    }
+
+    #[test]
+    fn it_dispatches_tsx_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.tsx",
+            "tsx",
+            &empty_ctx()
+        ));
+    }
+
+    #[test]
+    fn it_dispatches_js_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.js",
+            "js",
+            &empty_ctx()
+        ));
+    }
+
+    #[test]
+    fn it_dispatches_jsx_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.jsx",
+            "jsx",
+            &empty_ctx()
+        ));
     }
 
     // --- rust_imports_reference (line 198, 203) ---
