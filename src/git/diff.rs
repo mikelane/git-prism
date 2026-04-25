@@ -169,6 +169,14 @@ impl RepoReader {
                         let size_before = old_obj.data.len();
                         let size_after = new_obj.data.len();
 
+                        // cargo-mutants: skip -- the Rewrite branch fires only when gix's
+                        // similarity-based rename/copy detection succeeds, which requires
+                        // both blobs to remain similar. Adding a NUL byte to one side
+                        // typically drops similarity below threshold and the change is
+                        // reported as Deletion + Addition instead, never reaching this
+                        // line. The same `||` is exercised by the Modification branch
+                        // (covered by `it_detects_binary_when_only_old_blob_is_binary`
+                        // and `..._only_new_blob_is_binary`) on which this is modeled.
                         let is_binary = old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
                         let (lines_added, lines_removed) = match diff {

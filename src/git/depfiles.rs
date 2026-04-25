@@ -539,4 +539,28 @@ click = "^8.0"
         assert_eq!(result.changed[0].old_version.as_deref(), Some("1.0"));
         assert_eq!(result.changed[0].new_version.as_deref(), Some("2.0"));
     }
+
+    // Kill mutant: line 131 replace || with && in parse_go_mod_deps (the
+    // `require (` block-open detector).
+    //
+    // The intent is "enter block mode for any line that starts with `require (`,
+    // including ones with a trailing inline comment". Replacing `||` with `&&`
+    // narrows the predicate to "exactly `require (` AND starts with `require (`"
+    // i.e. an exact equality, so a `require ( // comment` opener no longer flips
+    // `in_require = true` and the deps inside the block are silently dropped.
+    //
+    // This test exercises that exact case: a `require (` line with a trailing
+    // Go-style comment, followed by a single dep, then `)`. Under the original
+    // `||`, the dep is parsed; under `&&`, it is not.
+    #[test]
+    fn it_parses_go_mod_require_block_with_trailing_comment_on_opener() {
+        let content = "module example.com/foo\n\ngo 1.21\n\nrequire ( // pinned\n\tgithub.com/pkg/errors v0.9.1\n)\n";
+        let deps = parse_go_mod_deps(content);
+        assert_eq!(
+            deps.len(),
+            1,
+            "require block opener with trailing comment must enter block mode"
+        );
+        assert_eq!(deps.get("github.com/pkg/errors").unwrap(), "v0.9.1");
+    }
 }
