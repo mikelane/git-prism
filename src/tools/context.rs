@@ -241,6 +241,13 @@ pub fn build_function_context_with_options(
         // file must be scanned to cover that case.
         let any_changed_needs_fallback = changed_modules
             .iter()
+            // cargo-mutants: skip -- equivalent mutant: `||` → `&&` is observably
+            // identical here. By construction `supports_import_scoping(ext) <=>
+            // infer_module_path(...).is_some()` (both gate on the same
+            // `SCOPED_LANGUAGES` set in import_scope.rs), so for every
+            // (module, supports) tuple in changed_modules the operands `!*supports`
+            // and `module.is_none()` are always equal — `||` and `&&` agree on
+            // every input.
             .any(|(_, module, supports)| !*supports || module.is_none());
 
         let should_scan = if is_changed_file {
@@ -363,6 +370,21 @@ pub fn build_function_context_with_options(
         let func_ext = extension_from_path(func_file);
         let func_has_module =
             import_scope::infer_module_path(func_file, func_ext, &repo_ctx).is_some();
+        // cargo-mutants: skip -- equivalent mutants on the surrounding `&&` /
+        // `||` operators (line 373 `&&` → `||`; line 374 `&&` → `||`; line 375
+        // inner `||` → `&&`). All three rest on the same invariant used at line
+        // 244: `supports_import_scoping(ext) <=> infer_module_path(...).is_some()`.
+        // Concretely:
+        //   * line 373 `&&` → `||`: `supports || (has_module && !any(...))`. With
+        //     `supports == has_module`, the disjunction reduces to the same value
+        //     as the conjunction on every input.
+        //   * line 374 `&&` → `||`: yields `(supports && has_module) || !any(...)`.
+        //     `supports && has_module == supports` (same invariant), and a
+        //     case-by-case enumeration of (supports, !any(...)) shows the result
+        //     matches `supports && has_module && !any(...)` for every reachable
+        //     state.
+        //   * line 375 inner `||` → `&&`: the `.any()` predicate `!*s || m.is_none()`
+        //     has equal operands by the invariant, so `||` and `&&` agree.
         let scoping_mode = if import_scope::supports_import_scoping(func_ext)
             && func_has_module
             && !changed_modules.iter().any(|(_, m, s)| !*s || m.is_none())
@@ -994,6 +1016,55 @@ mod tests {
         // the is_test_path patterns (no leading `test_`, no `/test/` dir, etc.)
         assert!(!is_test_path("src/latest.rs"));
         assert!(!is_test_path("pkg/contest.go"));
+    }
+
+    // --- is_test_path OR-chain operand isolation ---
+    //
+    // The `||` operators in `is_test_path` form a chain over many test-path
+    // heuristics. Cargo-mutants (issue #224 / CI run 24917104987) reported the
+    // first three `||` operators as surviving mutations because every existing
+    // assertion lights up MULTIPLE arms — flipping one `||` to `&&` still
+    // leaves another arm to carry the result. The tests below pick paths that
+    // light up EXACTLY ONE arm of the chain so every operand is independently
+    // observable.
+
+    #[test]
+    fn it_returns_true_for_path_matching_only_the_tests_directory_arm() {
+        // `foo/tests/bar.rs` matches `lower.contains("/tests/")` and nothing
+        // else in the chain:
+        //   * no `/test/` (the `s` is part of `tests`)
+        //   * no `/__tests__/`, `/spec/`, `_test.go`, `_test.rs`
+        //   * filename `bar.rs` does NOT start with `test_`
+        //   * no `.test.{ts,js,tsx,jsx}`, `_spec.rb`, `test.java`, `tests.cs`
+        //
+        // This isolates the `/tests/` arm. A mutation that swaps the `||`
+        // immediately before `/tests/` (line 56) for `&&` makes the first
+        // `(/test/ && /tests/)` group false, and every later arm is also
+        // false, so the function returns false. A mutation that swaps the
+        // `||` immediately AFTER `/tests/` (line 57) for `&&` produces
+        // `(/tests/ && /__tests__/)` — also false here — and again every
+        // later arm is false. Both mutations are killed.
+        assert!(is_test_path("foo/tests/bar.rs"));
+    }
+
+    #[test]
+    fn it_returns_true_for_path_matching_only_the_double_underscore_tests_directory_arm() {
+        // `src/__tests__/foo.rs` matches `lower.contains("/__tests__/")` and
+        // nothing else:
+        //   * `/test/` is false (no `/test/` substring with surrounding
+        //     slashes)
+        //   * `/tests/` is false (the substring is `/__tests__/`, the char
+        //     before `tests` is `_`, not `/`)
+        //   * `/spec/`, `_test.go`, `_test.rs` are all false
+        //   * filename `foo.rs` does NOT start with `test_`
+        //   * no `.test.{ts,js,tsx,jsx}`, `_spec.rb`, `test.java`, `tests.cs`
+        //
+        // This isolates the `/__tests__/` arm. A mutation that swaps the `||`
+        // between `/__tests__/` and `/spec/` (line 58) for `&&` makes the
+        // group `(/__tests__/ && /spec/)` false, and every other arm is also
+        // false, so the function returns false under the mutation but true
+        // under the original.
+        assert!(is_test_path("src/__tests__/foo.rs"));
     }
 
     // --- ContextOptions::default ---
@@ -1922,6 +1993,346 @@ mod tests {
             over_cap.test_references.len(),
             cap,
             "test_references.len() at cap+1 must be truncated to {cap}",
+        );
+    }
+
+    // --- build_function_context_with_options pagination / filter / scoping mutants ---
+    //
+    // Cargo-mutants (issue #224 / CI run 24917104987) reported a cluster of
+    // surviving mutants inside the orchestration body. The tests below pin
+    // each load-bearing operator to an observable response.
+
+    #[test]
+    fn it_filters_out_unmatched_functions_when_function_names_is_a_non_empty_set() {
+        // Targets the `&& !names.is_empty()` guard at line 159. Removing the
+        // bang inverts the condition so the filter runs only when `names` is
+        // empty — i.e., for a non-empty filter the retain step is skipped and
+        // every changed function survives. The fixture's HEAD~1..HEAD range
+        // produces three changed functions (calculate, helper, process); a
+        // single-name filter must shrink the response to exactly one entry,
+        // and that entry must be the requested name.
+        let (_dir, path) = create_context_test_repo();
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 25,
+            function_names: Some(vec!["calculate".to_string()]),
+            max_response_tokens: None,
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        let names: Vec<&str> = result.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["calculate"],
+            "function_names=[\"calculate\"] must restrict the response to exactly that name; \
+             a mutation that inverts the `!names.is_empty()` guard skips the retain step \
+             and lets helper/process leak through. got: {names:?}",
+        );
+    }
+
+    #[test]
+    fn it_reports_caller_count_as_sum_of_production_and_test_callers() {
+        // Targets `caller_count = callers.len() + test_references.len()` at
+        // line 356. The fixture's `calculate` is called from `src/main.rs`
+        // (production caller) AND `tests/test_lib.rs` (test caller), so the
+        // expected sum is callers.len() + test_references.len() and every
+        // arithmetic mutation (`+ → -`, `+ → *`) produces an observably
+        // different value:
+        //   * `+`: 1 + 1 = 2
+        //   * `-`: 1 - 1 = 0  (or saturating; in any case != 2)
+        //   * `*`: 1 * 1 = 1
+        let (_dir, path) = create_context_test_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        let calculate_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "calculate")
+            .expect("calculate should appear in the context response");
+
+        // Pre-flight: the construction relies on at least one production AND
+        // one test caller so the three arithmetic outcomes are distinguishable.
+        assert!(
+            !calculate_ctx.callers.is_empty(),
+            "fixture must produce at least one production caller for `calculate` \
+             so the `+`/`-`/`*` arithmetic outcomes diverge; got callers={:?}",
+            calculate_ctx.callers,
+        );
+        assert!(
+            !calculate_ctx.test_references.is_empty(),
+            "fixture must produce at least one test caller for `calculate` \
+             so the `+`/`-`/`*` arithmetic outcomes diverge; got test_references={:?}",
+            calculate_ctx.test_references,
+        );
+
+        let expected = calculate_ctx.callers.len() + calculate_ctx.test_references.len();
+        assert_eq!(
+            calculate_ctx.caller_count,
+            expected,
+            "caller_count must equal callers.len() + test_references.len(); \
+             callers.len()={} test_references.len()={} caller_count={}",
+            calculate_ctx.callers.len(),
+            calculate_ctx.test_references.len(),
+            calculate_ctx.caller_count,
+        );
+    }
+
+    #[test]
+    fn it_emits_a_next_cursor_when_total_items_exceed_page_size() {
+        // Targets the `end_offset < filtered_total` check at line 430.
+        // Replacing `<` with `>` makes `page_cutoff` always `None` (because
+        // `end_offset = min(start_offset + page_size, filtered_total)` is
+        // never strictly greater than `filtered_total`). The next_cursor
+        // would then never fire from page-size rollover alone.
+        //
+        // The fixture produces 3 changed functions (calculate, helper,
+        // process) and we ask for page_size=2 with no budget so only the
+        // page-rollover branch can populate next_cursor. Under correct `<`:
+        // end_offset=2 < 3 → next_cursor=Some(...). Under mutant `>`:
+        // end_offset=2 > 3 = false → next_cursor=None.
+        let (_dir, path) = create_context_test_repo();
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 2,
+            function_names: None,
+            max_response_tokens: None,
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // Pre-flight: confirm filtered_total > page_size so the rollover
+        // branch IS the one being exercised.
+        assert!(
+            result.pagination.total_items > 2,
+            "fixture must produce more than page_size items for the rollover \
+             branch to be observable; total_items={}",
+            result.pagination.total_items,
+        );
+        assert_eq!(
+            result.functions.len(),
+            2,
+            "page must contain exactly page_size entries when filtered_total > page_size",
+        );
+        assert!(
+            result.pagination.next_cursor.is_some(),
+            "next_cursor must be Some when end_offset < filtered_total \
+             (page_size=2, total_items={}); a `<` → `>` mutation flips this \
+             branch off",
+            result.pagination.total_items,
+        );
+        assert!(
+            result.metadata.next_cursor.is_some(),
+            "metadata.next_cursor must mirror pagination.next_cursor",
+        );
+    }
+
+    #[test]
+    fn it_marks_pure_rust_changed_function_with_scoped_mode() {
+        // Targets three `delete !` mutants whose witness collapses to a
+        // single behaviour: when every changed file is in a supported
+        // scoped language and has an inferable module path, the resulting
+        // FunctionContextEntry must carry `scoping_mode: Scoped`. Specifically:
+        //
+        //   * Line 244 col 42 (`!*supports || module.is_none()` → `*supports
+        //     || module.is_none()`): given the invariant that
+        //     `supports_import_scoping(ext) <=> infer_module_path(...).is_some()`,
+        //     dropping the bang makes `*supports || module.is_none()` always
+        //     true (`!none || none = true`), forcing
+        //     `any_changed_needs_fallback = true`. That value isn't directly
+        //     observable in the response, but the IDENTICAL predicate on
+        //     line 368 picks scoping_mode, so a Scoped assertion catches the
+        //     parallel mutants on that line too.
+        //   * Line 368 col 16 (`!changed_modules.iter().any(...)` →
+        //     `changed_modules.iter().any(...)`): under the mutation,
+        //     scoping_mode is `Scoped` only when at least one changed file
+        //     needs fallback — the opposite of the intended logic. With a
+        //     pure-rust fixture, no file needs fallback, so the mutation
+        //     selects Fallback and the assertion fails.
+        //   * Line 368 col 56 (`!*s || m.is_none()` → `*s || m.is_none()`):
+        //     by the same invariant, `*s || m.is_none()` is always true,
+        //     so `any(...)` is always true on a non-empty page, `!any(...)`
+        //     is always false, and scoping_mode is always Fallback.
+        //
+        // The pure-rust fixture has src/lib.rs and src/main.rs (both
+        // supported, both have inferable module paths), so the scoped
+        // branch is the correct outcome.
+        let (_dir, path) = create_context_test_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        let calculate_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "calculate")
+            .expect("calculate should appear in the context response");
+        assert_eq!(
+            calculate_ctx.scoping_mode,
+            ScopingMode::Scoped,
+            "pure-rust fixture: every changed file is in a scoped language \
+             with an inferable module, so scoping_mode must be Scoped. \
+             Fallback signals that one of the `delete !` mutants on lines \
+             244 / 368 forced the predicate the wrong way.",
+        );
+    }
+
+    /// Build a fixture where `calculate` is called from a same-directory
+    /// Rust file that does NOT import the changed module. This isolates the
+    /// import-scoped branch on lines 244-259: the unrelated file is only
+    /// reachable via fallback (line 244 → 249) or via the `is_same_pkg`
+    /// branch (lines 256-257). With correct logic the file is skipped — so
+    /// no caller is found.
+    fn create_unrelated_caller_repo() -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Cargo.toml so `RepoContext::load` picks up the crate name and
+        // intra-crate `crate::lib::*` imports resolve correctly. The crate
+        // name does not match `unrelated.rs` — that file deliberately omits
+        // any `use crate::lib::*` statement so import-scoped scanning skips
+        // it.
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"unrelated_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(path.join("src")).unwrap();
+
+        // Initial commit: lib.rs has `calculate`, unrelated.rs calls it
+        // WITHOUT importing the lib module — only by writing the bare name.
+        // Tree-sitter's call extraction matches on the leaf name, so it
+        // would find `calculate(99)` IF the file were scanned.
+        std::fs::write(
+            path.join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("src/unrelated.rs"),
+            // No `use crate::lib::calculate;` — call site is bare so import
+            // scoping must skip this file unless a mutation forces a scan.
+            "pub fn use_calc() -> i32 {\n    calculate(99)\n}\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify lib.rs so `calculate` shows up as a changed function in the
+        // HEAD~1..HEAD manifest.
+        std::fs::write(
+            path.join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 {\n    x + 2\n}\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "modify calculate"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn it_skips_same_directory_files_without_relevant_imports() {
+        // Targets four mutants that all collapse to the same observable
+        // wire effect: a Rust file in the SAME directory as the changed
+        // file, that calls the changed function but never imports it,
+        // must NOT contribute a caller.
+        //
+        //   * Line 244 col 42 (`delete !` on `!*supports`): forces
+        //     `any_changed_needs_fallback = true`; line 249 then becomes
+        //     true for every supported caller and the unrelated file is
+        //     scanned anyway, finding the bare `calculate(99)` call.
+        //   * Line 249 col 19 (`delete !` on `!supports_import_scoping`):
+        //     turns the second arm of the `should_scan` if into
+        //     `supports_import_scoping(ext) || any_changed_needs_fallback`.
+        //     For a `.rs` caller that's `true || _ = true` — the file is
+        //     scanned unconditionally and the call is found.
+        //   * Line 256 col 35 (`==` → `!=`) on `ext == "go"`: makes
+        //     `is_same_pkg = ext != "go" && changed_file_paths.iter().any(
+        //     same_directory)`. For a `.rs` file in the same dir as the
+        //     changed file, `ext != "go"` is true and the same-dir check
+        //     fires — the file is scanned via the Go-flavoured branch and
+        //     the call is found.
+        //   * Line 257 col 17 (`&&` → `||`) on the same `is_same_pkg`
+        //     expression: makes `is_same_pkg = ext == "go" || same_dir(...)`.
+        //     For a `.rs` file in the same dir, `false || true = true`,
+        //     same observable effect as above.
+        //
+        // Under correct logic, the unrelated file falls through the
+        // `is_changed_file` early-return AND the `should_scan` second arm
+        // AND the `is_same_pkg` Go branch, lands in the imports-check
+        // branch, which sees no `use crate::lib::*` statement and returns
+        // false — so the file is skipped.
+        let (_dir, path) = create_unrelated_caller_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        let calculate_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "calculate")
+            .expect("calculate should appear in the context response");
+
+        // Pre-flight: scoping mode must be Scoped — if it's Fallback for
+        // some reason (e.g., an unsupported file in the changed set that we
+        // didn't anticipate), this test cannot distinguish the mutations
+        // from correct behaviour.
+        assert_eq!(
+            calculate_ctx.scoping_mode,
+            ScopingMode::Scoped,
+            "this fixture relies on import-scoped scanning being active; \
+             Fallback would let the unrelated file get scanned anyway and \
+             the assertion below would not catch the mutations.",
+        );
+
+        // No caller in `unrelated.rs` should appear under correct logic.
+        let has_unrelated_caller = calculate_ctx
+            .callers
+            .iter()
+            .any(|c| c.file.contains("unrelated"))
+            || calculate_ctx
+                .test_references
+                .iter()
+                .any(|c| c.file.contains("unrelated"));
+        assert!(
+            !has_unrelated_caller,
+            "src/unrelated.rs does not import crate::lib::calculate; under \
+             correct import-scoped scanning the file must be skipped, so no \
+             caller in `unrelated.rs` should appear. A caller showing up \
+             signals one of the line 244 / 249 / 256 / 257 mutations forced \
+             the file to be scanned. callers={:?} test_references={:?}",
+            calculate_ctx.callers, calculate_ctx.test_references,
         );
     }
 }
