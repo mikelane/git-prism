@@ -20,7 +20,9 @@ pub fn build_snapshots(
 ) -> Result<SnapshotResponse, ToolError> {
     let reader = RepoReader::open(repo_path)?;
 
-    // Exactly MAX_SNAPSHOT_FILES paths produces the full slice either way.
+    // cargo-mutants: skip -- equivalent mutant: when paths.len() == MAX_SNAPSHOT_FILES,
+    // both `> MAX` (false → use full slice) and `>= MAX` (true → take &paths[..MAX])
+    // yield the same 20-element slice, so no black-box test can distinguish them.
     #[rustfmt::skip]
     let paths_to_process = if paths.len() > MAX_SNAPSHOT_FILES { &paths[..MAX_SNAPSHOT_FILES] } else { paths };
 
@@ -737,6 +739,117 @@ mod tests {
         assert!(
             after.content.ends_with('\n'),
             "non-empty line-range content should end with newline"
+        );
+    }
+
+    #[test]
+    fn it_marks_normal_text_file_as_not_binary_via_before_check() {
+        // Kills: replace && with || at line 85 (before-side check).
+        // For a normal text `before` (is_empty=false, size>0), the && short-circuits
+        // to false (not binary), but `||` evaluates to true (incorrectly binary).
+        // Both before AND after are plain text — neither should trigger is_binary.
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        // before is non-empty text, after is non-empty text — neither is binary
+        let before = file.before.as_ref().unwrap();
+        assert!(
+            !before.content.is_empty(),
+            "before should be non-empty text"
+        );
+        assert!(before.size_bytes > 0, "before should have non-zero size");
+        let after = file.after.as_ref().unwrap();
+        assert!(!after.content.is_empty(), "after should be non-empty text");
+        assert!(after.size_bytes > 0, "after should have non-zero size");
+        assert!(
+            !file.is_binary,
+            "plain text file should NOT be detected as binary"
+        );
+    }
+
+    #[test]
+    fn it_does_not_mark_zero_byte_before_as_binary() {
+        // Kills: replace > with >= at line 85 (before-side `c.size_bytes > 0`).
+        // When `before` is a truly empty file (is_empty=true, size_bytes==0):
+        //   Original: true && (0 > 0)  = true && false = false → not binary
+        //   Mutated:  true && (0 >= 0) = true && true  = true  → IS binary (wrong!)
+        // The existing zero-byte test uses include_before:false (skips this branch);
+        // this one explicitly enables the before side.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Initial commit: truly empty file (0 bytes)
+        std::fs::write(path.join("zero.txt"), "").unwrap();
+        Command::new("git")
+            .args(["add", "zero.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add empty"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Second commit: non-empty text
+        std::fs::write(path.join("zero.txt"), "now has content\n").unwrap();
+        Command::new("git")
+            .args(["add", "zero.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "fill in"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["zero.txt".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        let before = file.before.as_ref().unwrap();
+        assert_eq!(
+            before.size_bytes, 0,
+            "pre-flight: before must be a 0-byte file"
+        );
+        assert!(
+            before.content.is_empty(),
+            "pre-flight: before content must be empty"
+        );
+        assert!(
+            !file.is_binary,
+            "0-byte before with empty content should NOT be detected as binary"
         );
     }
 }
