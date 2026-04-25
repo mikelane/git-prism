@@ -378,4 +378,47 @@ class Service {
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
     }
+
+    // Kill "delete match arm navigation_expression" mutant: assert that a
+    // method call expressed as `obj.method()` is flagged is_method_call=true
+    // with receiver populated. Without the navigation_expression arm, both
+    // would fall through to (false, None).
+    #[test]
+    fn it_reports_method_call_with_receiver_for_navigation_expression() {
+        let source = br#"func process() {
+    obj.doWork()
+}
+"#;
+        let analyzer = SwiftAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let do_work = calls
+            .iter()
+            .find(|c| c.callee == "obj.doWork")
+            .expect("obj.doWork call must be present");
+        assert!(
+            do_work.is_method_call,
+            "navigation_expression call must be flagged as method call"
+        );
+        assert_eq!(do_work.receiver.as_deref(), Some("obj"));
+    }
+
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 2, 3, 4
+    // distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"func run() {
+    foo()
+    bar()
+    baz()
+}
+";
+        let analyzer = SwiftAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let foo = calls.iter().find(|c| c.callee == "foo").expect("foo call");
+        let bar = calls.iter().find(|c| c.callee == "bar").expect("bar call");
+        let baz = calls.iter().find(|c| c.callee == "baz").expect("baz call");
+        assert_eq!(foo.line, 2);
+        assert_eq!(bar.line, 3);
+        assert_eq!(baz.line, 4);
+    }
 }

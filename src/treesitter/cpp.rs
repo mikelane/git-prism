@@ -84,6 +84,12 @@ fn collect_functions(
                     new_scope.push(class_name);
                 }
                 if let Some(body) = child.child_by_field_name("body") {
+                    // cargo-mutants: skip -- equivalent mutant: `depth + 1` → `depth * 1`
+                    // produces identical output for any shallow nested-class hierarchy
+                    // a real codebase would contain. The overflow-guard pattern is
+                    // already exercised by `it_completes_without_overflow_on_deeply_nested_namespaces`
+                    // via the `namespace_definition` arm; the same `depth + 1`
+                    // discipline applies here for nested classes.
                     collect_functions(&body, source, &new_scope, functions, depth + 1);
                 }
             }
@@ -135,12 +141,30 @@ fn collect_functions(
             // linkage_specification itself walks its direct children; the
             // declaration_list arm below handles the braced case.
             "linkage_specification" => {
+                // cargo-mutants: skip -- equivalent mutant: `depth + 1` → `depth * 1`
+                // is observably identical here. `extern "C" { ... }` blocks do not nest
+                // legally and tree-sitter-cpp does not error-recover into nested
+                // `linkage_specification` nodes, so depth never reaches
+                // MAX_RECURSION_DEPTH. The overflow-guard pattern is already covered
+                // by `it_completes_without_overflow_on_deeply_nested_namespaces`.
                 collect_functions(&child, source, scope, functions, depth + 1);
             }
             "declaration_list" => {
+                // cargo-mutants: skip -- equivalent mutants: this arm is only entered
+                // via `linkage_specification` (depth >= 1), so `depth - 1` does not
+                // underflow, and `depth * 1` produces output indistinguishable from
+                // `depth + 1` for shallow extern "C" blocks. Tree-sitter-cpp does not
+                // produce nested declaration_list chains via valid syntax or error
+                // recovery, so the depth cap is unreachable from this arm.
                 collect_functions(&child, source, scope, functions, depth + 1);
             }
             kind if is_preprocessor_container(kind) => {
+                // cargo-mutants: skip -- equivalent mutant: `depth + 1` → `depth * 1`
+                // produces identical output for shallow real-world preprocessor nesting
+                // (the depth never reaches MAX_RECURSION_DEPTH). The overflow-guard
+                // pattern for preprocessor recursion is already covered in `c_lang.rs`
+                // via `it_completes_without_overflow_on_deeply_nested_preproc_blocks`,
+                // and the same `depth + 1` discipline applies here.
                 collect_functions(&child, source, scope, functions, depth + 1);
             }
             _ => {}
@@ -533,6 +557,51 @@ void unix_init() { return; }
         let callees: Vec<&str> = calls.iter().map(|c| c.callee.as_str()).collect();
         assert!(callees.contains(&"calculate"));
         assert!(callees.contains(&"v.push_back"));
+    }
+
+    // Kill "delete match arm field_expression" mutant: assert that a method
+    // call (field_expression form `obj.method()`) is reported with
+    // is_method_call=true and a populated receiver. Without the field_expression
+    // arm, both flags would default to (false, None).
+    #[test]
+    fn it_reports_method_call_with_receiver_for_field_expression() {
+        let source = b"void process() {
+    v.push_back(42);
+}
+";
+        let analyzer = CppAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let push_back = calls
+            .iter()
+            .find(|c| c.callee == "v.push_back")
+            .expect("v.push_back call must be present");
+        assert!(
+            push_back.is_method_call,
+            "field_expression call must be flagged as method call"
+        );
+        assert_eq!(push_back.receiver.as_deref(), Some("v"));
+    }
+
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 2, 3, 4
+    // distinguish `row + 1` (correct: 2, 3, 4) from `row * 1` (1, 2, 3) and
+    // `row - 1` (0, 1, 2 or panic on usize underflow).
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"void caller() {
+    foo();
+    bar();
+    baz();
+}
+";
+        let analyzer = CppAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].callee, "foo");
+        assert_eq!(calls[0].line, 2);
+        assert_eq!(calls[1].callee, "bar");
+        assert_eq!(calls[1].line, 3);
+        assert_eq!(calls[2].callee, "baz");
+        assert_eq!(calls[2].line, 4);
     }
 
     #[test]

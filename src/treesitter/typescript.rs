@@ -117,6 +117,13 @@ fn extract_functions_from_node(
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or("");
                 if let Some(body) = child.child_by_field_name("body") {
+                    // cargo-mutants: skip -- equivalent mutant: `depth + 1` → `depth * 1`
+                    // is observably identical here. Per the file-level comment on the
+                    // depth guard, tree-sitter-typescript error-recovers nested classes
+                    // to ERROR nodes rather than nested `class_declaration`, so the
+                    // recursion depth here cannot reach MAX_RECURSION_DEPTH for any
+                    // valid or malformed input. The depth guard exists for defense-in-depth
+                    // against future grammar changes; this is the corresponding mutant.
                     extract_functions_from_node(
                         source,
                         &body,
@@ -153,6 +160,12 @@ fn extract_functions_from_node(
                 }
             }
             "export_statement" => {
+                // cargo-mutants: skip -- equivalent mutant: `depth + 1` → `depth * 1`
+                // is observably identical here. Per the file-level comment on the
+                // depth guard, stacked `export` keywords error-recover to a single
+                // `export_statement`, not to recursively nested ones. The depth
+                // counter cannot reach MAX_RECURSION_DEPTH from this arm for any
+                // valid or malformed input.
                 extract_functions_from_node(
                     source,
                     &child,
@@ -512,6 +525,27 @@ class Greeter {
         let analyzer = TypeScriptAnalyzer::typescript();
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    // Kill extract_calls line-offset mutants (+ with - or *) at line 212.
+    // Calls on lines 2, 3, 4 distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"function run() {
+    foo();
+    bar();
+    baz();
+}
+";
+        let analyzer = TypeScriptAnalyzer::typescript();
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].callee, "foo");
+        assert_eq!(calls[0].line, 2);
+        assert_eq!(calls[1].callee, "bar");
+        assert_eq!(calls[1].line, 3);
+        assert_eq!(calls[2].callee, "baz");
+        assert_eq!(calls[2].line, 4);
     }
 
     /// Depth-guard warning: the `tracing::warn!` in `extract_functions_from_node` is

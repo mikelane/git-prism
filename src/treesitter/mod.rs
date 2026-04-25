@@ -90,6 +90,12 @@ pub struct CallSite {
 pub trait LanguageAnalyzer {
     fn extract_functions(&self, source: &[u8]) -> anyhow::Result<Vec<Function>>;
     fn extract_imports(&self, source: &[u8]) -> anyhow::Result<Vec<String>>;
+    // cargo-mutants: skip -- equivalent mutant: every concrete `LanguageAnalyzer`
+    // implementation in this crate (Rust, Python, Go, Java, C, C++, C#, PHP, Ruby,
+    // Swift, Kotlin, TypeScript/JS) overrides `extract_calls`, so this default body
+    // is unreachable from any production code path. The mutant `replace ... with
+    // Ok(vec![])` is identical to the existing body — observably indistinguishable.
+    // The default exists to permit future analyzers to opt out of call extraction.
     fn extract_calls(&self, source: &[u8]) -> anyhow::Result<Vec<CallSite>> {
         let _ = source;
         Ok(vec![])

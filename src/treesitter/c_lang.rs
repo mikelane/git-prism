@@ -456,6 +456,28 @@ void guarded(int x) {
         assert!(calls.iter().all(|c| !c.is_method_call));
     }
 
+    // Kill extract_calls line-offset mutants (+ with - or *) at line 152.
+    // Call sites are on lines 2, 3, 4 — `row * 1` would yield 1, 2, 3 (off-by-one)
+    // and `row - 1` would yield 0, 1, 2 (or panic on usize underflow at row 0).
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"void caller(void) {
+    foo();
+    bar();
+    baz();
+}
+";
+        let analyzer = CAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].callee, "foo");
+        assert_eq!(calls[0].line, 2);
+        assert_eq!(calls[1].callee, "bar");
+        assert_eq!(calls[1].line, 3);
+        assert_eq!(calls[2].callee, "baz");
+        assert_eq!(calls[2].line, 4);
+    }
+
     #[test]
     fn empty_file_returns_no_calls() {
         let source = b"";
