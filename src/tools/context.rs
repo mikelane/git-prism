@@ -1339,4 +1339,583 @@ mod tests {
             "expected the response to still carry entries when budget is disabled",
         );
     }
+
+    // --- enforce_context_token_budget arithmetic and clamp boundary mutants ---
+    //
+    // These tests target surviving mutants reported by cargo-mutants
+    // (issue #224 / CI run 24917104987) in `enforce_context_token_budget`
+    // and `clamp_entry_lists`:
+    //   * `(budget / 4).max(128)` → `(budget % 4).max(128)` — safety margin
+    //     uses division, not modulo
+    //   * `remaining -= cost.full`   → `/=`         (full-fit branch)
+    //   * `remaining -= cost.clamped` → `+=` or `/=` (clamped-fit branch)
+    //   * `entry.callers.len()         > max_callers`  → `>=`
+    //   * `entry.callees.len()         > max_callees`  → `>=`
+    //   * `entry.test_references.len() > max_test_refs` → `>=`
+    //
+    // Mirrors the manifest-side tests added in PR #223 for the analogous
+    // `enforce_token_budget` mutants.
+    //
+    // Equivalent-mutant note: the three `> → >=` mutants on lines 600,
+    // 603, 606 are mathematically equivalent — `Vec::truncate(N)` on a
+    // Vec of length N is documented as a no-op, so for `len == cap` both
+    // operators produce identical output (skip vs no-op-truncate). For
+    // `len < cap` and `len > cap` both operators agree. Cargo-mutants
+    // surfaces them because no test fails under the mutation, but no
+    // black-box test of `clamp_entry_lists` can distinguish the two. The
+    // boundary tests below pin the contract at exactly `len == cap`
+    // (skip) and `len == cap + 1` (truncate to cap) so any future change
+    // that makes the operation non-idempotent — or that shifts the
+    // threshold by one — fails immediately.
+    //
+    // The arithmetic mutants use synthetic FunctionContextResponse fixtures so
+    // the test exercises `enforce_context_token_budget` directly without
+    // standing up a git repo — much faster to triangulate budget arithmetic.
+
+    fn make_context_entry_with_lists(
+        name: &str,
+        caller_count: usize,
+        callee_count: usize,
+        test_ref_count: usize,
+    ) -> FunctionContextEntry {
+        // Same shape as `make_clamp_fixture_entry` but with longer file/caller
+        // names so each entry's serialized cost is in the hundreds of tokens —
+        // enough that a tight budget can clamp or drop it.
+        let callers = (0..caller_count)
+            .map(|i| CallerEntry {
+                file: format!("src/very/deeply/nested/module/path/caller_{name}_{i}.rs"),
+                line: i * 7 + 1,
+                caller: format!("caller_function_named_{name}_index_{i}"),
+                is_test: false,
+            })
+            .collect();
+        let callees = (0..callee_count)
+            .map(|i| CalleeEntry {
+                callee: format!("descriptively_named_callee_{name}_{i}"),
+                line: i * 11 + 1,
+            })
+            .collect();
+        let test_references = (0..test_ref_count)
+            .map(|i| CallerEntry {
+                file: format!("tests/integration/test_module_{name}_{i}.rs"),
+                line: i * 13 + 1,
+                caller: format!("test_caller_{name}_{i}"),
+                is_test: true,
+            })
+            .collect();
+        FunctionContextEntry {
+            name: name.to_string(),
+            file: format!("src/lib_{name}.rs"),
+            change_type: FunctionChangeType::Modified,
+            blast_radius: BlastRadius::compute(caller_count, test_ref_count),
+            scoping_mode: ScopingMode::Fallback,
+            callers,
+            callees,
+            test_references,
+            caller_count: caller_count + test_ref_count,
+            truncated: false,
+        }
+    }
+
+    fn make_context_response(entries: Vec<FunctionContextEntry>) -> FunctionContextResponse {
+        let count = entries.len();
+        FunctionContextResponse {
+            metadata: ContextMetadata {
+                base_ref: "HEAD~1".to_string(),
+                head_ref: "HEAD".to_string(),
+                base_sha: "0000000000000000000000000000000000000000".to_string(),
+                head_sha: "1111111111111111111111111111111111111111".to_string(),
+                generated_at: Utc::now(),
+                token_estimate: 0,
+                function_analysis_truncated: vec![],
+                next_cursor: None,
+            },
+            functions: entries,
+            pagination: PaginationInfo {
+                total_items: count,
+                page_start: 0,
+                page_size: count,
+                next_cursor: None,
+            },
+        }
+    }
+
+    #[test]
+    fn it_uses_division_not_modulo_for_safety_margin() {
+        // The safety_margin in enforce_context_token_budget is computed as
+        // `(budget / 4).max(128)`. A mutant that replaces `/` with `%`
+        // computes `budget % 4` — always 0..=3 — which then clamps to 128.
+        // The `.max(128)` clamp masks the mutation for any budget < 512;
+        // beyond that, the real margin grows with the budget while the
+        // mutant margin stays at 128. The test must use a budget large
+        // enough that `budget/4 > 128` to make the mutation observable.
+        //
+        // Strategy: build a response where total full cost lives in a
+        // sweet spot such that `(budget/4).max(128)` forces a trim but
+        // `(budget%4).max(128) == 128` leaves everything fitting full.
+        let entries = (0..8)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 3, 3, 2))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+
+        // Measure skeleton + per-entry full cost the same way
+        // enforce_context_token_budget does internally.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let total_full: usize = response
+            .functions
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+
+        // Solve for budget so:
+        //     budget - skeleton - (budget/4) < total_full   (real → trim)
+        //     budget - skeleton - 128        >= total_full  (mutant → no trim)
+        // i.e. budget >= total_full + skeleton + 128
+        //  and budget * 3/4 < total_full + skeleton
+        //         → budget < (total_full + skeleton) * 4 / 3
+        //
+        // Pick the midpoint of that range. Cap the lower bound at 513 so
+        // `budget / 4 > 128` (mutation actually observable).
+        let target = total_full + skeleton_cost;
+        let lower = (target + 128).max(513);
+        let upper = target * 4 / 3; // exclusive upper bound
+        assert!(
+            upper > lower,
+            "fixture must be large enough for the safety-margin sweet spot to exist: \
+             target={target} skeleton={skeleton_cost} total_full={total_full} \
+             lower={lower} upper={upper}",
+        );
+        let budget = (lower + upper) / 2;
+
+        // Pre-flight: under the correct `/`, file_budget < total_full
+        // (trim required); under the mutant `%`, file_budget >= total_full
+        // (no trim).
+        let margin_div = (budget / 4).max(128);
+        let margin_mod = (budget % 4).max(128);
+        assert!(
+            margin_div > margin_mod,
+            "test presumes (budget/4).max(128) > (budget%4).max(128); \
+             budget={budget} /4-margin={margin_div} %4-margin={margin_mod}",
+        );
+        let entry_budget_under_div = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_div);
+        let entry_budget_under_mod = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_mod);
+        assert!(
+            entry_budget_under_div < total_full,
+            "test construction invalid: under correct `/`, entry_budget \
+             ({entry_budget_under_div}) must be < total_full ({total_full}) \
+             so trimming is required. \
+             budget={budget} skeleton={skeleton_cost} margin_div={margin_div}",
+        );
+        assert!(
+            entry_budget_under_mod >= total_full,
+            "test construction invalid: under mutant `%`, entry_budget \
+             ({entry_budget_under_mod}) must be >= total_full ({total_full}) \
+             so no trimming occurs. \
+             budget={budget} skeleton={skeleton_cost} margin_mod={margin_mod}",
+        );
+
+        let original_entries = response.functions.len();
+        let (clamped_names, local_cutoff) = enforce_context_token_budget(&mut response, budget);
+
+        // Under correct `/`: at least one entry was clamped or dropped — i.e.
+        // either clamped_names is non-empty or the cutoff fired (entries
+        // truncated). Under mutant `%`: total_full <= entry_budget so the
+        // function returns (Vec::new(), None) without touching anything.
+        let some_trimming = !clamped_names.is_empty()
+            || local_cutoff.is_some()
+            || response.functions.iter().any(|f| f.truncated)
+            || response.functions.len() < original_entries;
+        assert!(
+            some_trimming,
+            "with budget {budget} (skeleton={skeleton_cost}, \
+             total_full={total_full}) the (budget/4).max(128) safety margin \
+             of {margin_div} tokens must force trimming; a modulo-based margin \
+             clamps to {margin_mod} (=128) and leaves room for every entry. \
+             clamped_names={clamped_names:?} local_cutoff={local_cutoff:?} \
+             surviving_entries={}",
+            response.functions.len(),
+        );
+    }
+
+    #[test]
+    fn it_decreases_remaining_budget_after_each_clamped_fit_decision() {
+        // Targets `remaining -= cost.clamped` → `+=` (line 572). The full
+        // branch (line 568) also uses `-=` so under any `+=` mutation
+        // the SAME fixture must distinguish.
+        //
+        // Strategy: make `cost.full ≫ cost.clamped` by stuffing each entry
+        // with very long caller / callee / test-ref lists. Pick budget so
+        // that:
+        //   * No entry fits at full ever (under correct `-=` OR `+=`):
+        //     even after `+=` accumulates ALL clamped costs, remaining
+        //     stays below one_full. This pins line 568 off — so the only
+        //     active branch is line 572.
+        //   * Several entries fit clamped; the rest must drop.
+        //
+        // With line 568 inert, the `+=` mutation on line 572 turns drops
+        // into clamps (every entry survives clamped). Under correct `-=`,
+        // drops happen. Assertion: at least one entry was dropped.
+        let entries = (0..6)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 100, 100, 50))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.functions[0]);
+        let one_clamped = {
+            let mut clone = response.functions[0].clone();
+            clamp_entry_lists(&mut clone, 5, 5, 3);
+            size::estimate_response_tokens(&clone)
+        };
+        let n = response.functions.len();
+
+        // Target entry_budget ≈ 3 * one_clamped so 3 clamped entries fit,
+        // 3 must drop. Critically, we also need `one_full > entry_budget +
+        // n * one_clamped` so even after a `+=` mutant grows remaining by
+        // the maximum possible amount (every entry clamps), remaining
+        // never reaches one_full — line 568 stays dormant.
+        let target_entry_budget = 3 * one_clamped;
+        let budget = ((skeleton_cost + target_entry_budget) * 4).div_ceil(3);
+
+        let safety_margin = (budget / 4).max(128);
+        let entry_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        // Pre-flight 1: one_full > entry_budget (line 568 inert at start).
+        assert!(
+            one_full > entry_budget,
+            "construction invalid: one_full must exceed entry_budget so \
+             line 568 doesn't fire on the first entry; \
+             one_full={one_full} entry_budget={entry_budget}",
+        );
+        // Pre-flight 2: even under `+=`, remaining can never reach
+        // one_full. Worst case `+=` accumulates `n * one_clamped` on top
+        // of entry_budget. If `entry_budget + n * one_clamped < one_full`
+        // line 568 stays inert under both `-=` and `+=`.
+        let max_grown_remaining = entry_budget + n * one_clamped;
+        assert!(
+            max_grown_remaining < one_full,
+            "construction invalid: under `+=` mutation, remaining can grow \
+             to entry_budget + n*one_clamped = {max_grown_remaining}, which \
+             must stay below one_full = {one_full} so line 568 never fires \
+             (otherwise the walk's behavior under the mutation gets \
+             complicated by full-fits taking over)",
+        );
+        // Pre-flight 3: budget must admit ≥2 clamped entries.
+        assert!(
+            entry_budget >= 2 * one_clamped,
+            "construction invalid: budget must admit ≥2 clamped entries; \
+             entry_budget={entry_budget} one_clamped={one_clamped}",
+        );
+        // Pre-flight 4: total clamped cost must exceed entry_budget so
+        // drops happen under correct `-=`.
+        let total_clamped = n * one_clamped;
+        assert!(
+            total_clamped > entry_budget,
+            "construction invalid: total clamped cost must exceed budget; \
+             total_clamped={total_clamped} entry_budget={entry_budget}",
+        );
+
+        let original_entries = response.functions.len();
+        let (clamped_names, _) = enforce_context_token_budget(&mut response, budget);
+        let dropped = original_entries - response.functions.len();
+
+        // Under correct `-=`: budget drains, eventually a drop fires.
+        // Under `+=` on line 572: remaining never reaches one_full (by
+        // construction), so line 568 stays inert. But each clamp grows
+        // remaining instead of shrinking it — so `cost.clamped <=
+        // remaining` keeps passing for every entry. Result: all entries
+        // clamp, none drop.
+        assert!(
+            !clamped_names.is_empty(),
+            "fixture must trigger the clamped branch at least once; \
+             clamped_names={clamped_names:?}",
+        );
+        assert!(
+            dropped >= 1,
+            "with a budget that admits only ~3 clamped entries out of {n}, \
+             enforcement must DROP at least one entry once `remaining` is \
+             drained. If every entry survives clamped, `remaining` is being \
+             increased instead of decreased (mutant: \
+             `remaining += cost.clamped`). \
+             dropped={dropped} clamped_names={clamped_names:?} \
+             entry_budget={entry_budget} one_clamped={one_clamped} \
+             one_full={one_full}",
+        );
+    }
+
+    #[test]
+    fn it_does_not_collapse_remaining_after_first_clamped_decision() {
+        // Targets `remaining -= cost.clamped` → `/=` (line 572). Under
+        // `/=`, after the first clamp `remaining` becomes
+        // `remaining / cost.clamped` (typically 1 or 0). The next entry's
+        // `cost.clamped <= remaining` check fails → drop. Result: only
+        // ONE entry is clamped, the rest drop. Under correct `-=`, several
+        // entries clamp before the budget drains.
+        //
+        // Same construction strategy as the `+=` test: every entry hits
+        // the clamped branch (one_full ≫ entry_budget + n*one_clamped so
+        // line 568 stays inert). Assertion is on the OTHER direction:
+        // under `/=`, far fewer entries are clamped.
+        let entries = (0..6)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 100, 100, 50))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.functions[0]);
+        let one_clamped = {
+            let mut clone = response.functions[0].clone();
+            clamp_entry_lists(&mut clone, 5, 5, 3);
+            size::estimate_response_tokens(&clone)
+        };
+        let n = response.functions.len();
+
+        // Same budget shape as the `+=` test: at least 3 clamped entries
+        // fit, no full entries fit. The two-or-more-clamped invariant is
+        // what kills `/=` because it collapses to one clamped + drops.
+        let target_entry_budget = 3 * one_clamped;
+        let budget = ((skeleton_cost + target_entry_budget) * 4).div_ceil(3);
+
+        let safety_margin = (budget / 4).max(128);
+        let entry_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        assert!(
+            one_full > entry_budget,
+            "construction invalid: line 568 must NOT fire on entry 0; \
+             one_full={one_full} entry_budget={entry_budget}",
+        );
+        // Belt-and-suspenders: even under any monotonically-non-decreasing
+        // mutation of remaining, the value can't reach one_full so line
+        // 568 stays dormant for the whole walk.
+        let max_grown_remaining = entry_budget + n * one_clamped;
+        assert!(
+            max_grown_remaining < one_full,
+            "construction invalid: max_grown_remaining={max_grown_remaining} \
+             must stay below one_full={one_full}",
+        );
+        assert!(
+            entry_budget >= 3 * one_clamped,
+            "construction invalid: at least 3 clamped entries must fit \
+             under correct `-=` so a `/=` mutant (which clamps only 1) is \
+             distinguishable; entry_budget={entry_budget} \
+             one_clamped={one_clamped}",
+        );
+
+        let (clamped_names, _) = enforce_context_token_budget(&mut response, budget);
+
+        // Under correct `-=`: at least 3 entries clamp.
+        // Under `/=` on line 572: after the first clamp, remaining ≈ 1, so
+        // every subsequent entry drops. Only 1 entry ends up clamped.
+        // Under `/=` on line 568: line 568 never fires here, so this
+        // mutant survives this fixture — the parallel "full path" test
+        // (`it_does_not_collapse_remaining_to_one_after_first_decision`)
+        // covers it.
+        assert!(
+            clamped_names.len() >= 2,
+            "with a budget that admits 3+ clamped entries under correct \
+             `-=`, at least two entries must clamp. If only one clamps, \
+             `remaining` collapsed to ~1 after the first clamped decision \
+             (mutant: `remaining /= cost.clamped`). \
+             clamped_names={clamped_names:?} entry_budget={entry_budget} \
+             one_clamped={one_clamped}",
+        );
+    }
+
+    #[test]
+    fn it_does_not_collapse_remaining_to_one_after_first_decision() {
+        // Targets `remaining -= cost.full` → `/=` (line 568). Under `/=`,
+        // after the first full-fit `remaining` becomes
+        // `remaining / cost.full` (typically 1 or 0). The next entry's
+        // `cost.full <= remaining` check fails, and `cost.clamped <=
+        // remaining` also fails — so EVERY subsequent entry drops. Only
+        // one entry survives.
+        //
+        // Construct a budget that admits at least 3 entries at full under
+        // correct `-=`. Under `/=` only 1 survives.
+        let entries = (0..5)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 4, 4, 2))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.functions[0]);
+        let total_full: usize = response
+            .functions
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+
+        // Aim for entry_budget == 4 * one_full so 4 of 5 entries fit at
+        // full under correct `-=`. Under `/=`, after entry 0 (cost = one_full)
+        // remaining becomes ~1, and entries 1..=4 are all dropped.
+        let target_entry_budget = 4 * one_full;
+        let budget = ((skeleton_cost + target_entry_budget) * 4).div_ceil(3);
+
+        let safety_margin = (budget / 4).max(128);
+        let entry_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        // Pre-flight: greedy walk must run.
+        assert!(
+            total_full > entry_budget,
+            "construction invalid: greedy walk must execute; \
+             total_full={total_full} entry_budget={entry_budget} \
+             budget={budget} skeleton={skeleton_cost} one_full={one_full}",
+        );
+        // Pre-flight: under correct `-=`, at least 3 entries fit at full.
+        assert!(
+            entry_budget >= 3 * one_full,
+            "construction invalid: at least three entries must fit at full \
+             under correct `-=` so a `/=` mutant (which leaves only one) is \
+             distinguishable; entry_budget={entry_budget} one_full={one_full}",
+        );
+
+        let original_entries = response.functions.len();
+        let _ = enforce_context_token_budget(&mut response, budget);
+
+        // Under correct `-=`: at least 2 entries survive at full.
+        // Under `/=` on line 568: only 1 entry survives.
+        let surviving = response.functions.len();
+        assert!(
+            surviving >= 2,
+            "with a budget that admits 3+ entries at full under correct `-=`, \
+             at least two entries must survive. If only one survives, \
+             `remaining` collapsed to ~1 after the first full-fit decision \
+             (mutant: `remaining /= cost.full`). \
+             surviving={surviving} original={original_entries} \
+             entry_budget={entry_budget} one_full={one_full}",
+        );
+    }
+
+    #[test]
+    fn it_leaves_callers_at_exact_cap_unchanged() {
+        // Targets the `entry.callers.len() > max_callers` → `>=` mutant on
+        // line 600. At len == cap the `>` branch is false (no truncate);
+        // documenting this boundary explicitly future-proofs the contract
+        // against any change that makes truncation non-idempotent.
+        //
+        // Pair test: same fixture run with len = cap + 1 must truncate to
+        // cap. Together they pin the threshold exactly at `> max_callers`.
+        let cap = 5;
+
+        // Boundary 1: len == cap. Under both `>` and `>=` the resulting
+        // length is `cap` (truncate to cap is a no-op when len == cap),
+        // but the caller list contents must still be the original list —
+        // not a clone, not reversed, not partial.
+        let mut at_cap = make_clamp_fixture_entry("at_cap", cap, 0, 0);
+        let original_callers: Vec<String> =
+            at_cap.callers.iter().map(|c| c.caller.clone()).collect();
+        clamp_entry_lists(&mut at_cap, cap, cap, 3);
+        assert_eq!(
+            at_cap.callers.len(),
+            cap,
+            "callers.len() at exact cap must remain {cap}",
+        );
+        let after_callers: Vec<String> = at_cap.callers.iter().map(|c| c.caller.clone()).collect();
+        assert_eq!(
+            after_callers, original_callers,
+            "callers list at exact cap must be unchanged in content and order",
+        );
+
+        // Boundary 2: len == cap + 1. Truncation MUST fire and reduce to cap.
+        let mut over_cap = make_clamp_fixture_entry("over_cap", cap + 1, 0, 0);
+        clamp_entry_lists(&mut over_cap, cap, cap, 3);
+        assert_eq!(
+            over_cap.callers.len(),
+            cap,
+            "callers.len() at cap+1 must be truncated to {cap}",
+        );
+    }
+
+    #[test]
+    fn it_leaves_callees_at_exact_cap_unchanged() {
+        // Targets the `entry.callees.len() > max_callees` → `>=` mutant on
+        // line 603. Symmetric to the callers boundary test above.
+        let cap = 5;
+
+        let mut at_cap = make_clamp_fixture_entry("at_cap", 0, cap, 0);
+        let original_callees: Vec<String> =
+            at_cap.callees.iter().map(|c| c.callee.clone()).collect();
+        clamp_entry_lists(&mut at_cap, cap, cap, 3);
+        assert_eq!(
+            at_cap.callees.len(),
+            cap,
+            "callees.len() at exact cap must remain {cap}",
+        );
+        let after_callees: Vec<String> = at_cap.callees.iter().map(|c| c.callee.clone()).collect();
+        assert_eq!(
+            after_callees, original_callees,
+            "callees list at exact cap must be unchanged in content and order",
+        );
+
+        let mut over_cap = make_clamp_fixture_entry("over_cap", 0, cap + 1, 0);
+        clamp_entry_lists(&mut over_cap, cap, cap, 3);
+        assert_eq!(
+            over_cap.callees.len(),
+            cap,
+            "callees.len() at cap+1 must be truncated to {cap}",
+        );
+    }
+
+    #[test]
+    fn it_leaves_test_references_at_exact_cap_unchanged() {
+        // Targets the `entry.test_references.len() > max_test_refs` → `>=`
+        // mutant on line 606. Test-references cap is 3 (not 5 like the
+        // other two), so this test uses cap=3 to land exactly on the
+        // boundary.
+        let cap = 3;
+
+        let mut at_cap = make_clamp_fixture_entry("at_cap", 0, 0, cap);
+        let original_test_refs: Vec<String> = at_cap
+            .test_references
+            .iter()
+            .map(|c| c.caller.clone())
+            .collect();
+        clamp_entry_lists(&mut at_cap, 5, 5, cap);
+        assert_eq!(
+            at_cap.test_references.len(),
+            cap,
+            "test_references.len() at exact cap must remain {cap}",
+        );
+        let after_test_refs: Vec<String> = at_cap
+            .test_references
+            .iter()
+            .map(|c| c.caller.clone())
+            .collect();
+        assert_eq!(
+            after_test_refs, original_test_refs,
+            "test_references list at exact cap must be unchanged in content and order",
+        );
+
+        let mut over_cap = make_clamp_fixture_entry("over_cap", 0, 0, cap + 1);
+        clamp_entry_lists(&mut over_cap, 5, 5, cap);
+        assert_eq!(
+            over_cap.test_references.len(),
+            cap,
+            "test_references.len() at cap+1 must be truncated to {cap}",
+        );
+    }
 }
