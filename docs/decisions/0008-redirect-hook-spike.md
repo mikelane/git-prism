@@ -15,7 +15,7 @@ Agents reach for raw `git diff/log/show/blame` instead of git-prism MCP tools be
 - heredocs that quote git commands inside the body
 - command substitution: `cd $(git rev-parse --show-toplevel) && git diff ...`
 
-The hook also lives in user dotfiles, so installing git-prism gets the binary but none of the redirect leverage. Epic #234 ships a `git-prism install-hooks` subcommand and a bundled hook that calls a stdlib-only Python tokenizer to parse bash structurally.
+The hook also lives in user dotfiles, so installing git-prism gets the binary but none of the redirect leverage. Epic #234 ships a `git-prism hooks` subcommand group (with `install`, `uninstall`, `status` verbs) and a bundled hook that calls a stdlib-only Python helper to parse bash structurally.
 
 This ADR records the architectural decisions for that work. No production code lands from this spike — only this file.
 
@@ -56,7 +56,7 @@ After tokenization, walk the flat token list left-to-right, splitting at any of 
 
 ### 2. `--scope` semantics: mirror `claude mcp add --scope` exactly
 
-`git-prism install-hooks --scope <local|user|project>` matches the three scopes Claude Code's own CLI uses (`claude mcp add --help` confirmed). Default is `user`.
+`git-prism hooks install --scope <local|user|project>` matches the three scopes Claude Code's own CLI uses (`claude mcp add --help` confirmed). Default is `user`. The verb form is noun-then-verb to match `claude mcp add|remove|list`: `git-prism hooks install`, `git-prism hooks uninstall`, `git-prism hooks status`.
 
 **Why `user` is the default (not `local` like `claude mcp add`):**
 
@@ -70,7 +70,7 @@ Local scope writes to `<repo>/.claude/settings.local.json`, which is per-checkou
 | `project` | `<repo>/.claude/settings.json` | `<repo>/.claude/hooks/git-prism-redirect.sh` (copied) | yes |
 | `local` | `<repo>/.claude/settings.local.json` | `<repo>/.claude/hooks/git-prism-redirect.sh` (copied) | no (gitignored) |
 
-The Python tokenizer (`parse_git_invocations.py`) is copied alongside the shell script in each case. This is intentional duplication — keeps each scope self-contained and avoids cross-scope path resolution at hook execution time.
+The Python helper (`bash_redirect_hook.py`) is copied alongside the shell script in each case. This is intentional duplication — keeps each scope self-contained and avoids cross-scope path resolution at hook execution time.
 
 **Project + local scope share the same script path.** Both `--scope project` and `--scope local` write to `<repo>/.claude/hooks/git-prism-redirect.sh`. If a user installs at both scopes in the same repo, the second install overwrites the script. This is idempotent — both installs ship identical script bytes from the same git-prism binary — so the overwrite is a no-op on disk. The only differences are the two settings files (`.claude/settings.json` vs. `.claude/settings.local.json`), which Claude Code merges. Documenting this so it does not look like a bug: the shared path is intentional, and it's why we keep the script byte-identical across scopes.
 
@@ -82,13 +82,13 @@ Claude Code merges hook entries from all three scopes and runs them all. There i
 
 If `<repo>/.claude/` does not exist for `--scope project` or `--scope local`, the installer creates it (`mkdir -p`). For `--scope user`, `~/.claude/` always exists if Claude Code is running. We never create `~/.claude/` ourselves — if it is missing, we error with "Claude Code does not appear to be installed".
 
-**Discovery (`install-hooks --status`):**
+**Discovery (`hooks status`):**
 
-The installer's `--status` flag (no positional args) reads all three settings files and prints a table of where git-prism entries are installed and which version of the hook script each one points at. This makes "is it installed?" answerable without `cat ~/.claude/settings.json | jq`.
+The `git-prism hooks status` subcommand reads all three settings files and prints a table of where git-prism entries are installed and which version of the hook script each one points at. This makes "is it installed?" answerable without `cat ~/.claude/settings.json | jq`.
 
-### 3. Idempotency: sentinel field `id: "git-prism-redirect-vN"`
+### 3. Idempotency: sentinel field `id: "git-prism-bash-redirect-vN"`
 
-Each PreToolUse entry the installer writes carries an explicit `id` field with the value `git-prism-redirect-vN` where `N` is the hook schema version (start at `1`). Re-install is detect-and-replace based on exact `id` match.
+Each PreToolUse entry the installer writes carries an explicit `id` field with the value `git-prism-bash-redirect-vN` where `N` is the hook schema version (start at `1`). Re-install is detect-and-replace based on exact `id` match.
 
 **Algorithm:**
 
@@ -102,9 +102,9 @@ Each PreToolUse entry the installer writes carries an explicit `id` field with t
 
 **User-edited entries:**
 
-If we find an entry with our `id` whose `command`, `matcher`, or other fields have been hand-edited away from what we would write, the default is **skip with a warning**: "Existing git-prism-redirect entry has been modified locally. Skipping. Pass `--force` to overwrite, or `--uninstall` first." This protects the user's customizations.
+If we find an entry with our `id` whose `command`, `matcher`, or other fields have been hand-edited away from what we would write, the default is **skip with a warning**: "Existing git-prism redirect entry has been modified locally. Skipping. Pass `--force` to overwrite, or `git-prism hooks uninstall` first." This protects the user's customizations.
 
-`--force` overwrites unconditionally. We do not attempt three-way merge — too clever, fails silently, and the user can always `--uninstall && install-hooks` to reset.
+`--force` overwrites unconditionally. We do not attempt three-way merge — too clever, fails silently, and the user can always `git-prism hooks uninstall && git-prism hooks install` to reset.
 
 **Why a sentinel `id` field over command-string match:**
 
@@ -112,17 +112,17 @@ If we find an entry with our `id` whose `command`, `matcher`, or other fields ha
 - Comment-marker match (`// managed by git-prism`) is fragile because JSON does not support comments — we would need to invent a convention (e.g., a `_managed_by` sibling field), which is just an uglier sentinel.
 - The `id` field is already a first-class field in the Claude Code hook schema (used for ordering and conflict detection by the harness itself). Reusing it costs nothing and is the most idiomatic option.
 
-The version suffix (`-v1`) lets future schema changes detect old entries cleanly: when we ship `v2`, the installer replaces all `git-prism-redirect-v1` entries with `git-prism-redirect-v2` versions. Old uninstalls remain possible via `--uninstall --version v1` for users who want to roll back.
+The version suffix (`-v1`) lets future schema changes detect old entries cleanly: when we ship `v2`, the installer replaces all `git-prism-bash-redirect-v1` entries with `git-prism-bash-redirect-v2` versions. Old uninstalls remain possible via `git-prism hooks uninstall --version v1` for users who want to roll back.
 
 **Mixed-version installs (downgrade after upgrade):**
 
-Version migration is monotonic in the forward direction (v1 → v2 replaces the v1 entry). Going backward is the failure mode: if the user upgrades to a `git-prism` that writes `v2`, then runs `install-hooks` from an older binary that only knows about `v1`, the older binary appends a fresh `v1` entry next to the existing `v2` entry. Both fire on every Bash call — the redirect runs twice.
+Version migration is monotonic in the forward direction (v1 → v2 replaces the v1 entry). Going backward is the failure mode: if the user upgrades to a `git-prism` that writes `v2`, then runs `hooks install` from an older binary that only knows about `v1`, the older binary appends a fresh `v1` entry next to the existing `v2` entry. Both fire on every Bash call — the redirect runs twice.
 
-Mitigation: the installer's idempotency lookup matches any `id` matching the prefix `git-prism-redirect-v` regardless of suffix. If a higher version number is present and we are about to write a lower one, abort with: "Found `git-prism-redirect-v2` entry; this binary writes `v1`. Run the newer git-prism's `install-hooks --uninstall` first, or upgrade this binary." This catches the downgrade case without baking the version table into the older binary (which can't know what versions exist in the future).
+Mitigation: the installer's idempotency lookup matches any `id` with the prefix `git-prism-bash-redirect-v` regardless of suffix. If a higher version number is present and we are about to write a lower one, abort with: "Found `git-prism-bash-redirect-v2` entry; this binary writes `v1`. Run the newer git-prism's `hooks uninstall` first, or upgrade this binary." This catches the downgrade case without baking the version table into the older binary (which can't know what versions exist in the future).
 
 ### 4. BDD testability: subprocess shell-out with mock JSON on stdin
 
-Step definitions in `bdd/steps/` shell out to the bundled `hooks/git-prism-redirect.sh` (with `parse_git_invocations.py` next to it on `PYTHONPATH`) using `subprocess.run`. The Gherkin scenarios feed mock JSON on stdin, then assert on:
+Step definitions in `bdd/steps/` shell out to the bundled `hooks/git-prism-redirect.sh` (with `bash_redirect_hook.py` next to it on `PYTHONPATH`) using `subprocess.run`. The Gherkin scenarios feed mock JSON on stdin, then assert on:
 
 - exit code: `0` (allow or advise), `2` (hard block)
 - stderr text: must contain a redirect message
@@ -133,10 +133,10 @@ Step definitions in `bdd/steps/` shell out to the bundled `hooks/git-prism-redir
 | Exit | Stdout | Stderr | Meaning |
 |---|---|---|---|
 | `0` | empty | empty | allow — command runs, hook says nothing |
-| `0` | JSON with `hookSpecificOutput.additionalContext` | optional | advise — Claude Code surfaces the message but the command still runs |
+| `0` | JSON with `hookSpecificOutput.additionalContext` | optional | advisory — Claude Code surfaces the message but the command still runs |
 | `2` | empty | redirect message | hard block — command is rejected, stderr is shown to the agent |
 
-The "advise" state is what the bundled hook emits for the rows in the coverage matrix marked "advisory": exit `0` with a JSON payload containing the redirect text in `hookSpecificOutput.additionalContext`. This matches Claude Code's PreToolUse hook protocol (the harness reads stdout JSON when exit is `0` and treats `additionalContext` as a non-blocking nudge). Exit `2` is reserved for the cases where redirection is non-negotiable (e.g., `gh pr diff`, MCP GitHub tools — see the matrix).
+The "advisory" state is what the bundled hook emits for the rows in the coverage matrix marked "advisory": exit `0` with a JSON payload containing the redirect text in `hookSpecificOutput.additionalContext`. This matches Claude Code's PreToolUse hook protocol (the harness reads stdout JSON when exit is `0` and treats `additionalContext` as a non-blocking nudge). Exit `2` is reserved for the cases where redirection is non-negotiable (e.g., `gh pr diff`, MCP GitHub tools — see the matrix).
 
 **Hermetic constraints:**
 
@@ -163,9 +163,9 @@ The "advise" state is what the bundled hook emits for the rows in the coverage m
 
 **Why not unit-test the Python tokenizer in isolation:**
 
-We will, for the parser logic specifically (Pythonic unit tests under `hooks/tests/test_parse_git_invocations.py`, run by `pytest`). But the behavioral contract — "this exit code, this stderr, given this stdin JSON" — is what Claude Code actually exercises, and that contract is the load-bearing surface. The BDD layer tests it end-to-end. Unit tests catch regressions in the parser internals; BDD catches regressions in the wire protocol. We need both.
+We will, for the parser logic specifically (Pythonic unit tests under `hooks/tests/test_bash_redirect_hook.py`, run by `pytest`). But the behavioral contract — "this exit code, this stderr, given this stdin JSON" — is what Claude Code actually exercises, and that contract is the load-bearing surface. The BDD layer tests it end-to-end. Unit tests catch regressions in the parser internals; BDD catches regressions in the wire protocol. We need both.
 
-### 5. Subagent MCP scope bug: real, relevant, default to `--scope user`
+### 5. Default `--scope user` to dodge the project-scope subagent MCP bug
 
 Verified both issues exist via the GitHub API on 2026-04-26:
 
@@ -193,26 +193,26 @@ git-prism is an MCP server. Users who run subagents (via the Task tool in Claude
 
 **Decision:**
 
-- **Default `git-prism install-hooks --scope user`.** Document the reason in the CLI help text: "User scope is the default because Claude Code issue anthropics/claude-code#13898 prevents custom subagents from calling project-scoped MCP servers correctly."
-- **Document the same caveat in the README install-hooks section**, with a link to the upstream issue.
+- **Default `git-prism hooks install --scope user`.** Document the reason in the CLI help text: "User scope is the default because Claude Code issue anthropics/claude-code#13898 prevents custom subagents from calling project-scoped MCP servers correctly."
+- **Document the same caveat in the README hooks section**, with a link to the upstream issue.
 - **Do not block `--scope project` or `--scope local`** — power users may have their own reasons (e.g., team-shared config in a monorepo, no subagent usage). Just don't make it the easy path.
-- **Re-evaluate when #13898 closes.** Add a TODO comment in `install-hooks` source that links the issue. When it closes, revisit whether `--scope project` should become the default for the install-hooks command (consistent with how MCP server registration in `.mcp.json` works).
+- **Re-evaluate when #13898 closes.** Add a TODO comment in the `hooks install` source that links the issue. When it closes, revisit whether `--scope project` should become the default for the `hooks install` subcommand (consistent with how MCP server registration in `.mcp.json` works).
 
 This is the same workaround the upstream issues converged on. It is the right default until upstream is fixed.
 
 ### 6. Fail-open when `python3` is missing
 
-The hook script invokes `python3 -m parse_git_invocations`. If `python3` is not on PATH, the hook prints a single-line warning to stderr (`git-prism-redirect: python3 not found on PATH; skipping redirect`) and exits `0`. The bash command runs unmodified.
+The hook script invokes `python3 -m bash_redirect_hook` after `cd`-ing into the `hooks/` directory. If `python3` is not on PATH, the hook prints a single-line warning to stderr (`git-prism-redirect: python3 not found on PATH; skipping redirect`) and exits `0`. The bash command runs unmodified.
 
 The principle is straightforward: a broken redirect hook must never block a working `git` command. Any other failure mode (silently dropping the warning, exiting non-zero, falling back to the legacy regex) trades a real cost — every git invocation becomes flaky on machines without `python3` — for a benefit the user will not notice (one missing redirect hint).
 
-Documented as a runtime prerequisite in the README install-hooks section: "Requires `python3` (3.9+) on PATH. macOS ships this; Linux package as appropriate."
+Documented as a runtime prerequisite in the README `hooks` section: "Requires `python3` (3.9+) on PATH. macOS ships this; Linux package as appropriate."
 
 ## Consequences
 
-- **Single-file Python tokenizer.** `hooks/parse_git_invocations.py` is stdlib-only and can be vendored alongside the hook script with no install ceremony. CI runs the tokenizer's pytest suite directly with the system Python.
+- **Single-file Python helper.** `hooks/bash_redirect_hook.py` exposes both `tokenize_command` (parser) and `decide_redirect` (matcher). Stdlib-only; vendors alongside the hook script with no install ceremony. CI runs its pytest suite directly with the system Python.
 - **Two wrapper functions added to the parser.** Heredoc skipping and backtick normalization. Both are <30 lines, both are unit-testable in isolation. The complexity budget for "things `shlex` doesn't handle" is bounded.
-- **One new CLI subcommand.** `git-prism install-hooks` with flags `--scope`, `--uninstall`, `--force`, `--status`. Wired in `src/main.rs` like `serve` / `manifest`.
+- **One new CLI subcommand group.** `git-prism hooks` with verbs `install`, `uninstall`, `status`. The `install` verb takes `--scope`, `--force`, and `--dry-run` flags. Wired in `src/main.rs` like `serve` / `manifest`. Mirrors the noun-then-verb shape of `claude mcp add|remove|list`.
 - **Hook entries gain a stable `id`.** Future schema changes can migrate cleanly. The version suffix is part of the contract.
 - **`--scope user` is the documented default.** The README and `--help` text both explain why. When upstream #13898 closes, this default becomes a candidate for revisit.
 - **BDD tests use subprocess shell-out, not in-process import.** Step definitions stay in Python (cross-language to Rust production code, per project BDD policy). Hermeticity comes from `tempfile`-scoped HOME, not from mocking the script's contents.
@@ -223,7 +223,8 @@ Documented as a runtime prerequisite in the README install-hooks section: "Requi
 - The `id` sentinel must be enforced in the writer and tested in BDD: a re-install scenario with an existing entry must produce no duplicates. If the sentinel is dropped or renamed, idempotency breaks silently — the BDD scenario catches it.
 - The shlex-edge-case list (heredoc body, backticks) must have explicit BDD scenarios, not just unit tests. If someone "improves" the parser later and accidentally regresses one of these, the BDD layer flags it.
 - The `--scope user` default must be documented in three places (CLI `--help`, README, this ADR). Drift on the default risks reverting a deliberate decision. When #13898 closes, the revisit must update all three together.
-- `parse_git_invocations.py` must be importable in tests as `from hooks.parse_git_invocations import tokenize_command`. The hook shell script must invoke it via `python3 -m parse_git_invocations` so the test path and the runtime path use the same module-loading pattern.
+- `bash_redirect_hook.py` must be importable in tests as `from hooks.bash_redirect_hook import tokenize_command, decide_redirect`. The hook shell script invokes it via `python3 -m bash_redirect_hook` after `cd`-ing into the `hooks/` directory so the script loads as a top-level module. The pytest suite adds `hooks/` to `sys.path` via `conftest.py`. Both paths resolve the same module without packaging `hooks/` as a `hooks` Python package.
+- Upstream issue #13898 state assertion is verified by `scripts/check_upstream_issues.py`, run as part of the integrity workflow. The script queries the GitHub API and fails CI when the issue closes — forcing a revisit of Decision 5's `--scope user` default. Without this, the rationale rots silently and the docs (CLI help, README, this ADR) drift out of sync.
 
 ## Alternatives Considered
 
@@ -233,13 +234,13 @@ Documented as a runtime prerequisite in the README install-hooks section: "Requi
 
 3. **Tree-sitter bash grammar called from Rust.** Rejected: tree-sitter parsing happens in the Rust binary, but the hook runs in the Claude Code harness as a separate subprocess that reads JSON on stdin. Calling back into the Rust binary just to parse a string would require either a long-running daemon or per-call binary spawn (~100ms cold start each). The Python option is simpler and avoids round-tripping.
 
-4. **No default — require explicit `--scope`.** Rejected: forcing the user to read the docs before the first install does protect against accidental wrong-scope writes, but most users will run `git-prism install-hooks` blind, hit the friction wall, and either give up or guess. The cost of a friction wall on first install (drop-off) outweighs the benefit (a few users avoiding the wrong scope). Default to `user` scope and document the override clearly in `--help`.
+4. **No default — require explicit `--scope`.** Rejected: forcing the user to read the docs before the first install does protect against accidental wrong-scope writes, but most users will run `git-prism hooks install` blind, hit the friction wall, and either give up or guess. The cost of a friction wall on first install (drop-off) outweighs the benefit (a few users avoiding the wrong scope). Default to `user` scope and document the override clearly in `--help`.
 
 5. **Project scope (`--scope project`) as the default.** Rejected: would directly trip Claude Code issue #13898 for subagent users. The whole point of the epic is to make agents reach for git-prism — silently breaking subagent calls would be a self-inflicted regression.
 
 6. **Comment-marker idempotency (`// managed by git-prism`).** Rejected: JSON does not support comments. Inventing a `_managed_by` field is functionally identical to using the existing `id` field but uglier.
 
-7. **Three-way merge for user-edited entries.** Rejected: too clever, silent failures when the merge gets it wrong, and `--uninstall && install-hooks --force` is a perfectly serviceable manual reset. Keep the surface area small.
+7. **Three-way merge for user-edited entries.** Rejected: too clever, silent failures when the merge gets it wrong, and `git-prism hooks uninstall && git-prism hooks install --force` is a perfectly serviceable manual reset. Keep the surface area small.
 
 8. **Unit-test only (skip BDD for hook scripts).** Rejected: the Claude Code wire contract — exit code, stderr, stdout JSON shape, given stdin JSON — is the load-bearing surface. Unit tests on the parser internals do not exercise that contract. Both layers earn their keep.
 
