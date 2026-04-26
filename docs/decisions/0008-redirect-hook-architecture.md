@@ -25,19 +25,28 @@ This ADR records the architectural decisions for that work. No production code l
 
 Use `shlex.shlex(posix=True, punctuation_chars=True, whitespace_split=True)` as the primary tokenizer, with two small wrappers around it. No third-party parser dependency.
 
-**What `shlex` handles natively** (verified against representative inputs in this spike's prototype):
+**What `shlex` handles natively** — evidence from the Python 3.13 REPL (run on the spike branch, 2026-04-26):
 
-- compound operators `&&`, `||`, `|`, `;` are emitted as standalone tokens (with `punctuation_chars=True`)
-- subshell parens `(`, `)` are standalone tokens
-- variable forms `$X`, `$X..HEAD`, `${X}` are preserved as literal tokens (we do not evaluate)
-- `$(...)` decomposes into `$`, `(`, ..., `)` tokens — usable as command-substitution delimiters
-- single- and double-quoted strings are unwrapped to their content
-- escaped whitespace (`git\ diff`) joins tokens correctly
-- newlines collapse to whitespace, so multiline bash works
+```
+>>> import shlex
+>>> def tok(s):
+...     lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+...     lex.whitespace_split = True
+...     return list(lex)
+...
+>>> tok('cd /tmp && git diff main..HEAD')
+['cd', '/tmp', '&&', 'git', 'diff', 'main..HEAD']
+>>> tok('(git log main..HEAD)')
+['(', 'git', 'log', 'main..HEAD', ')']
+>>> tok('git diff $BASE..HEAD')
+['git', 'diff', '$BASE..HEAD']
+```
+
+Compound operators (`&&`) become their own token; subshell parens split cleanly; variable forms pass through as literal tokens (we never evaluate). The remaining shapes — `||`, `|`, `;`, `${X}`, `$(...)`, single/double quotes, escaped whitespace, multiline input — behave the same way; the three above are sufficient evidence to anchor the design choice.
 
 **What we wrap around `shlex`:**
 
-1. **Heredoc body skipping.** `shlex` emits `<<EOF`, then every body word as separate tokens, then the closing `EOF`. A `git diff a..b` literally appearing inside a heredoc body would be a false positive. Solve by walking the token stream once: when we see `<<TAG` (or `<<-TAG`, `<<"TAG"`, `<<'TAG'`), drop tokens until we re-encounter `TAG` at the start of a logical line.
+1. **Heredoc body skipping.** `shlex` emits `<<EOF`, then every body word as separate tokens, then the closing `EOF`. A `git diff a..b` literally appearing inside a heredoc body would be a false positive. The "start of a logical line" heuristic that bash uses for heredoc termination does not survive `shlex`'s default whitespace handling — newlines collapse to spaces, so we cannot tell where one logical line ends and the next begins. Solution: configure the lexer to keep newlines as their own token (`lex.whitespace = ' \t'`, leaving `\n` out of the whitespace set). The heredoc walker then waits for the sequence `<newline-token>, <TAG>, <newline-token>` (or end-of-stream after `<TAG>`) before resuming normal scanning. Inline `TAG` occurrences inside the body are ignored because they are not preceded by a newline token. This preserves bash semantics without re-implementing them.
 
 2. **Backtick stripping.** Backticks (`` `cmd` ``) attach to adjacent tokens (`` `git `` → single token). Replace stray backticks with whitespace before feeding the input to `shlex`. This treats backticks as command-substitution delimiters identically to `$(...)`.
 
@@ -62,6 +71,8 @@ Local scope writes to `<repo>/.claude/settings.local.json`, which is per-checkou
 | `local` | `<repo>/.claude/settings.local.json` | `<repo>/.claude/hooks/git-prism-redirect.sh` (copied) | no (gitignored) |
 
 The Python tokenizer (`parse_git_invocations.py`) is copied alongside the shell script in each case. This is intentional duplication — keeps each scope self-contained and avoids cross-scope path resolution at hook execution time.
+
+**Project + local scope share the same script path.** Both `--scope project` and `--scope local` write to `<repo>/.claude/hooks/git-prism-redirect.sh`. If a user installs at both scopes in the same repo, the second install overwrites the script. This is idempotent — both installs ship identical script bytes from the same git-prism binary — so the overwrite is a no-op on disk. The only differences are the two settings files (`.claude/settings.json` vs. `.claude/settings.local.json`), which Claude Code merges. Documenting this so it does not look like a bug: the shared path is intentional, and it's why we keep the script byte-identical across scopes.
 
 **Precedence when entries exist in multiple scopes:**
 
@@ -103,13 +114,29 @@ If we find an entry with our `id` whose `command`, `matcher`, or other fields ha
 
 The version suffix (`-v1`) lets future schema changes detect old entries cleanly: when we ship `v2`, the installer replaces all `git-prism-redirect-v1` entries with `git-prism-redirect-v2` versions. Old uninstalls remain possible via `--uninstall --version v1` for users who want to roll back.
 
+**Mixed-version installs (downgrade after upgrade):**
+
+Version migration is monotonic in the forward direction (v1 → v2 replaces the v1 entry). Going backward is the failure mode: if the user upgrades to a `git-prism` that writes `v2`, then runs `install-hooks` from an older binary that only knows about `v1`, the older binary appends a fresh `v1` entry next to the existing `v2` entry. Both fire on every Bash call — the redirect runs twice.
+
+Mitigation: the installer's idempotency lookup matches any `id` matching the prefix `git-prism-redirect-v` regardless of suffix. If a higher version number is present and we are about to write a lower one, abort with: "Found `git-prism-redirect-v2` entry; this binary writes `v1`. Run the newer git-prism's `install-hooks --uninstall` first, or upgrade this binary." This catches the downgrade case without baking the version table into the older binary (which can't know what versions exist in the future).
+
 ### 4. BDD testability: subprocess shell-out with mock JSON on stdin
 
 Step definitions in `bdd/steps/` shell out to the bundled `hooks/git-prism-redirect.sh` (with `parse_git_invocations.py` next to it on `PYTHONPATH`) using `subprocess.run`. The Gherkin scenarios feed mock JSON on stdin, then assert on:
 
-- exit code: `0` (allow), `2` (block)
+- exit code: `0` (allow or advise), `2` (hard block)
 - stderr text: must contain a redirect message
 - stdout JSON: when emitted (advisory mode), must validate against the Claude Code hookSpecificOutput schema
+
+**Three exit-code states (matches the existing `~/.claude/hooks/git-prism-redirect.sh` prototype):**
+
+| Exit | Stdout | Stderr | Meaning |
+|---|---|---|---|
+| `0` | empty | empty | allow — command runs, hook says nothing |
+| `0` | JSON with `hookSpecificOutput.additionalContext` | optional | advise — Claude Code surfaces the message but the command still runs |
+| `2` | empty | redirect message | hard block — command is rejected, stderr is shown to the agent |
+
+The "advise" state is what the bundled hook emits for the rows in the coverage matrix marked "advisory": exit `0` with a JSON payload containing the redirect text in `hookSpecificOutput.additionalContext`. This matches Claude Code's PreToolUse hook protocol (the harness reads stdout JSON when exit is `0` and treats `additionalContext` as a non-blocking nudge). Exit `2` is reserved for the cases where redirection is non-negotiable (e.g., `gh pr diff`, MCP GitHub tools — see the matrix).
 
 **Hermetic constraints:**
 
@@ -140,10 +167,25 @@ We will, for the parser logic specifically (Pythonic unit tests under `hooks/tes
 
 ### 5. Subagent MCP scope bug: real, relevant, default to `--scope user`
 
-Verified both issues exist (queried `gh api repos/anthropics/claude-code/issues/...`):
+Verified both issues exist via the GitHub API on 2026-04-26:
 
-- **#13605** ([link](https://github.com/anthropics/claude-code/issues/13605), closed 2026-03-25): "Custom plugin subagents cannot access MCP tools (built-in agents can)." Workaround documented: use `general-purpose` built-in agent. Marked as resolved by reporter, but the resolution is "use the workaround" — the underlying behavior is unchanged.
-- **#13898** ([link](https://github.com/anthropics/claude-code/issues/13898), still **open** as of 2026-04-21): "Custom Subagents Cannot Access Project-Scoped MCP Servers (Hallucinate Instead)." Custom subagents in `.claude/agents/` cannot call tools from `.mcp.json` (project scope) — they hallucinate plausible-but-incorrect responses. **Globally configured MCP servers (`~/.claude/mcp.json`) work correctly in the same subagents.** The reporter's test matrix is unambiguous.
+```
+$ gh api repos/anthropics/claude-code/issues/13605 --jq '{title, state, closed_at}'
+{
+  "title": "[BUG] Custom plugin subagents cannot access MCP tools (built-in agents can)",
+  "state": "closed",
+  "closed_at": "2026-03-25T22:54:47Z"
+}
+
+$ gh api repos/anthropics/claude-code/issues/13898 --jq '{title, state}'
+{
+  "title": "Custom Subagents Cannot Access Project-Scoped MCP Servers (Hallucinate Instead)",
+  "state": "open"
+}
+```
+
+- **#13605** ([link](https://github.com/anthropics/claude-code/issues/13605), closed 2026-03-25): custom plugin subagents cannot access MCP tools; built-in agents can. Workaround documented: use the `general-purpose` built-in agent. Marked resolved, but the resolution is "use the workaround" — the underlying behavior is unchanged.
+- **#13898** ([link](https://github.com/anthropics/claude-code/issues/13898), still **open** as of the query above): custom subagents in `.claude/agents/` cannot call tools from `.mcp.json` (project scope) — they hallucinate plausible-but-incorrect responses. **Globally configured MCP servers (`~/.claude/mcp.json`) work correctly in the same subagents.** The reporter's test matrix is unambiguous.
 
 **Relevance to git-prism:**
 
@@ -157,6 +199,14 @@ git-prism is an MCP server. Users who run subagents (via the Task tool in Claude
 - **Re-evaluate when #13898 closes.** Add a TODO comment in `install-hooks` source that links the issue. When it closes, revisit whether `--scope project` should become the default for the install-hooks command (consistent with how MCP server registration in `.mcp.json` works).
 
 This is the same workaround the upstream issues converged on. It is the right default until upstream is fixed.
+
+### 6. Fail-open when `python3` is missing
+
+The hook script invokes `python3 -m parse_git_invocations`. If `python3` is not on PATH, the hook prints a single-line warning to stderr (`git-prism-redirect: python3 not found on PATH; skipping redirect`) and exits `0`. The bash command runs unmodified.
+
+The principle is straightforward: a broken redirect hook must never block a working `git` command. Any other failure mode (silently dropping the warning, exiting non-zero, falling back to the legacy regex) trades a real cost — every git invocation becomes flaky on machines without `python3` — for a benefit the user will not notice (one missing redirect hint).
+
+Documented as a runtime prerequisite in the README install-hooks section: "Requires `python3` (3.9+) on PATH. macOS ships this; Linux package as appropriate."
 
 ## Consequences
 
@@ -183,7 +233,7 @@ This is the same workaround the upstream issues converged on. It is the right de
 
 3. **Tree-sitter bash grammar called from Rust.** Rejected: tree-sitter parsing happens in the Rust binary, but the hook runs in the Claude Code harness as a separate subprocess that reads JSON on stdin. Calling back into the Rust binary just to parse a string would require either a long-running daemon or per-call binary spawn (~100ms cold start each). The Python option is simpler and avoids round-tripping.
 
-4. **Local scope (`--scope local`) as the default.** Rejected: per-checkout, gitignored, and useless for "I just installed git-prism, redirect everything." User scope is what most users want; project/local stay available for the minority who need them.
+4. **No default — require explicit `--scope`.** Rejected: forcing the user to read the docs before the first install does protect against accidental wrong-scope writes, but most users will run `git-prism install-hooks` blind, hit the friction wall, and either give up or guess. The cost of a friction wall on first install (drop-off) outweighs the benefit (a few users avoiding the wrong scope). Default to `user` scope and document the override clearly in `--help`.
 
 5. **Project scope (`--scope project`) as the default.** Rejected: would directly trip Claude Code issue #13898 for subagent users. The whole point of the epic is to make agents reach for git-prism — silently breaking subagent calls would be a self-inflicted regression.
 
