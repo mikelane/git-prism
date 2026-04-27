@@ -1128,12 +1128,24 @@ def step_install_output_mentions(context: Context, phrase: str) -> None:
     )
 
 
-@then("the exit code is not {expected:d}")
-def step_exit_code_not(context: Context, expected: int) -> None:
+@then("the hook exit code is not {expected:d}")
+def step_hook_exit_code_not(context: Context, expected: int) -> None:
     actual = context.result.returncode
     assert actual != expected, (
         f"Expected exit code != {expected}, got {actual}.\n"
         f"stdout: {context.result.stdout!r}\nstderr: {context.result.stderr!r}"
+    )
+
+
+@then('the hook stdout contains both "{phrase_a}" and "{phrase_b}"')
+def step_hook_stdout_contains_both(
+    context: Context, phrase_a: str, phrase_b: str
+) -> None:
+    out = context.result.stdout
+    missing = [p for p in (phrase_a, phrase_b) if p not in out]
+    assert not missing, (
+        f"Expected hook stdout to contain BOTH {phrase_a!r} and {phrase_b!r}, "
+        f"but missing: {missing!r}.\nstdout: {out!r}"
     )
 
 
