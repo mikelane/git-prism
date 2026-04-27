@@ -70,22 +70,40 @@ def _hook_input_payload(command: str) -> dict:
 def _run_hook_script(
     context: Context,
     script_path: Path,
-    payload: dict,
+    payload: dict | None,
     extra_env: dict | None = None,
+    raw_stdin: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Invoke a hook script with the given JSON payload on stdin.
 
-    The script's exit code, stdout, and stderr are stored on `context.result`
-    using the same shape the rest of the BDD steps expect, so the existing
-    `the exit code is N` / `the output contains X` assertions can layer on
-    top of these without duplication.
+    Hermeticity: HOME is forced to the per-scenario `context.fake_home`
+    when one has been allocated (matching `_run_git_prism`), so the hook
+    cannot read the developer's real `~/.claude/...`. If the scenario
+    never set up a fake HOME, fall back to a fresh tempdir so we still
+    don't touch the real home directory.
+
+    `payload` is JSON-encoded and sent as stdin. Pass `raw_stdin` instead
+    to send arbitrary bytes (used for the malformed-JSON and empty-stdin
+    fail-open scenarios).
     """
     env = os.environ.copy()
+    fake_home = getattr(context, "fake_home", None)
+    if fake_home is None:
+        fake_home = Path(_scenario_tempdir(context))
+    env["HOME"] = str(fake_home)
     if extra_env:
         env.update(extra_env)
+
+    if raw_stdin is not None:
+        stdin = raw_stdin
+    elif payload is None:
+        stdin = ""
+    else:
+        stdin = json.dumps(payload)
+
     proc = subprocess.run(
         [str(script_path)],
-        input=json.dumps(payload),
+        input=stdin,
         capture_output=True,
         text=True,
         env=env,
@@ -246,7 +264,8 @@ def step_run_bundled_hook(context: Context) -> None:
         f"Bundled hook script not found at {script}. "
         f"It must be shipped by the install-hooks subcommand work (#239)."
     )
-    _run_hook_script(context, script, context.hook_payload)
+    extra_env = getattr(context, "hook_extra_env", None)
+    _run_hook_script(context, script, context.hook_payload, extra_env=extra_env)
 
 
 @then("the hook exit code is {code:d}")
@@ -394,8 +413,9 @@ def _run_git_prism(
 ) -> subprocess.CompletedProcess:
     """Run `git-prism <args>` with HOME overridden to the isolated tempdir."""
     env = os.environ.copy()
-    if hasattr(context, "fake_home"):
-        env["HOME"] = str(context.fake_home)
+    fake_home = getattr(context, "fake_home", None)
+    if fake_home is not None:
+        env["HOME"] = str(fake_home)
     if extra_env:
         env.update(extra_env)
     proc = subprocess.run(
@@ -712,4 +732,513 @@ def step_at_least_one_subresponse_paginated(context: Context) -> None:
     assert paginated, (
         f"No sub-response paginated. cursors={cursors}\n"
         f"Expected at least one non-null next_cursor when page_size is small."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer triangulation: env var leakage, command-substitution boundaries
+# ---------------------------------------------------------------------------
+
+
+@given('the environment variable "{name}" is set to "{value}"')
+def step_set_env_var(context: Context, name: str, value: str) -> None:
+    """Stash an env var that `_run_hook_script` will inject via extra_env.
+
+    Used to triangulate the "tokenizer does not expand variables" property:
+    if the impl accidentally calls `os.path.expandvars` or shells out, the
+    secret value would leak into stdout/stderr. The follow-up `does not
+    leak` step asserts that doesn't happen.
+    """
+    context.hook_extra_env = getattr(context, "hook_extra_env", {})
+    context.hook_extra_env[name] = value
+
+
+@then('the hook output does not leak the value "{value}"')
+def step_hook_output_no_leak(context: Context, value: str) -> None:
+    out = context.result.stdout
+    err = context.result.stderr
+    combined = f"{out}\n{err}"
+    assert value not in combined, (
+        f"Expected secret value {value!r} to NOT appear in hook output, "
+        f"but found it. This indicates the tokenizer expanded "
+        f"environment variables (security/privacy bug).\n"
+        f"stdout: {out!r}\nstderr: {err!r}"
+    )
+
+
+@then('the hook stdout does not contain redirect advice for "{phrase}"')
+def step_hook_stdout_no_advice_for(context: Context, phrase: str) -> None:
+    """Assert a watch-list-miss command did not trigger advice.
+
+    Some payloads contain BOTH a watch-list match (e.g., outer `git diff`)
+    and a non-match (`git rev-parse`); the advice payload must mention
+    only the match. The assertion looks at the parsed `additionalContext`
+    field rather than raw stdout to avoid false positives from JSON
+    structure that happens to contain the phrase as a substring.
+    """
+    out = context.result.stdout.strip()
+    if not out:
+        return  # Nothing emitted means nothing to leak.
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        # If stdout isn't JSON the test will fail elsewhere; nothing to
+        # check here.
+        return
+    advice = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
+    assert phrase not in advice, (
+        f"Hook advice unexpectedly mentions {phrase!r}.\n"
+        f"advice: {advice!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hard-block / fail-open scenarios (#239)
+# ---------------------------------------------------------------------------
+
+
+@when("I run the bundled redirect hook with empty stdin")
+def step_run_hook_empty_stdin(context: Context) -> None:
+    script = _bundled_hook_script(context)
+    assert script.is_file(), (
+        f"Bundled hook script not found at {script}. "
+        f"It must be shipped by the install-hooks subcommand work (#239)."
+    )
+    _run_hook_script(context, script, payload=None, raw_stdin="")
+
+
+@when('I run the bundled redirect hook with stdin "{stdin}"')
+def step_run_hook_raw_stdin(context: Context, stdin: str) -> None:
+    script = _bundled_hook_script(context)
+    assert script.is_file(), (
+        f"Bundled hook script not found at {script}. "
+        f"It must be shipped by the install-hooks subcommand work (#239)."
+    )
+    _run_hook_script(context, script, payload=None, raw_stdin=stdin)
+
+
+@when('I run the bundled redirect hook with that input and PATH "{path}"')
+def step_run_hook_with_path(context: Context, path: str) -> None:
+    script = _bundled_hook_script(context)
+    assert script.is_file(), (
+        f"Bundled hook script not found at {script}. "
+        f"It must be shipped by the install-hooks subcommand work (#239)."
+    )
+    _run_hook_script(
+        context,
+        script,
+        context.hook_payload,
+        extra_env={"PATH": path},
+    )
+
+
+@then("the hook stderr is at most {n:d} line")
+@then("the hook stderr is at most {n:d} lines")
+def step_hook_stderr_at_most_n_lines(context: Context, n: int) -> None:
+    err = context.result.stderr.rstrip("\n")
+    if not err:
+        return
+    line_count = len(err.split("\n"))
+    assert line_count <= n, (
+        f"Expected hook stderr to be at most {n} line(s), got {line_count}.\n"
+        f"stderr: {err!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Idempotency / install-path triangulation (#239)
+# ---------------------------------------------------------------------------
+
+
+def _seed_user_settings_with_redirect_entry(
+    context: Context, entry_id: str, command: str
+) -> None:
+    """Write a single PreToolUse entry with the given id+command to user settings.
+
+    Used to set up Path 3 (stale script path), Path 4a (user-edited
+    command), Path 4b (--force overwrites), and the v2 downgrade-refusal
+    scenarios.
+    """
+    settings_path = context.user_settings_path
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {
+        "hooks": {
+            "PreToolUse": [
+                {"id": entry_id, "matcher": "Bash", "command": command}
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(existing, indent=2))
+
+
+@given(
+    'the user settings file contains a "{entry_id}" entry pointing to "{path}"'
+)
+def step_seed_user_settings_with_path(
+    context: Context, entry_id: str, path: str
+) -> None:
+    _seed_user_settings_with_redirect_entry(context, entry_id, path)
+
+
+@given(
+    'the user settings file contains a "{entry_id}" entry with command "{command}"'
+)
+def step_seed_user_settings_with_command(
+    context: Context, entry_id: str, command: str
+) -> None:
+    _seed_user_settings_with_redirect_entry(context, entry_id, command)
+
+
+@when("I capture the user settings PreToolUse length")
+def step_capture_user_pretooluse_length(context: Context) -> None:
+    settings_path = context.user_settings_path
+    data = json.loads(settings_path.read_text())
+    entries = data.get("hooks", {}).get("PreToolUse", [])
+    context.captured_pretooluse_length = len(entries)
+
+
+@when('I install the redirect hook at user scope with "{flag}"')
+def step_install_user_with_flag(context: Context, flag: str) -> None:
+    _run_git_prism(context, ["hooks", "install", "--scope", "user", flag])
+
+
+@when("I install the redirect hook at local scope in the repo")
+def step_install_local_scope(context: Context) -> None:
+    _run_git_prism(
+        context,
+        ["hooks", "install", "--scope", "local"],
+        cwd=context.project_repo_path,
+    )
+
+
+@given("the redirect hook is installed at user scope")
+def step_redirect_hook_installed_at_user(context: Context) -> None:
+    proc = _run_git_prism(context, ["hooks", "install", "--scope", "user"])
+    assert proc.returncode == 0, (
+        f"Setup failed: hooks install --scope user did not succeed.\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+
+
+@when(
+    'I run "hooks install --scope project" in the repo and answer "{answer}"'
+)
+def step_install_project_with_answer(context: Context, answer: str) -> None:
+    """Drive the cross-scope confirmation prompt by piping `answer` to stdin.
+
+    The installer must write the prompt to stderr (so a piped stdout still
+    works for diff output) and read a single character from stdin.
+    """
+    env = os.environ.copy()
+    fake_home = getattr(context, "fake_home", None)
+    if fake_home is not None:
+        env["HOME"] = str(fake_home)
+    proc = subprocess.run(
+        [context.binary_path, "hooks", "install", "--scope", "project"],
+        input=f"{answer}\n",
+        capture_output=True,
+        text=True,
+        cwd=str(context.project_repo_path),
+        env=env,
+    )
+    context.result = proc
+
+
+@given('the redirect hook install state is "{state}"')
+def step_redirect_hook_state(context: Context, state: str) -> None:
+    """Drive `hooks status` triangulation by setting up three different states.
+
+    `none` leaves both settings files absent; `user-only` runs the user
+    install; `user-and-project` runs both. The status command must
+    distinguish all three.
+    """
+    if state == "none":
+        return
+    proc = _run_git_prism(context, ["hooks", "install", "--scope", "user"])
+    assert proc.returncode == 0, (
+        f"Setup failed for state={state!r}: user install failed. "
+        f"stdout: {proc.stdout!r} stderr: {proc.stderr!r}"
+    )
+    if state == "user-only":
+        return
+    if state == "user-and-project":
+        proc = _run_git_prism(
+            context,
+            ["hooks", "install", "--scope", "project", "--force"],
+            cwd=context.project_repo_path,
+        )
+        assert proc.returncode == 0, (
+            f"Setup failed for state={state!r}: project install failed. "
+            f"stdout: {proc.stdout!r} stderr: {proc.stderr!r}"
+        )
+        return
+    raise AssertionError(f"Unknown install state: {state!r}")
+
+
+@when('I run "hooks status" in the repo')
+def step_run_hooks_status(context: Context) -> None:
+    _run_git_prism(
+        context, ["hooks", "status"], cwd=context.project_repo_path
+    )
+
+
+@then("the user settings PreToolUse length is unchanged")
+def step_user_settings_pretooluse_length_unchanged(context: Context) -> None:
+    captured = getattr(context, "captured_pretooluse_length", None)
+    assert captured is not None, (
+        "captured_pretooluse_length not set -- did the capture step run?"
+    )
+    settings_path = context.user_settings_path
+    data = json.loads(settings_path.read_text())
+    entries = data.get("hooks", {}).get("PreToolUse", [])
+    assert len(entries) == captured, (
+        f"PreToolUse array length changed across idempotent installs: "
+        f"before={captured}, after={len(entries)}.\n"
+        f"This indicates a duplicate-entry bug masked by hash equality."
+    )
+
+
+@then(
+    'the user settings file contains exactly one PreToolUse entry with id '
+    '"{entry_id}"'
+)
+def step_user_settings_exactly_one_entry(
+    context: Context, entry_id: str
+) -> None:
+    settings_path = context.user_settings_path
+    assert settings_path.is_file(), (
+        f"Expected user settings file at {settings_path}"
+    )
+    data = json.loads(settings_path.read_text())
+    entries = data.get("hooks", {}).get("PreToolUse", [])
+    matching = [e for e in entries if e.get("id") == entry_id]
+    assert len(matching) == 1, (
+        f"Expected exactly one PreToolUse entry with id {entry_id!r}, "
+        f"got {len(matching)}.\nentries: {entries}"
+    )
+
+
+def _user_pretooluse_entry(context: Context, entry_id: str) -> dict:
+    settings_path = context.user_settings_path
+    assert settings_path.is_file(), (
+        f"Expected user settings file at {settings_path}"
+    )
+    data = json.loads(settings_path.read_text())
+    entries = data.get("hooks", {}).get("PreToolUse", [])
+    for entry in entries:
+        if entry.get("id") == entry_id:
+            return entry
+    raise AssertionError(
+        f"No PreToolUse entry with id {entry_id!r} in {settings_path}.\n"
+        f"entries: {entries}"
+    )
+
+
+@then(
+    'the user settings file PreToolUse entry "{entry_id}" command does not '
+    'contain "{phrase}"'
+)
+def step_user_pretooluse_command_lacks(
+    context: Context, entry_id: str, phrase: str
+) -> None:
+    entry = _user_pretooluse_entry(context, entry_id)
+    command = entry.get("command", "")
+    assert phrase not in command, (
+        f"Expected entry {entry_id!r} command to NOT contain {phrase!r}, "
+        f"but command was {command!r}."
+    )
+
+
+@then(
+    'the user settings file PreToolUse entry "{entry_id}" command contains '
+    '"{phrase}"'
+)
+def step_user_pretooluse_command_contains(
+    context: Context, entry_id: str, phrase: str
+) -> None:
+    entry = _user_pretooluse_entry(context, entry_id)
+    command = entry.get("command", "")
+    assert phrase in command, (
+        f"Expected entry {entry_id!r} command to contain {phrase!r}, "
+        f"but command was {command!r}."
+    )
+
+
+@then(
+    'the user settings file PreToolUse entry "{entry_id}" command equals '
+    '"{expected}"'
+)
+def step_user_pretooluse_command_equals(
+    context: Context, entry_id: str, expected: str
+) -> None:
+    entry = _user_pretooluse_entry(context, entry_id)
+    command = entry.get("command", "")
+    assert command == expected, (
+        f"Expected entry {entry_id!r} command to equal {expected!r}, "
+        f"but command was {command!r}."
+    )
+
+
+@then(
+    'the user settings file PreToolUse entry "{entry_id}" command does not '
+    'equal "{expected}"'
+)
+def step_user_pretooluse_command_not_equals(
+    context: Context, entry_id: str, expected: str
+) -> None:
+    entry = _user_pretooluse_entry(context, entry_id)
+    command = entry.get("command", "")
+    assert command != expected, (
+        f"Expected entry {entry_id!r} command to NOT equal {expected!r}, "
+        f"but it does. The user-edited command was overwritten."
+    )
+
+
+@then('the install stdout or stderr mentions "{phrase}"')
+def step_install_output_mentions(context: Context, phrase: str) -> None:
+    combined = f"{context.result.stdout}\n{context.result.stderr}"
+    assert phrase in combined, (
+        f"Expected install output to mention {phrase!r}.\n"
+        f"stdout: {context.result.stdout!r}\nstderr: {context.result.stderr!r}"
+    )
+
+
+@then("the exit code is not {expected:d}")
+def step_exit_code_not(context: Context, expected: int) -> None:
+    actual = context.result.returncode
+    assert actual != expected, (
+        f"Expected exit code != {expected}, got {actual}.\n"
+        f"stdout: {context.result.stdout!r}\nstderr: {context.result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scope semantics (#239)
+# ---------------------------------------------------------------------------
+
+
+@then(
+    'the project local settings file contains a PreToolUse entry with id '
+    '"{entry_id}"'
+)
+def step_project_local_settings_has_entry(
+    context: Context, entry_id: str
+) -> None:
+    settings_path = (
+        Path(context.project_repo_path) / ".claude" / "settings.local.json"
+    )
+    assert settings_path.is_file(), (
+        f"Expected project-local settings file at {settings_path} -- "
+        f"`hooks install --scope local` did not write it."
+    )
+    data = json.loads(settings_path.read_text())
+    entries = data.get("hooks", {}).get("PreToolUse", [])
+    ids = [e.get("id") for e in entries]
+    assert entry_id in ids, (
+        f"Expected PreToolUse entry with id {entry_id!r} in {settings_path}.\n"
+        f"Found ids: {ids}"
+    )
+
+
+@then("the project settings file does not exist")
+def step_project_settings_does_not_exist(context: Context) -> None:
+    settings_path = (
+        Path(context.project_repo_path) / ".claude" / "settings.json"
+    )
+    assert not settings_path.exists(), (
+        f"Expected project settings file at {settings_path} to NOT exist, "
+        f"but it does. (Wrong scope wrote here.)"
+    )
+
+
+@then("the user settings file does not exist")
+def step_user_settings_does_not_exist(context: Context) -> None:
+    settings_path = context.user_settings_path
+    assert not settings_path.exists(), (
+        f"Expected user settings file at {settings_path} to NOT exist, "
+        f"but it does. (--dry-run wrote when it should not have.)"
+    )
+
+
+@then('the hook stdout contains "{phrase}"')
+def step_hook_stdout_contains(context: Context, phrase: str) -> None:
+    out = context.result.stdout
+    assert phrase in out, (
+        f"Expected hook stdout to contain {phrase!r}.\nstdout: {out!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# review_change cursor walk + budget triangulation (#240)
+# ---------------------------------------------------------------------------
+
+
+def _files_in_manifest_page(payload: dict) -> set[str]:
+    manifest = payload.get("manifest", {})
+    files = manifest.get("files", []) or manifest.get("file_changes", [])
+    out: set[str] = set()
+    for entry in files:
+        if isinstance(entry, dict):
+            path = entry.get("path") or entry.get("file_path")
+            if path:
+                out.add(path)
+    return out
+
+
+@then(
+    'following the manifest "next_cursor" returns a different set of files than '
+    'page 1'
+)
+def step_follow_cursor_returns_different_files(context: Context) -> None:
+    """Page 1 was already captured; call review_change again with the cursor.
+
+    Catches a hardcoded-cursor bug (e.g., the impl always emits the same
+    opaque token but ignores it on the next call). If the second page
+    has the same file set as the first, pagination is fake.
+    """
+    payload = context.review_change_payload
+    page1_files = _files_in_manifest_page(payload)
+    cursor = (
+        payload.get("manifest", {})
+        .get("pagination", {})
+        .get("next_cursor")
+    )
+    assert cursor, (
+        f"No manifest cursor to follow. payload keys: "
+        f"{list(payload.get('manifest', {}).keys())}"
+    )
+
+    # Re-issue the call with the cursor. We assume the same base/head/page_size
+    # the first call used; agents replay it via the manifest's own cursor.
+    args: dict = {
+        "repo_path": str(context.repo_path),
+        "base_ref": "HEAD~1",
+        "head_ref": "HEAD",
+        "page_size": 5,
+        "manifest_cursor": cursor,
+    }
+    response = _send_jsonrpc_to_server(
+        context,
+        "tools/call",
+        {"name": "review_change", "arguments": args},
+    )
+    assert "result" in response, (
+        f"Cursor walk returned no 'result': {response}"
+    )
+    result = response["result"]
+    if "structuredContent" in result:
+        page2 = result["structuredContent"]
+    else:
+        content = result.get("content", [])
+        assert content, f"Cursor walk has no content: {result}"
+        page2 = json.loads(content[0]["text"])
+
+    page2_files = _files_in_manifest_page(page2)
+    assert page1_files != page2_files, (
+        f"Cursor walk returned the same files as page 1 — pagination is "
+        f"hardcoded.\npage1: {sorted(page1_files)}\npage2: {sorted(page2_files)}"
+    )
+    assert page2_files, (
+        f"Cursor walk returned an empty manifest page; expected the next "
+        f"slice of files.\npage2: {page2}"
     )

@@ -41,6 +41,21 @@ def before_scenario(context, scenario):
     context.cleanup_dirs = []
     context.json_data = None
     context.server_procs = []
+    # Reset redirect-hook scenario state so values from a previous scenario
+    # cannot leak in (e.g., a stale `fake_home` would skip the isolated-HOME
+    # setup and let the test read the developer's real ~/.claude/...).
+    context.fake_home = None
+    context.hook_payload = None
+    context.hook_command = None
+    context.hook_extra_env = {}
+    context.review_change_payload = None
+    context.captured_sha = None
+    context.captured_pretooluse_length = None
+    context.user_settings_path = None
+    context.user_hooks_dir = None
+    context.project_repo_path = None
+    context.project_settings_path = None
+    context.project_hooks_dir = None
 
 
 def after_scenario(context, scenario):
