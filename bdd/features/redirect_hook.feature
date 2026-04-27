@@ -219,6 +219,7 @@ Feature: Redirect hooks for raw git invocations
 
     Examples:
       | command                          | exit | stdout_match                                  |
+      | git diff main..HEAD              | 0    | get_change_manifest                           |
       | cd /tmp && git diff main..HEAD   | 0    | get_change_manifest                           |
       | (git log main..HEAD)             | 0    | get_commit_history                            |
       | git diff $BASE..HEAD             | 0    | get_change_manifest                           |

@@ -20,12 +20,21 @@ import json
 import os
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from behave import given, then, when
 from behave.runner import Context
 
 from repo_setup_steps import _commit, _init_repo, _write_file
+
+
+# A loose alias for "JSON-shaped object" — we accept any value type because
+# these helpers shuttle Claude Code hook payloads, JSON-RPC envelopes, and
+# MCP tool responses, all of which mix strings, ints, lists, and nested
+# objects under the same `dict[str, Any]` shape.
+JsonObject = dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +67,7 @@ def _scenario_tempdir(context: Context) -> Path:
     return Path(tmp)
 
 
-def _hook_input_payload(command: str) -> dict:
+def _hook_input_payload(command: str) -> JsonObject:
     """Build a Claude Code Bash-tool PreToolUse payload around `command`."""
     return {
         "tool_name": "Bash",
@@ -70,10 +79,10 @@ def _hook_input_payload(command: str) -> dict:
 def _run_hook_script(
     context: Context,
     script_path: Path,
-    payload: dict | None,
-    extra_env: dict | None = None,
+    payload: JsonObject | None,
+    extra_env: Mapping[str, str] | None = None,
     raw_stdin: str | None = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Invoke a hook script with the given JSON payload on stdin.
 
     Hermeticity: HOME is forced to the per-scenario `context.fake_home`
@@ -122,8 +131,8 @@ def _sha256_of_file(path: Path) -> str:
 
 
 def _send_jsonrpc_to_server(
-    context: Context, method: str, params: dict | None = None
-) -> dict:
+    context: Context, method: str, params: JsonObject | None = None
+) -> JsonObject:
     """Spawn `git-prism serve`, send one JSON-RPC request, return the response.
 
     The MCP server speaks line-delimited JSON-RPC over stdio. We send an
@@ -227,6 +236,17 @@ def step_description_mentions(
         f"Got: {sorted(descriptions.keys())}"
     )
     desc = descriptions[tool_name]
+    # Minimum-length check defends against keyword stuffing: an impl could
+    # satisfy the substring check by jamming all four expected phrases into
+    # a 30-character description. Tool descriptions are user-facing prose
+    # and need enough context for an LLM agent to make a routing decision.
+    minimum_description_chars = 80
+    assert len(desc) >= minimum_description_chars, (
+        f"Description for '{tool_name}' is too short to be meaningful "
+        f"(got {len(desc)} chars, expected >= {minimum_description_chars}). "
+        f"This guards against keyword stuffing.\n"
+        f"Description was: {desc!r}"
+    )
     assert phrase.lower() in desc.lower(), (
         f"Description for '{tool_name}' does not mention '{phrase}'.\n"
         f"Description was: {desc!r}"
@@ -409,8 +429,8 @@ def _run_git_prism(
     context: Context,
     args: list[str],
     cwd: Path | None = None,
-    extra_env: dict | None = None,
-) -> subprocess.CompletedProcess:
+    extra_env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run `git-prism <args>` with HOME overridden to the isolated tempdir."""
     env = os.environ.copy()
     fake_home = getattr(context, "fake_home", None)
@@ -454,7 +474,7 @@ def step_capture_user_settings_sha(context: Context) -> None:
     assert settings_path.is_file(), (
         f"Expected settings file at {settings_path} after install"
     )
-    context.captured_sha = _sha256_of_file(settings_path)
+    context.captured_sha256 = _sha256_of_file(settings_path)
 
 
 @then(
@@ -541,10 +561,10 @@ def step_project_hooks_dir_has_script(context: Context, filename: str) -> None:
 @then("the user settings file sha256 is unchanged")
 def step_user_settings_sha_unchanged(context: Context) -> None:
     settings_path = context.user_settings_path
-    captured = getattr(context, "captured_sha", None)
+    captured = getattr(context, "captured_sha256", None)
     assert captured is not None, (
-        "captured_sha not set -- did the 'I capture the user settings file "
-        "sha256' step run?"
+        "captured_sha256 not set -- did the 'I capture the user settings "
+        "file sha256' step run?"
     )
     current = _sha256_of_file(settings_path)
     assert current == captured, (
@@ -607,9 +627,9 @@ def _call_review_change(
     *,
     max_response_tokens: int | None = None,
     page_size: int | None = None,
-) -> dict:
+) -> JsonObject:
     """Call the `review_change` MCP tool over stdio and return the result."""
-    args: dict = {
+    args: JsonObject = {
         "repo_path": str(context.repo_path),
         "base_ref": base,
         "head_ref": head,
@@ -675,8 +695,13 @@ def step_call_review_change_with_page_size(
     )
 
 
-def _navigate_review_change(payload: dict, path: str):
-    current = payload
+def _get_dotted_path(payload: JsonObject, path: str) -> Any:
+    """Walk a dotted path through a JSON-shaped dict and return the leaf.
+
+    Generic helper — not specific to `review_change`. Used by every step
+    that asserts on a nested key in any MCP tool response.
+    """
+    current: Any = payload
     for part in path.split("."):
         assert isinstance(current, dict), (
             f"Expected dict at '{part}' in path '{path}', got {type(current).__name__}"
@@ -695,7 +720,7 @@ def step_review_response_has_key(context: Context, key: str) -> None:
     assert payload is not None, (
         "review_change_payload not set -- did the When step run?"
     )
-    _navigate_review_change(payload, key)
+    _get_dotted_path(payload, key)
 
 
 @then('the response value "{path}" is greater than {value:d}')
@@ -703,7 +728,7 @@ def step_review_response_value_gt(
     context: Context, path: str, value: int
 ) -> None:
     payload = context.review_change_payload
-    actual = _navigate_review_change(payload, path)
+    actual = _get_dotted_path(payload, path)
     assert actual > value, (
         f"Expected {path} > {value}, got {actual}"
     )
@@ -714,7 +739,7 @@ def step_review_response_key_eq_int(
     context: Context, path: str, expected: int
 ) -> None:
     payload = context.review_change_payload
-    actual = _navigate_review_change(payload, path)
+    actual = _get_dotted_path(payload, path)
     assert actual == expected, (
         f"Expected {path} == {expected}, got {actual!r}"
     )
@@ -1018,7 +1043,7 @@ def step_user_settings_exactly_one_entry(
     )
 
 
-def _user_pretooluse_entry(context: Context, entry_id: str) -> dict:
+def _user_pretooluse_entry(context: Context, entry_id: str) -> JsonObject:
     settings_path = context.user_settings_path
     assert settings_path.is_file(), (
         f"Expected user settings file at {settings_path}"
@@ -1173,7 +1198,7 @@ def step_hook_stdout_contains(context: Context, phrase: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _files_in_manifest_page(payload: dict) -> set[str]:
+def _files_in_manifest_page(payload: JsonObject) -> set[str]:
     manifest = payload.get("manifest", {})
     files = manifest.get("files", []) or manifest.get("file_changes", [])
     out: set[str] = set()

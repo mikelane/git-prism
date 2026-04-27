@@ -1,0 +1,4 @@
+cat <<EOF
+some text inside heredoc body
+EOF
+git diff main..HEAD
