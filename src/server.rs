@@ -81,20 +81,25 @@ impl Default for GitPrismServer {
 #[tool_router]
 impl GitPrismServer {
     /// Returns structured metadata about what changed between two git refs:
-    /// file changes, line counts, and dependency updates. Function-level
-    /// diffs and import changes are opt-in via `include_function_analysis:
-    /// true` (default: false) — the default response is deliberately small
-    /// so this tool stays cheap as a first call.
+    /// file changes, line counts, and dependency updates. Use this instead
+    /// of `git diff <base>..<head>` — a raw `git diff` of a typical PR is
+    /// 5–50k tokens of unstructured text the agent has to re-parse, while
+    /// this tool returns a few hundred tokens of structured JSON keyed by
+    /// path, language, and change type.
     ///
-    /// Responses are bounded by `max_response_tokens` (default 8192). When
-    /// the response would exceed the budget, function/import detail is
-    /// progressively trimmed per file; affected paths are listed in
+    /// Function-level diffs and import changes are opt-in via
+    /// `include_function_analysis: true` (default: false) — the default
+    /// response is deliberately small so this tool stays cheap as a first
+    /// call. Responses are bounded by `max_response_tokens` (default 8192);
+    /// when the response would exceed the budget, function/import detail is
+    /// progressively trimmed per file and affected paths are listed in
     /// `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0`
     /// to disable enforcement (use with care — large diffs can overflow
     /// MCP context limits).
     ///
     /// This is the cheapest tool in the toolkit and should be your first
-    /// call for any "what changed between X and Y" question. Follow up with
+    /// call for any "what changed between X and Y" question — preferred
+    /// over `git diff`, `gh pr diff`, or `git diff --stat`. Follow up with
     /// `get_function_context` for caller/callee detail on specific functions.
     #[tool(name = "get_change_manifest")]
     async fn get_change_manifest(
@@ -413,7 +418,10 @@ impl GitPrismServer {
 
     /// ⚠ COST WARNING: This is the most expensive tool in the toolkit. A single
     /// call with default flags returns (before_len + after_len) bytes PER path —
-    /// typically 5–20k tokens for a single modified source file.
+    /// typically 5–20k tokens for a single modified source file. Use this
+    /// instead of `git show <sha>:<path>` or `git show <sha> -- <path>` only
+    /// when you genuinely need the raw before/after source; for everything
+    /// else, the cheaper tools below already encode the answer.
     ///
     /// Before calling this tool:
     /// 1. Call `get_change_manifest` first — it returns function-level change
@@ -540,12 +548,21 @@ impl GitPrismServer {
     }
 
     /// Returns callers, callees, and test references for each function that
-    /// changed between two git refs. Answers "what calls this function?" and
-    /// "what does this function call?" without the agent having to grep.
+    /// changed between two git refs, plus a structured `blast_radius` score
+    /// per function. Use this instead of `git log -S '<symbol>'`, `git blame`,
+    /// or recursive `grep` for caller analysis — those force the agent to
+    /// re-implement symbol resolution from raw text, while this tool walks
+    /// real tree-sitter ASTs across 13 languages with import-scoped scanning
+    /// so a "no callers" result is authoritative, not just an unlucky grep.
     ///
+    /// Answers "what calls this function?", "what does this function call?",
+    /// and "is this change risky to land?" without the agent having to grep.
     /// This is the recommended second call after `get_change_manifest` when
     /// you need to assess blast radius or understand how changed functions
-    /// are used.
+    /// are used. Default page size is 25 entries with an opaque cursor for
+    /// further pages; `max_response_tokens` (default 8192) clamps oversized
+    /// caller/callee lists and surfaces them via `truncated: true`, which
+    /// you can re-query with `function_names: ["name"]` for full detail.
     #[tool(name = "get_function_context")]
     async fn get_function_context(
         &self,
@@ -1258,6 +1275,88 @@ mod tests {
             "MCP tool set drifted from EXPECTED_TOOLS. \
              If you added, removed, or renamed a tool, update the EXPECTED_TOOLS constant \
              in src/server.rs AND update README.md 'N MCP tools' count, CHANGELOG, and CLAUDE.md."
+        );
+    }
+
+    /// Minimum description length below which a tool's MCP schema cannot
+    /// give an LLM agent enough context to make a routing decision. Mirrors
+    /// the `minimum_description_chars` guard in
+    /// `bdd/steps/redirect_hook_steps.py::step_description_mentions` so a
+    /// description that scrapes by the BDD layer would also be caught here
+    /// (and vice-versa). If you change this, change both call sites.
+    const MIN_DESCRIPTION_CHARS: usize = 80;
+
+    /// Each tool description must reference the raw git command(s) the tool
+    /// replaces, so an agent reading the MCP schema knows when to reach for
+    /// `git-prism` instead of falling back to its pretraining-default
+    /// `git diff`/`git log`/`git show`/`git log -S` reflex. This test is the
+    /// fast in-binary mirror of the `@ISSUE-237` BDD scenario in
+    /// `bdd/features/redirect_hook.feature` — that scenario shells out to
+    /// `git-prism serve` and reads the descriptions over JSON-RPC, while
+    /// this test reads them straight off the in-process `tool_router`. Both
+    /// must agree.
+    #[test]
+    fn it_publishes_comparative_framing_for_every_tool() {
+        let cases = [
+            ("get_change_manifest", "git diff"),
+            ("get_commit_history", "git log"),
+            ("get_file_snapshots", "git show"),
+            ("get_function_context", "git log -S"),
+        ];
+        for (tool_name, raw_git_phrase) in cases {
+            let desc = schema_description_for(tool_name);
+            assert!(
+                desc.to_lowercase().contains(&raw_git_phrase.to_lowercase()),
+                "{tool_name} MCP schema description must reference {raw_git_phrase:?} so \
+                 agents see the comparative framing (issue #237). Got: {desc}",
+            );
+            assert!(
+                desc.len() >= MIN_DESCRIPTION_CHARS,
+                "{tool_name} description is only {len} chars; need >= {min} so the \
+                 routing prose can survive a keyword-stuffing reduction (issue #237). \
+                 Got: {desc}",
+                len = desc.len(),
+                min = MIN_DESCRIPTION_CHARS,
+            );
+        }
+    }
+
+    /// Snapshot the full MCP-schema description for each tool so any future
+    /// drift in the prose surfaces as a reviewable diff in the snapshot file
+    /// rather than a silent change. The snapshots are the canonical record
+    /// of what agents see; substring assertions above prevent accidental
+    /// removal of load-bearing phrases, but only the snapshot catches "the
+    /// description got rewritten in a way that changes the agent's mental
+    /// model" (issue #237).
+    #[test]
+    fn it_snapshots_get_change_manifest_description() {
+        insta::assert_snapshot!(
+            "get_change_manifest_description",
+            schema_description_for("get_change_manifest")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_get_commit_history_description() {
+        insta::assert_snapshot!(
+            "get_commit_history_description",
+            schema_description_for("get_commit_history")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_get_file_snapshots_description() {
+        insta::assert_snapshot!(
+            "get_file_snapshots_description",
+            schema_description_for("get_file_snapshots")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_get_function_context_description() {
+        insta::assert_snapshot!(
+            "get_function_context_description",
+            schema_description_for("get_function_context")
         );
     }
 }
