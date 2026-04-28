@@ -43,28 +43,28 @@ Feature: Redirect hooks for raw git invocations
   # stdout JSON contract.
   # ------------------------------------------------------------------------
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Plain "git diff main..HEAD" is recognized as a redirect target
     Given a hook input with bash command "git diff main..HEAD"
     When I run the bundled redirect hook with that input
     Then the hook exit code is 0
     And the hook stdout is JSON containing redirect advice for "get_change_manifest"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Compound "cd /tmp && git diff main..HEAD" is recognized
     Given a hook input with bash command "cd /tmp && git diff main..HEAD"
     When I run the bundled redirect hook with that input
     Then the hook exit code is 0
     And the hook stdout is JSON containing redirect advice for "get_change_manifest"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Subshell "(git log main..HEAD)" is recognized
     Given a hook input with bash command "(git log main..HEAD)"
     When I run the bundled redirect hook with that input
     Then the hook exit code is 0
     And the hook stdout is JSON containing redirect advice for "get_commit_history"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Pipeline "git diff main..HEAD | grep foo" is recognized via the first command
     # The tokenizer must walk into pipelines and recognize git as the head of
     # the first stage. The grep on the right-hand side is a normal command
@@ -74,7 +74,7 @@ Feature: Redirect hooks for raw git invocations
     Then the hook exit code is 0
     And the hook stdout is JSON containing redirect advice for "get_change_manifest"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Command substitution "$(...)" is recognized for both inner and outer git calls
     # `git rev-parse` is not on the watch list (no redirect), but the outer
     # `git diff` must still be recognized after the substitution boundary.
@@ -84,7 +84,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is JSON containing redirect advice for "get_change_manifest"
     And the hook stdout does not contain redirect advice for "git rev-parse"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Backtick command substitution is normalized before tokenization
     # Per ADR-0008, backticks are stripped to whitespace by a pre-pass, so the
     # outer `git diff` is the only watch-list match left after normalization.
@@ -94,7 +94,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is JSON containing redirect advice for "get_change_manifest"
     And the hook stdout does not contain redirect advice for "git rev-parse"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Variable expansion "git diff $BASE..HEAD" is recognized without expansion
     Given a hook input with bash command "git diff $BASE..HEAD"
     And the environment variable "BASE" is set to "SECRETSENTINEL"
@@ -104,14 +104,14 @@ Feature: Redirect hooks for raw git invocations
     And the hook does not attempt to expand "$BASE"
     And the hook output does not leak the value "SECRETSENTINEL"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: "git blame src/server.rs" is recognized
     Given a hook input with bash command "git blame src/server.rs"
     When I run the bundled redirect hook with that input
     Then the hook exit code is 0
     And the hook stdout is JSON containing redirect advice for "get_file_snapshots"
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario Outline: Read-only/write-side git commands are NOT redirected
     Given a hook input with bash command "<command>"
     When I run the bundled redirect hook with that input
@@ -127,7 +127,7 @@ Feature: Redirect hooks for raw git invocations
       | git push origin  |
       | git fetch origin |
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Heredoc body skip — git inside heredoc is ignored, surrounding command is parsed
     Given a hook input with the bash command from "heredoc_with_git_inside.txt"
     When I run the bundled redirect hook with that input
@@ -135,7 +135,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is empty
     And the hook stderr is empty
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Tab-stripped heredoc "<<-EOF" body is also skipped
     # `<<-` strips leading tabs from the body but the tokenizer must still
     # treat the body as opaque. Only the line after the closing tag should
@@ -147,7 +147,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is empty
     And the hook stderr is empty
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Quoted heredoc "<<'EOF'" suppresses expansion and is still skipped
     # The quoted form disables shell expansion inside the body. The
     # tokenizer must skip the body regardless — quoting is a shell concern,
@@ -158,7 +158,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is empty
     And the hook stderr is empty
 
-  @ISSUE-238 @not_implemented
+  @ISSUE-238
   Scenario: Tokenizer resumes parsing after the heredoc terminator
     # Catches TWO failure modes at once:
     #   1. Over-eager-skip: parser swallows everything from "<<EOF" to
