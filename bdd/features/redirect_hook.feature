@@ -447,7 +447,7 @@ Feature: Redirect hooks for raw git invocations
   # exposed via the same opaque cursor scheme as the existing tools.
   # ------------------------------------------------------------------------
 
-  @ISSUE-240 @not_implemented
+  @ISSUE-240
   Scenario: review_change returns combined manifest + function_context payload
     Given a git repository with two commits
     And the git-prism MCP server is running over stdio
@@ -456,7 +456,7 @@ Feature: Redirect hooks for raw git invocations
     And the response has key "function_context"
     And the response value "manifest.summary.total_files_changed" is greater than 0
 
-  @ISSUE-240 @not_implemented
+  @ISSUE-240
   Scenario Outline: review_change splits its token budget 40/60 between sub-responses
     # Two budget values triangulate the split. A hard-coded 1638/2458 pair
     # would pass at 4096 but fail at 16384 — the test must show the split
@@ -472,7 +472,7 @@ Feature: Redirect hooks for raw git invocations
       | 4096   | 1638            | 2458           |
       | 16384  | 6553            | 9830           |
 
-  @ISSUE-240 @not_implemented
+  @ISSUE-240
   Scenario: review_change paginates and the cursor returns a different page
     # Triangulates pagination: a hardcoded "always emit cursor X" would
     # pass the existence check but fail the second-page diff. We assert
@@ -484,7 +484,7 @@ Feature: Redirect hooks for raw git invocations
     Then at least one sub-response in the result has a non-null "next_cursor"
     And following the manifest "next_cursor" returns a different set of files than page 1
 
-  @ISSUE-240 @not_implemented
+  @ISSUE-240
   Scenario: review_change tool description includes comparative framing vs git diff
     Given the git-prism MCP server is running over stdio
     When I send a "tools/list" JSON-RPC request
