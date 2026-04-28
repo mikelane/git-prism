@@ -160,14 +160,23 @@ Feature: Redirect hooks for raw git invocations
 
   @ISSUE-238 @not_implemented
   Scenario: Tokenizer resumes parsing after the heredoc terminator
-    # Catches the over-eager-skip failure mode where the parser swallows
-    # everything from "<<EOF" to end-of-input. The fixture has a real
-    # `git diff main..HEAD` on the line AFTER the closing tag — that line
-    # IS on the watch list and must produce advice.
+    # Catches TWO failure modes at once:
+    #   1. Over-eager-skip: parser swallows everything from "<<EOF" to
+    #      end-of-input. Would emit no advice — fails the get_change_manifest
+    #      assertion.
+    #   2. Heredoc-ignored: parser doesn't recognize `<<EOF` syntax and
+    #      tokenizes everything as one stream. Would emit advice for
+    #      get_commit_history (from `git log a..b` inside the body) AND
+    #      get_change_manifest (from the post-EOF line) — fails the
+    #      no-advice-for-get_commit_history assertion.
+    # The bait `git log a..b` inside the heredoc body forces the parser
+    # to actually skip the body (not just ignore heredoc syntax) AND
+    # resume after the closing tag.
     Given a hook input with the bash command from "heredoc_then_git_diff.txt"
     When I run the bundled redirect hook with that input
     Then the hook exit code is 0
     And the hook stdout is JSON containing redirect advice for "get_change_manifest"
+    And the hook stdout does not contain redirect advice for "get_commit_history"
 
   # ------------------------------------------------------------------------
   # W4: Install-hooks subcommand + bundled hook script (#239)

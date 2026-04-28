@@ -180,8 +180,8 @@ def _send_jsonrpc_to_server(
     )
     context.result = proc
     # Find the response with id == 2
-    for line in proc.stdout.splitlines():
-        line = line.strip()
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
         if not line:
             continue
         try:
@@ -748,7 +748,7 @@ def step_review_response_key_eq_int(
 @then('at least one sub-response in the result has a non-null "next_cursor"')
 def step_at_least_one_subresponse_paginated(context: Context) -> None:
     payload = context.review_change_payload
-    cursors: list = []
+    cursors: list[tuple[str, str | None]] = []
     for sub_key in ("manifest", "function_context"):
         sub = payload.get(sub_key, {})
         cursor = sub.get("pagination", {}).get("next_cursor")
@@ -1247,7 +1247,7 @@ def step_follow_cursor_returns_different_files(context: Context) -> None:
 
     # Re-issue the call with the cursor. We assume the same base/head/page_size
     # the first call used; agents replay it via the manifest's own cursor.
-    args: dict = {
+    args: JsonObject = {
         "repo_path": str(context.repo_path),
         "base_ref": "HEAD~1",
         "head_ref": "HEAD",
