@@ -1,0 +1,5 @@
+cat <<EOF
+git diff a..b
+git log main..HEAD
+EOF
+git status
