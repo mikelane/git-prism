@@ -1,9 +1,10 @@
 # git-prism
 
-Agent-optimized git data for LLM agents. Four MCP tools that replace human-oriented
+Agent-optimized git data for LLM agents. Five MCP tools that replace human-oriented
 diffs with structured JSON -- function-level granularity, import tracking,
-dependency changes, complete file snapshots, per-commit history, and function
-context (callers, callees, test references).
+dependency changes, complete file snapshots, per-commit history, function
+context (callers, callees, test references), and a one-call `review_change`
+orchestration that combines manifest and function-context for PR review.
 
 ## The Problem
 
@@ -319,6 +320,66 @@ means import-based filtering was used (more precise but may miss callers that
 use unusual import patterns), while `"fallback"` means the scan parsed every
 file in the repo (authoritative but slower). Use this to decide whether a
 zero-caller result is definitive or potentially incomplete.
+
+### `review_change`
+
+Returns combined change manifest and function-level blast radius for a ref
+range, in one call. Use this **instead of `git diff <ref>..<ref>`** when
+reviewing a PR, auditing a refactor, or assessing merge safety -- it answers
+"what changed and what might break" in one tool invocation, with structured
+JSON instead of raw diff text.
+
+Replaces the common two-step workflow (`get_change_manifest` then
+`get_function_context`) with a single call that runs both internally and splits
+the response-size budget 40/60 (manifest / function_context).
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `base_ref` | string | _(required)_ | Base git ref |
+| `head_ref` | string | _(omitted → working tree)_ | Head git ref. Omit to compare against the working tree (manifest only; the function-context half returns empty since callers/callees need committed content) |
+| `repo_path` | string | cwd | Path to the git repository |
+| `include_patterns` | string[] | `[]` | Glob patterns to include |
+| `exclude_patterns` | string[] | `[]` | Glob patterns to exclude |
+| `function_names` | string[] | `null` | Restrict the function-context half to these names |
+| `max_response_tokens` | int | `8192` | Combined budget; split 40/60 between manifest and function_context. `0` disables both halves' budgets |
+| `manifest_cursor` | string | `null` | Opaque cursor advancing only the manifest half |
+| `function_context_cursor` | string | `null` | Opaque cursor advancing only the function-context half |
+| `page_size` | int | `25` | Page size used for both halves |
+
+The two cursors are independent so an agent can advance one half (e.g., walk
+through a long file list) without re-paginating the other. Each sub-response
+carries its share of the budget in `metadata.budget_tokens` so downstream
+observability can audit the split decision.
+
+**Example output:**
+
+```json
+{
+  "manifest": {
+    "metadata": {
+      "base_ref": "HEAD~1",
+      "head_ref": "HEAD",
+      "budget_tokens": 1638,
+      "...": "..."
+    },
+    "summary": { "total_files_changed": 3, "...": "..." },
+    "files": [{ "path": "src/lib.rs", "...": "..." }],
+    "pagination": { "next_cursor": null, "...": "..." }
+  },
+  "function_context": {
+    "metadata": {
+      "base_ref": "HEAD~1",
+      "head_ref": "HEAD",
+      "budget_tokens": 2458,
+      "...": "..."
+    },
+    "functions": [{ "name": "validate", "blast_radius": { "risk": "medium" }, "...": "..." }],
+    "pagination": { "next_cursor": null, "...": "..." }
+  }
+}
+```
 
 ## CLI Usage
 
