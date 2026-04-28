@@ -17,13 +17,13 @@ Feature: Redirect hooks for raw git invocations
   # ------------------------------------------------------------------------
   # W2: Tool description rewrites (#237)
   #
-  # The four MCP tool doc comments must include comparative framing vs the
+  # The five MCP tool doc comments must include comparative framing vs the
   # raw git equivalent (e.g., `get_change_manifest` references `git diff`).
   # The assertion is end-to-end: shell out to `git-prism serve` over stdio,
   # send a JSON-RPC `tools/list` request, and read the description fields.
   # ------------------------------------------------------------------------
 
-  @ISSUE-237 @not_implemented
+  @ISSUE-237
   Scenario: All five MCP tool descriptions include comparative framing vs raw git
     Given the git-prism MCP server is running over stdio
     When I send a "tools/list" JSON-RPC request
