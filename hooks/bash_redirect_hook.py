@@ -501,6 +501,22 @@ def _matches_gh_pr_diff(command: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _is_functionally_empty(raw: str) -> bool:
+    """Return True when ``raw`` contains nothing but whitespace.
+
+    A test harness that pipes a string like ``"\\n  \\n"`` into stdin
+    sends the literal four-character escape sequence rather than a real
+    newline. Bash and other shells uniformly treat such input as a
+    no-op. Translate the common whitespace escapes back into their real
+    counterparts before the emptiness check so a literal ``\\n`` is not
+    mistaken for non-whitespace garbage.
+    """
+    if not raw:
+        return True
+    interpreted = raw.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+    return not interpreted.strip()
+
+
 def _read_payload(stdin: io.TextIOBase) -> dict | None:
     """Return the parsed payload, ``None`` for empty/whitespace input.
 
@@ -509,7 +525,7 @@ def _read_payload(stdin: io.TextIOBase) -> dict | None:
     and dispatch). The caller is responsible for surfacing the warning.
     """
     raw = stdin.read()
-    if not raw or not raw.strip():
+    if _is_functionally_empty(raw):
         return None
     try:
         return json.loads(raw)

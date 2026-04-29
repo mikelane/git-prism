@@ -971,13 +971,24 @@ def step_install_project_with_answer(context: Context, answer: str) -> None:
 
 @given('the redirect hook install state is "{state}"')
 def step_redirect_hook_state(context: Context, state: str) -> None:
-    """Drive `hooks status` triangulation by setting up three different states.
+    """Drive `hooks status` triangulation by setting up four different states.
 
     `none` leaves both settings files absent; `user-only` runs the user
-    install; `user-and-project` runs both. The status command must
-    distinguish all three.
+    install; `project-only` runs only the project install; `user-and-project`
+    runs both. The status command must distinguish all four.
     """
     if state == "none":
+        return
+    if state == "project-only":
+        proc = _run_git_prism(
+            context,
+            ["hooks", "install", "--scope", "project"],
+            cwd=context.project_repo_path,
+        )
+        assert proc.returncode == 0, (
+            f"Setup failed for state={state!r}: project install failed. "
+            f"stdout: {proc.stdout!r} stderr: {proc.stderr!r}"
+        )
         return
     proc = _run_git_prism(context, ["hooks", "install", "--scope", "user"])
     assert proc.returncode == 0, (

@@ -1,4 +1,5 @@
 mod git;
+mod hooks;
 pub(crate) mod metrics;
 pub(crate) mod pagination;
 pub(crate) mod privacy;
@@ -94,6 +95,35 @@ enum Commands {
     },
     /// List supported languages for function-level analysis
     Languages,
+    /// Install / uninstall / report status of the bundled redirect hook
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum HooksCommands {
+    /// Install the bundled redirect hook into Claude Code's settings
+    Install {
+        /// Where to install the hook
+        #[arg(long, value_parser = ["user", "project", "local"])]
+        scope: String,
+        /// Print the would-be settings JSON without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite a user-edited entry in place
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove redirect-hook entries written by this binary
+    Uninstall {
+        /// Which scope to clean up
+        #[arg(long, value_parser = ["user", "project", "local"])]
+        scope: String,
+    },
+    /// Report which scopes have the redirect hook installed
+    Status,
 }
 
 enum RefRange<'a> {
@@ -277,6 +307,65 @@ fn collect_all_history_pages(
     })
 }
 
+/// Dispatch a `git-prism hooks <subcommand>` invocation. Returns the exit
+/// code the process should adopt — 0 on success, non-zero when the
+/// subcommand needs to surface an error to the shell (e.g. v2 -> v1
+/// downgrade refusal).
+fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
+    let home = home_dir()?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?;
+    match command {
+        HooksCommands::Install {
+            scope,
+            dry_run,
+            force,
+        } => {
+            let scope = hooks::Scope::parse(&scope)?;
+            let options = hooks::InstallOptions {
+                scope,
+                dry_run,
+                force,
+            };
+            let mut stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut stdout_lock = stdout.lock();
+            let mut stderr_lock = stderr.lock();
+            hooks::install_redirect_hook(
+                &options,
+                &home,
+                &cwd,
+                &mut stdin,
+                &mut stdout_lock,
+                &mut stderr_lock,
+            )
+        }
+        HooksCommands::Uninstall { scope } => {
+            let scope = hooks::Scope::parse(&scope)?;
+            hooks::uninstall_redirect_hook(scope, &home, &cwd)?;
+            Ok(0)
+        }
+        HooksCommands::Status => {
+            let cwd_is_repo = cwd.join(".git").exists();
+            let report = hooks::status_report(&home, &cwd, cwd_is_repo)?;
+            for line in &report.lines {
+                println!("{line}");
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// Resolve `$HOME` for the current process. Returns an error rather than a
+/// silent fallback so misconfigured environments fail loudly instead of
+/// quietly writing into `/.claude/settings.json`.
+fn home_dir() -> anyhow::Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME environment variable is not set"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -389,6 +478,12 @@ async fn main() -> anyhow::Result<()> {
             let context: FunctionContextResponse =
                 build_function_context_with_options(&repo_path, base_ref, head_ref, &options)?;
             println!("{}", serde_json::to_string_pretty(&context)?);
+        }
+        Commands::Hooks { command } => {
+            let exit_code = run_hooks_command(command)?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Commands::Languages => {
             println!("Supported languages for function-level analysis:");
