@@ -1,0 +1,58 @@
+# Rust build artifacts
+target/
+*.rs.bk
+perf.data*
+flamegraph.svg
+
+# Python build artifacts & caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+bdd/.venv/
+
+# Mutation testing output
+mutants.out*
+
+# Worktrees (recursive duplicate trees — critical to ignore)
+.worktrees/
+.claude/worktrees/
+
+# Local Claude state (machine-specific)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# IDE / editor state
+.idea/
+.vscode/
+.vs/
+*.iml
+*.swp
+*.swo
+
+# OS state
+.DS_Store
+Thumbs.db
+
+# Binary media (demo recordings, narration, asciinema)
+*.mp4
+*.mp3
+*.gif
+*.cast
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.zip
+*.tar.gz
+demo/recordings/
+demo/v0.2.0/
+recordings/
+
+# Other tooling state
+.opencode/
