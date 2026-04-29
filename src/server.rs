@@ -263,12 +263,17 @@ impl GitPrismServer {
         result
     }
 
-    /// Returns one manifest per commit in a range, so agents can see
-    /// what changed in each commit separately.
-    #[tool(
-        name = "get_commit_history",
-        description = "Returns per-commit manifests for a range of commits"
-    )]
+    /// Returns one structured manifest per commit in a range — use this
+    /// **instead of `git log --stat`** or `git log -p` when you need to walk
+    /// a branch commit-by-commit. Each entry includes the commit SHA, author,
+    /// message, timestamp, per-file change metadata, and a summary. No diff
+    /// text to parse; no `+`/`-` prefixes to strip.
+    ///
+    /// Call `get_change_manifest` first when you only need the collapsed
+    /// view across the whole range. Use this tool when you need to attribute
+    /// changes to specific commits — for example, to bisect a regression or
+    /// audit an author's contribution.
+    #[tool(name = "get_commit_history")]
     async fn get_commit_history(
         &self,
         Parameters(args): Parameters<HistoryArgs>,
@@ -479,11 +484,11 @@ impl GitPrismServer {
             match &result {
                 Ok(response) => {
                     root_span.record("response_files_count", response.files.len() as i64);
-                    let any_truncated = response.files.iter().any(|f| {
+                    let is_any_file_truncated = response.files.iter().any(|f| {
                         f.before.as_ref().is_some_and(|c| c.truncated)
                             || f.after.as_ref().is_some_and(|c| c.truncated)
                     });
-                    root_span.record("response_truncated", any_truncated);
+                    root_span.record("response_truncated", is_any_file_truncated);
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }
@@ -630,8 +635,9 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. Double cost is acceptable at
+                // current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -783,6 +789,9 @@ impl GitPrismServer {
                         metrics.record_language(&file.language);
                     }
                     metrics.record_change_scope(change_scope_label(file.change_scope));
+                    if let Some(fns) = &file.functions_changed {
+                        metrics.record_functions_changed(&file.language, fns.len() as f64);
+                    }
                 }
 
                 let functions_per_language =
@@ -1069,13 +1078,13 @@ mod tests {
         // Advertising unimplemented capabilities causes MCP clients to call endpoints
         // that do not exist, producing confusing errors.
         let server = GitPrismServer::new();
-        let info = server.get_info();
+        let server_info = server.get_info();
         assert!(
-            info.capabilities.resources.is_none(),
+            server_info.capabilities.resources.is_none(),
             "resources capability must not be advertised — this server does not implement resources"
         );
         assert!(
-            info.capabilities.prompts.is_none(),
+            server_info.capabilities.prompts.is_none(),
             "prompts capability must not be advertised — this server does not implement prompts"
         );
     }
