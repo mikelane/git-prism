@@ -2,18 +2,17 @@
 source: src/server.rs
 expression: "schema_description_for(\"get_function_context\")"
 ---
-Returns callers, callees, and test references for each function that
-changed between two git refs, plus a structured `blast_radius` score
-per function. Use this instead of `git log -S '<symbol>'`, `git blame`,
-or recursive `grep` for caller analysis — those force the agent to
-re-implement symbol resolution from raw text, while this tool walks
-real tree-sitter ASTs across 13 languages with import-scoped scanning
-so a "no callers" result is authoritative, not just an unlucky grep.
-Answers "what calls this function?", "what does this function call?",
-and "is this change risky to land?" without the agent having to grep.
-This is the recommended second call after `get_change_manifest` when
-you need to assess blast radius or understand how changed functions
-are used. Default page size is 25 entries with an opaque cursor for
-further pages; `max_response_tokens` (default 8192) clamps oversized
-caller/callee lists and surfaces them via `truncated: true`, which
-you can re-query with `function_names: ["name"]` for full detail.
+Use this instead of `git log -S '<symbol>'`, `git blame`, or recursive
+`grep` for caller analysis — those force the agent to re-implement
+symbol resolution from raw text, while this tool walks real tree-sitter
+ASTs across 13 languages with import-scoped scanning so a "no callers"
+result is authoritative, not just an unlucky grep.
+The recommended second call after `get_change_manifest`: returns
+callers, callees, and test references for each changed function, plus
+a structured `blast_radius` score. Answers "what calls this function?",
+"what does this function call?", and "is this change risky to land?"
+Use when you need to assess blast radius or understand how changed
+functions are used. Default page size is 25 entries with an opaque
+cursor for further pages; `max_response_tokens` (default 8192) clamps
+oversized caller/callee lists and surfaces them via `truncated: true`,
+which you can re-query with `function_names: ["name"]` for full detail.
