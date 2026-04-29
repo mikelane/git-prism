@@ -39,14 +39,25 @@ mutants.out*
 .DS_Store
 Thumbs.db
 
-# Credentials and private keys (defense-in-depth: keep out of agent context)
+# Credentials and private keys (defense-in-depth: keep out of agent context;
+# mirrors .gitignore coverage so adding a pattern to one means adding to both)
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+id_rsa
+id_ecdsa
+id_ed25519
 credentials.json
 service-account.json
+google-credentials.json
 *-credentials.json
 
 # Binary assets (recordings, images, documents, archives)
