@@ -697,20 +697,18 @@ impl GitPrismServer {
         result
     }
 
-    /// Returns combined change manifest and function-level blast radius for a
-    /// ref range, in one call. Use this **instead of `git diff <ref>..<ref>`**
-    /// when reviewing a PR, auditing a refactor, or assessing merge safety —
-    /// it answers "what changed and what might break" in one tool invocation,
-    /// with structured JSON instead of raw diff text.
+    /// Use this **instead of `git diff <ref>..<ref>`** when reviewing a PR,
+    /// auditing a refactor, or assessing merge safety — it answers "what
+    /// changed and what might break" in one tool invocation, with structured
+    /// JSON and per-function blast radius scores instead of raw diff text.
     ///
     /// Replaces the common two-step workflow:
     ///   1. `get_change_manifest` — what changed
-    ///   2. `get_function_context` — what callers might break
+    ///   2. `get_function_context` — blast radius and callers
     /// with a single call that runs both internally and splits the token
-    /// budget 40/60 (manifest / function_context).
-    ///
-    /// Cost: ~30% of the equivalent raw `git diff <ref>..<ref> | git log -S <fn>`
-    /// pipeline because semantic data replaces unstructured text.
+    /// budget 40/60 (manifest / function_context). Two independent cursors
+    /// (`manifest_cursor`, `function_context_cursor`) let you page each half
+    /// separately without resetting the other.
     #[tool(name = "review_change")]
     async fn review_change(
         &self,
@@ -1373,6 +1371,14 @@ mod tests {
         insta::assert_snapshot!(
             "get_function_context_description",
             schema_description_for("get_function_context")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_review_change_description() {
+        insta::assert_snapshot!(
+            "review_change_description",
+            schema_description_for("review_change")
         );
     }
 }
