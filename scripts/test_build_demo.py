@@ -9,6 +9,7 @@ _spec = importlib.util.spec_from_file_location(
     "build_demo", Path(__file__).parent / "build-demo.py"
 )
 assert _spec is not None, "Could not locate build-demo.py next to test file"
+assert _spec.loader is not None, "Loader missing from module spec"
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 concatenate_audio = _mod.concatenate_audio
@@ -204,7 +205,7 @@ def test_lint_segments_warns_on_markdown_heading_in_body(capsys: pytest.CaptureF
 
 
 def test_lint_segments_info_on_markdown_inline_syntax_does_not_increment_warning_count(
-    capsys: pytest.CaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Inline syntax like backticks triggers an INFO message, not a WARN.
     # The return value counts only WARNs, so it must remain 0.
@@ -218,7 +219,7 @@ def test_lint_segments_info_on_markdown_inline_syntax_does_not_increment_warning
 
 
 def test_lint_segments_counts_multiple_warnings_across_segments(
-    capsys: pytest.CaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     segments = [
         {"name": "first", "text": "<!-- stray comment -->"},
@@ -231,7 +232,7 @@ def test_lint_segments_counts_multiple_warnings_across_segments(
 
 
 def test_lint_segments_counts_multiple_warnings_within_one_segment(
-    capsys: pytest.CaptureFixture,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Both an HTML comment and a heading in the same segment = 2 warnings.
     segments = [

@@ -1,62 +1,50 @@
 [
   {
-    "name": "problem_intro",
-    "text": "Here is a git repository with a notes file containing research I want to keep. Under version control, tracked, committed. Now watch what happens when an agent runs an unguarded bash redirect.",
-    "duration": 12.45,
-    "clip": "redirect-epic_problem_intro.mp3"
-  },
-  {
-    "name": "problem_clobber",
-    "text": "The file is gone. One bash redirect \u2014 no diff, no prompt, no recovery path. The original content is overwritten and git history can not help because the change never staged. This is the problem git-prism v 0.7.0 solves.",
-    "duration": 16.21,
-    "clip": "redirect-epic_problem_clobber.mp3"
-  },
-  {
     "name": "hook_intro",
-    "text": "git-prism ships a Claude Code PreToolUse hook that intercepts every Bash tool call before it runs. It reads the command as JSON on stdin and returns one of three decisions: block it, advise against it, or pass through silently.",
-    "duration": 14.58,
+    "text": "Here is git-prism registered as an MCP server in Claude Code. Five structured tools available \u2014 get change manifest, get function context, review change. But Claude was trained on millions of git commands. That muscle memory runs deep. Watch what happens.",
+    "duration": 18.72,
     "clip": "redirect-epic_hook_intro.mp3"
   },
   {
+    "name": "git_diff_problem",
+    "text": "Claude reaches for git diff, exactly as its training taught it. Hunk headers, plus and minus prefixes, whitespace context. A format built for humans reading patches. Even with structured alternatives one tool call away, the default instinct is porcelain. Registration is not enough.",
+    "duration": 17.88,
+    "clip": "redirect-epic_git_diff_problem.mp3"
+  },
+  {
     "name": "hook_block",
-    "text": "A command like g-h p-r diff gets blocked outright \u2014 exit code 2 stops the tool call cold. Raw patch text is not something an agent can act on reliably, so the hook prevents it entirely.",
-    "duration": 12.21,
+    "text": "Some commands are dangerous no matter what. g-h p-r diff returns raw patch text \u2014 not something an agent can act on reliably. The hook hard-blocks it with exit code 2. The tool call never reaches the shell.",
+    "duration": 12.17,
     "clip": "redirect-epic_hook_block.mp3"
   },
   {
     "name": "hook_advisory",
-    "text": "git diff between refs gets an advisory instead. The hook lets it through \u2014 exit code zero, no interruption \u2014 but injects a redirect suggestion: call get change manifest instead for structured output.",
-    "duration": 12.82,
+    "text": "git diff between refs gets a softer touch. The hook lets it through \u2014 exit code zero \u2014 but injects a suggestion: use get change manifest instead. The agent still gets its answer, just through a structured path next time.",
+    "duration": 13.84,
     "clip": "redirect-epic_hook_advisory.mp3"
   },
   {
     "name": "hook_silent",
-    "text": "A plain echo command passes through silently. No output, no delay. The tokenizer is Python's shlex, so compound commands, subshells, and pipelines all parse structurally instead of by fragile regex patterns.",
-    "duration": 12.35,
+    "text": "A plain echo command passes through silently. No output, no delay. The tokenizer uses Python's shlex library, so compound commands, subshells, and pipelines all parse structurally rather than by fragile regex.",
+    "duration": 12.31,
     "clip": "redirect-epic_hook_silent.mp3"
   },
   {
     "name": "hook_install",
     "text": "Installing is one command: git-prism hooks install. It copies the hook scripts into your dot claude hooks directory and writes a PreToolUse entry into Claude Code's settings dot json. User scope is the default because it covers both top-level agents and subagents equally.",
-    "duration": 16.9,
+    "duration": 17.23,
     "clip": "redirect-epic_hook_install.mp3"
   },
   {
-    "name": "git_diff_problem",
-    "text": "Now for the second half of the story. Here is git diff on a real commit in git-prism's own repo \u2014 hunk headers, plus and minus prefixes, whitespace context. A format built for humans reading patches in a terminal, not for agents trying to act on the data.",
-    "duration": 16.44,
-    "clip": "redirect-epic_git_diff_problem.mp3"
-  },
-  {
     "name": "review_change",
-    "text": "git-prism manifest returns the same information as structured JSON \u2014 per-file metadata, line counts, function-level changes, no at-sign-at noise. Add git-prism context and you get callers, callees, and a blast-radius risk score for every changed function. The MCP tool review change combines both in one call.",
-    "duration": 18.76,
+    "text": "git-prism manifest returns the same information as structured JSON \u2014 per-file metadata, line counts, function-level changes, no hunk noise. Add git-prism context and you get callers, callees, and a blast-radius risk score for every changed function. The MCP tool review change combines both in one call.",
+    "duration": 20.67,
     "clip": "redirect-epic_review_change.mp3"
   },
   {
     "name": "closing",
-    "text": "git-prism v 0.7.0. Redirect protection for agentic bash sessions plus agent-native git data. Install with brew install git-prism or cargo install git-prism. Source and docs at github dot com slash mike lane slash git-prism.",
-    "duration": 14.58,
+    "text": "git-prism v 0.7.0. A redirect hook that meets Claude where its training leads, and agent-native git data when it gets there. Install with brew install git-prism or cargo install git-prism. Source and docs at github dot com slash mike lane slash git-prism.",
+    "duration": 16.86,
     "clip": "redirect-epic_closing.mp3"
   }
 ]

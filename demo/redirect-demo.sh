@@ -4,16 +4,9 @@ set -euo pipefail
 # Capstone demo for git-prism v0.7.0 redirect-hook epic (issue #242).
 #
 # Three segments:
-#   1. Before — a direct shell redirect silently clobbers a tracked file.
-#   2. How the hook works — drive the bundled tokenizer over its stdin/stdout
-#      protocol to show advisory + block decisions, then run the install
-#      ceremony.
-#   3. review_change vs git diff — contrast raw porcelain text with the
-#      structured manifest + context output git-prism produces for agents.
-#
-# The script is idempotent: running it twice from a fresh checkout produces
-# the same output. Sandbox repos are created in $TMPDIR via mktemp -d and
-# cleaned up via trap.
+#   1. The training problem — Claude's git muscle memory overrides MCP registration.
+#   2. How the hook works — drive the tokenizer over stdin/stdout, then install.
+#   3. The payoff — structured manifest + context output replacing raw diffs.
 #
 # Sleep values are calibrated from demo/recordings/v0.7.0/redirect-epic_timing.json
 # so each segment stays in sync with the narration audio track.
@@ -27,10 +20,6 @@ YELLOW='\033[1;33m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-# Resolve the repo root from this script's location so the demo runs from
-# any working directory — the existing demo/demo.sh hard-codes the path,
-# but locating the repo dynamically keeps this script idempotent across
-# checkouts.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$REPO_ROOT/target/release/git-prism"
@@ -59,44 +48,23 @@ fi
 echo -e "${GREEN}✓ $("$BINARY" --version 2>/dev/null)${RESET}"
 echo ""
 
-# === SEGMENT 1: BEFORE — THE PROBLEM ===
+# === SEGMENT 1: THE TRAINING PROBLEM ===
 echo -e "${BLUE}╔══════════════════════════════════════════╗${RESET}"
-echo -e "${BLUE}║${RESET}  ${CYAN}Segment 1: Before — the problem${RESET}        ${BLUE}║${RESET}"
+echo -e "${BLUE}║${RESET}  ${CYAN}Segment 1: The training problem${RESET}        ${BLUE}║${RESET}"
 echo -e "${BLUE}╚══════════════════════════════════════════╝${RESET}\n"
 
-SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$SANDBOX"' EXIT
+echo -e "${DIM}# git-prism is registered as an MCP server. Five structured tools.${RESET}"
+echo -e "${DIM}# But Claude was trained on millions of git commands.${RESET}"
+echo -e "${DIM}# That muscle memory does not go away just because an MCP server is installed.${RESET}\n"
+sleep 16.4  # hook_intro: 18.7s - 2.3s display
 
-(
-    cd "$SANDBOX"
-    git init -q
-    git config user.email "demo@example.com"
-    git config user.name "Demo"
-    cat > notes.md <<'EOF'
-# Project notes
-
-Important research findings the agent should NOT lose.
-EOF
-    git add notes.md
-    git commit -q -m "add notes"
-)
-
-echo -e "${DIM}# A tracked file with content the agent must preserve.${RESET}"
-type_cmd "cat notes.md"
-cat "$SANDBOX/notes.md"
-echo ""
-sleep 12.0  # problem_intro: 12.4s
-
-echo -e "${DIM}# A bash redirect issued in an agentic session — no warning, no diff.${RESET}"
-type_cmd 'echo "overwritten content" > notes.md'
-(cd "$SANDBOX" && echo "overwritten content" > notes.md)
-sleep 0.5
-
-echo -e "${DIM}# The original content is gone.${RESET}"
-type_cmd "cat notes.md"
-cat "$SANDBOX/notes.md"
-echo -e "\n${RED}✗ Tracked file silently clobbered. No prompt, no recovery path.${RESET}\n"
-sleep 15.0  # problem_clobber: 16.2s
+echo -e "${DIM}# Claude reaches for git diff — exactly as its training taught it.${RESET}"
+type_cmd "git diff HEAD~1..HEAD"
+(cd "$REPO_ROOT" && git --no-pager diff HEAD~1..HEAD | head -25) || true  # repo may have only one commit in a fresh checkout
+echo -e "${DIM}  ... (truncated for demo) ...${RESET}"
+echo -e "\n${DIM}# Hunk headers, plus and minus prefixes — for humans, not agents.${RESET}"
+echo -e "${DIM}# Five structured tools, one tool call away. Unused.${RESET}\n"
+sleep 16.9  # git_diff_problem: 17.9s - 1s display
 
 # === SEGMENT 2: HOW THE HOOK WORKS ===
 echo -e "${BLUE}╔══════════════════════════════════════════╗${RESET}"
@@ -105,10 +73,9 @@ echo -e "${BLUE}╚════════════════════�
 
 echo -e "${DIM}# The hook is a Claude Code PreToolUse program. It reads a JSON${RESET}"
 echo -e "${DIM}# payload on stdin and decides via exit code: 0 allow, 0+JSON${RESET}"
-echo -e "${DIM}# advisory, 2 block. Drive it directly to see each state.${RESET}\n"
-sleep 14.3  # hook_intro: 14.6s
+echo -e "${DIM}# advisory, 2 block.${RESET}\n"
 
-echo -e "${YELLOW}# Block: gh pr diff returns raw text an agent can't use — exit 2 stops it cold.${RESET}"
+echo -e "${YELLOW}# Block: gh pr diff returns raw text — exit 2 stops it cold.${RESET}"
 type_cmd 'echo {...gh pr diff 123...} | python3 hooks/bash_redirect_hook.py'
 set +e
 echo '{"tool_name":"Bash","tool_input":{"command":"gh pr diff 123"}}' \
@@ -116,9 +83,9 @@ echo '{"tool_name":"Bash","tool_input":{"command":"gh pr diff 123"}}' \
 BLOCK_EXIT=$?
 set -e
 echo -e "${RED}exit code: $BLOCK_EXIT${RESET}\n"
-sleep 12.0  # hook_block: 12.2s
+sleep 9.2  # hook_block: 12.2s - 3s display
 
-echo -e "${YELLOW}# Advisory: git diff redirected to get_change_manifest — exit 0, no interruption.${RESET}"
+echo -e "${YELLOW}# Advisory: git diff gets a nudge toward get_change_manifest — exit 0.${RESET}"
 type_cmd 'echo {...git diff main..HEAD...} | python3 hooks/bash_redirect_hook.py'
 set +e
 echo '{"tool_name":"Bash","tool_input":{"command":"git diff main..HEAD"}}' \
@@ -126,7 +93,7 @@ echo '{"tool_name":"Bash","tool_input":{"command":"git diff main..HEAD"}}' \
 ADVISORY_EXIT=$?
 set -e
 echo -e "${GREEN}exit code: $ADVISORY_EXIT${RESET}\n"
-sleep 12.5  # hook_advisory: 12.8s
+sleep 10.8  # hook_advisory: 13.8s - 3s display
 
 echo -e "${YELLOW}# Silent: a benign command — no output, exit 0.${RESET}"
 type_cmd 'echo {...echo hello world...} | python3 hooks/bash_redirect_hook.py'
@@ -136,14 +103,14 @@ echo '{"tool_name":"Bash","tool_input":{"command":"echo hello world"}}' \
 SILENT_EXIT=$?
 set -e
 echo -e "${GREEN}exit code: $SILENT_EXIT (no stdout/stderr)${RESET}\n"
-sleep 12.0  # hook_silent: 12.3s
+sleep 9.3  # hook_silent: 12.3s - 3s display
 
 echo -e "${BLUE}--- Install ceremony ---${RESET}\n"
-echo -e "${DIM}# git-prism ships the install command itself — one shot, idempotent.${RESET}"
+echo -e "${DIM}# git-prism ships the install command — one shot, idempotent.${RESET}"
 type_cmd "git-prism hooks status"
 "$BINARY" hooks status || true  # non-zero expected when hook is not yet installed; demo continues
 echo ""
-sleep 1.5  # intentional pause after status output
+sleep 1.5
 
 type_cmd "git-prism hooks install --scope user --dry-run  # filter to git-prism entries"
 echo -e "${DIM}# Dry-run prints the full merged settings.json. Filtering down to${RESET}"
@@ -162,40 +129,34 @@ for entry in matchers:
 print(json.dumps(prism_hooks, indent=2))
 '
 echo ""
-sleep 2.5  # intentional pause: let viewer read the JSON
+sleep 2.5
 
 echo -e "${DIM}# Drop --dry-run to write ~/.claude/settings.json + copy hook scripts${RESET}"
 echo -e "${DIM}# into ~/.claude/hooks/. Default scope is user (subagent compatibility).${RESET}\n"
-sleep 8.0  # hook_install remainder: 16.9s total
+sleep 8.6  # hook_install: 17.2s - 8.6s display
 
-# === SEGMENT 3: review_change vs git diff ===
+# === SEGMENT 3: STRUCTURED PAYOFF ===
 echo -e "${BLUE}╔══════════════════════════════════════════╗${RESET}"
-echo -e "${BLUE}║${RESET}  ${CYAN}Segment 3: review_change vs git diff${RESET}   ${BLUE}║${RESET}"
+echo -e "${BLUE}║${RESET}  ${CYAN}Segment 3: The structured payoff${RESET}       ${BLUE}║${RESET}"
 echo -e "${BLUE}╚══════════════════════════════════════════╝${RESET}\n"
 
-echo -e "${DIM}# Inside git-prism's own repo. First the porcelain agents reach for.${RESET}"
-type_cmd "git diff HEAD~1..HEAD"
-(cd "$REPO_ROOT" && git --no-pager diff HEAD~1..HEAD | head -25) || true  # repo may have only one commit in a fresh checkout
-echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
-sleep 15.0  # git_diff_problem: 16.4s
-
-echo -e "${DIM}# Same change, structured per-file metadata — no @@ hunks, no +/- noise.${RESET}"
+echo -e "${DIM}# Same change range. Instead of raw diff, structured per-file metadata.${RESET}"
 type_cmd "git-prism manifest HEAD~1..HEAD"
 (cd "$REPO_ROOT" && "$BINARY" manifest HEAD~1..HEAD 2>/dev/null \
     | python3 -m json.tool | head -30) || true  # tolerate single-commit repos in demo environments
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
-sleep 17.0  # review_change: 18.8s
+sleep 17.7  # review_change: 20.7s - 3s display
 
-echo -e "${DIM}# Function context: callers, callees, blast radius. The MCP tool${RESET}"
-echo -e "${DIM}# review_change combines manifest + context in one call.${RESET}"
+echo -e "${DIM}# git-prism context adds callers, callees, and blast-radius risk per function.${RESET}"
+echo -e "${DIM}# The MCP tool review_change combines manifest + context in one call.${RESET}"
 type_cmd "git-prism context HEAD~1..HEAD"
 (cd "$REPO_ROOT" && "$BINARY" context HEAD~1..HEAD 2>/dev/null \
     | python3 -m json.tool | head -25) || true  # tolerate single-commit repos in demo environments
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
-sleep 7.0  # closing first portion
+sleep 4.0  # closing first portion: context output reading time
 
 echo -e "${BLUE}╔══════════════════════════════════════════╗${RESET}"
 echo -e "${BLUE}║${RESET}  ${GREEN}git-prism v0.7.0${RESET} — bundled redirect hook ${BLUE}║${RESET}"
 echo -e "${BLUE}║${RESET}  ${CYAN}github.com/mikelane/git-prism${RESET}            ${BLUE}║${RESET}"
 echo -e "${BLUE}╚══════════════════════════════════════════╝${RESET}\n"
-sleep 10.0  # closing: 14.6s — extra buffer ensures video outlasts 147.3s audio
+sleep 11.0  # closing: 16.9s - 5.8s display + 4s buffer
