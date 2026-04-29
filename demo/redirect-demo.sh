@@ -52,6 +52,10 @@ if [[ ! -x "$BINARY" ]]; then
     echo -e "${RED}✗ Binary not found at $BINARY — run: cargo build --release${RESET}" >&2
     exit 1
 fi
+if [[ ! -f "$HOOK_PYTHON" ]]; then
+    echo -e "${RED}✗ Hook not found at $HOOK_PYTHON — are you on the right branch?${RESET}" >&2
+    exit 1
+fi
 echo -e "${GREEN}✓ $("$BINARY" --version 2>/dev/null)${RESET}"
 echo ""
 
@@ -119,9 +123,9 @@ type_cmd 'echo {...git diff main..HEAD...} | python3 hooks/bash_redirect_hook.py
 set +e
 echo '{"tool_name":"Bash","tool_input":{"command":"git diff main..HEAD"}}' \
     | python3 "$HOOK_PYTHON"
-ADVISE_EXIT=$?
+ADVISORY_EXIT=$?
 set -e
-echo -e "${GREEN}exit code: $ADVISE_EXIT${RESET}\n"
+echo -e "${GREEN}exit code: $ADVISORY_EXIT${RESET}\n"
 sleep 12.5  # hook_advisory: 12.8s
 
 echo -e "${YELLOW}# Silent: a benign command — no output, exit 0.${RESET}"
@@ -137,7 +141,7 @@ sleep 12.0  # hook_silent: 12.3s
 echo -e "${BLUE}--- Install ceremony ---${RESET}\n"
 echo -e "${DIM}# git-prism ships the install command itself — one shot, idempotent.${RESET}"
 type_cmd "git-prism hooks status"
-"$BINARY" hooks status || true
+"$BINARY" hooks status || true  # non-zero expected when hook is not yet installed; demo continues
 echo ""
 sleep 1.5  # intentional pause after status output
 
@@ -171,14 +175,14 @@ echo -e "${BLUE}╚════════════════════�
 
 echo -e "${DIM}# Inside git-prism's own repo. First the porcelain agents reach for.${RESET}"
 type_cmd "git diff HEAD~1..HEAD"
-(cd "$REPO_ROOT" && git --no-pager diff HEAD~1..HEAD | head -25) || true
+(cd "$REPO_ROOT" && git --no-pager diff HEAD~1..HEAD | head -25) || true  # repo may have only one commit in a fresh checkout
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
 sleep 15.0  # git_diff_problem: 16.4s
 
 echo -e "${DIM}# Same change, structured per-file metadata — no @@ hunks, no +/- noise.${RESET}"
 type_cmd "git-prism manifest HEAD~1..HEAD"
 (cd "$REPO_ROOT" && "$BINARY" manifest HEAD~1..HEAD 2>/dev/null \
-    | python3 -m json.tool | head -30) || true
+    | python3 -m json.tool | head -30) || true  # tolerate single-commit repos in demo environments
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
 sleep 17.0  # review_change: 18.8s
 
@@ -186,7 +190,7 @@ echo -e "${DIM}# Function context: callers, callees, blast radius. The MCP tool$
 echo -e "${DIM}# review_change combines manifest + context in one call.${RESET}"
 type_cmd "git-prism context HEAD~1..HEAD"
 (cd "$REPO_ROOT" && "$BINARY" context HEAD~1..HEAD 2>/dev/null \
-    | python3 -m json.tool | head -25) || true
+    | python3 -m json.tool | head -25) || true  # tolerate single-commit repos in demo environments
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
 sleep 7.0  # closing first portion
 

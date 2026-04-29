@@ -52,6 +52,15 @@ MARKDOWN_HEADING_IN_BODY = re.compile(r"^#{1,6}[ \t]", re.MULTILINE)
 MARKDOWN_INLINE_SYNTAX = re.compile(r"[*`\[\]_]")
 
 
+def validate_demo_name(value: str) -> str:
+    """Argparse type validator: demo name must be alphanumeric, hyphens, underscores."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise argparse.ArgumentTypeError(
+            f"Demo name {value!r} must contain only letters, digits, hyphens, and underscores"
+        )
+    return value
+
+
 def parse_segments(script_path: Path) -> list[dict[str, str]]:
     """Parse a narration script into labeled TTS segments.
 
@@ -151,19 +160,47 @@ def generate_segment_audio(
         body = exc.read().decode("utf-8", errors="replace")
         print(f"  ElevenLabs API error (HTTP {exc.code}): {body}", file=sys.stderr)
         sys.exit(1)
+    except OSError as exc:
+        print(
+            f"ERROR: failed to write audio clip {output_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def get_audio_duration(path: Path) -> float:
     """Get duration of an audio file in seconds using ffprobe."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0", str(path),
-        ],
-        capture_output=True, text=True, check=True,
-    )
-    return float(result.stdout.strip())
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True, text=True, check=True,
+        )
+    except FileNotFoundError:
+        print(
+            "ERROR: ffprobe not found. Install ffmpeg (e.g. brew install ffmpeg).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"ERROR: ffprobe failed on {path} (exit {exc.returncode}):\n{exc.stderr}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    raw = result.stdout.strip()
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"ERROR: ffprobe returned unexpected output for {path!r}: {raw!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def concatenate_audio(clip_paths: list[Path], output_path: Path) -> None:
@@ -172,28 +209,39 @@ def concatenate_audio(clip_paths: list[Path], output_path: Path) -> None:
     list_file.write_text(
         "\n".join(f"file '{p.resolve()}'" for p in clip_paths) + "\n"
     )
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(list_file), "-c", "copy", str(output_path),
-        ],
-        capture_output=True, check=True,
-    )
-    list_file.unlink()
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", str(list_file), "-c", "copy", str(output_path),
+            ],
+            capture_output=True, check=True,
+        )
+    except FileNotFoundError:
+        list_file.unlink(missing_ok=True)
+        print(
+            "ERROR: ffmpeg not found. Install ffmpeg (e.g. brew install ffmpeg).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except subprocess.CalledProcessError as exc:
+        list_file.unlink(missing_ok=True)
+        print(
+            f"ERROR: ffmpeg failed concatenating audio (exit {exc.returncode}):\n"
+            f"{exc.stderr.decode('utf-8', errors='replace') if isinstance(exc.stderr, bytes) else exc.stderr}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    else:
+        list_file.unlink(missing_ok=True)
 
 
-def generate_playwright_skeleton(
-    timing: list[dict[str, float | str]],
-    output_path: Path,
-    demo_name: str,
-    base_url: str,
-) -> None:
-    """Generate a Playwright test skeleton with timing values from narration."""
+def _playwright_segment_blocks(timing: list[dict[str, float | str]]) -> str:
+    """Build the per-segment waitForTimeout blocks for the Playwright template."""
     segments_code = []
     for i, t in enumerate(timing):
         name = t["name"]
         duration = t["duration"]
-        # Add buffer to the last segment so video outlasts narration
         buffer_comment = ""
         buffer_value = 0
         if i == len(timing) - 1:
@@ -205,12 +253,18 @@ def generate_playwright_skeleton(
             f'    // TODO: Add actions for "{name}" segment\n'
             f'    await page.waitForTimeout({total_ms});'
         )
+    return "\n\n".join(segments_code)
 
-    segments_block = "\n\n".join(segments_code)
-    total = sum(float(t["duration"]) for t in timing)
-    timeout_ms = round((total + 30) * 1000)  # 30s margin for test timeout
 
-    content = f'''\
+def _playwright_template(
+    demo_name: str,
+    base_url: str,
+    total: float,
+    timeout_ms: int,
+    segments_block: str,
+) -> str:
+    """Render the full Playwright spec file content."""
+    return f'''\
 /**
  * {demo_name} - Playwright demo recording, timing synced to narration segments
  *
@@ -262,15 +316,34 @@ test.describe("{demo_name} Demo", () => {{
   }});
 }});
 '''
-    output_path.write_text(content)
 
 
-def main() -> None:
+def generate_playwright_skeleton(
+    timing: list[dict[str, float | str]],
+    output_path: Path,
+    demo_name: str,
+    base_url: str,
+) -> None:
+    """Generate a Playwright test skeleton with timing values from narration."""
+    segments_block = _playwright_segment_blocks(timing)
+    total = sum(float(t["duration"]) for t in timing)
+    timeout_ms = round((total + 30) * 1000)  # 30s margin for test timeout
+    output_path.write_text(
+        _playwright_template(demo_name, base_url, total, timeout_ms, segments_block)
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Build narration-synced demo audio from a segmented script."
     )
     parser.add_argument("script", type=Path, help="Path to narration script (.md)")
-    parser.add_argument("name", help="Demo name (used for output file naming)")
+    parser.add_argument(
+        "name",
+        type=validate_demo_name,
+        help="Demo name (used for output file naming; alphanumeric, hyphens, underscores only)",
+    )
     parser.add_argument(
         "--output-dir", type=Path, default=Path("recordings"),
         help="Directory for output files (default: ./recordings)",
@@ -296,42 +369,22 @@ def main() -> None:
         "--strict", action="store_true",
         help="Exit non-zero if the linter emits WARN findings.",
     )
-    args = parser.parse_args()
+    return parser
 
-    if not args.script.exists():
-        print(f"Script not found: {args.script}", file=sys.stderr)
-        sys.exit(1)
 
-    # Step 1: Parse segments (cheap, no API yet)
-    segments = parse_segments(args.script)
-    if not segments:
-        print("No segments found in script", file=sys.stderr)
-        sys.exit(1)
-    print(f"Found {len(segments)} narration segments")
-
-    # Step 1b: Lint for TTS-unsafe content (markdown headings, stray comments,
-    # inline markdown syntax). Fires before any API call.
-    warnings = lint_segments(segments)
-
-    if args.dry_run:
-        print("\n--- Dry run: the following text would be sent to TTS ---")
-        for seg in segments:
-            print(f"\n=== SEGMENT: {seg['name']} ({len(seg['text'])} chars) ===")
-            print(seg["text"])
-        print("\n--- End of dry run. No audio generated. ---")
-        if args.strict and warnings:
-            sys.exit(2)
-        return
-
-    if args.strict and warnings:
-        print(
-            f"\n{warnings} contamination warning(s) in --strict mode. "
-            "Fix the narration or rerun without --strict.",
-            file=sys.stderr,
-        )
+def run_dry_run(segments: list[dict[str, str]], strict: bool, warnings: int) -> None:
+    """Print segment texts that would be sent to TTS, then exit."""
+    print("\n--- Dry run: the following text would be sent to TTS ---")
+    for seg in segments:
+        print(f"\n=== SEGMENT: {seg['name']} ({len(seg['text'])} chars) ===")
+        print(seg["text"])
+    print("\n--- End of dry run. No audio generated. ---")
+    if strict and warnings:
         sys.exit(2)
 
-    # Env vars required only for real runs, not dry-run.
+
+def validate_env() -> tuple[str, str]:
+    """Read and validate ElevenLabs credentials from environment. Exits on failure."""
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     voice_id = os.environ.get("ELEVENLABS_VOICE_ID")
     if not api_key or not voice_id:
@@ -340,21 +393,25 @@ def main() -> None:
     if not re.fullmatch(r"[A-Za-z0-9]+", voice_id):
         print("ELEVENLABS_VOICE_ID must be alphanumeric", file=sys.stderr)
         sys.exit(1)
+    return api_key, voice_id
 
-    output_dir = args.output_dir
-    clips_dir = output_dir / "clips"
-    clips_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 2: Generate audio for each segment
+def generate_audio_clips(
+    segments: list[dict[str, str]],
+    clips_dir: Path,
+    name: str,
+    api_key: str,
+    voice_id: str,
+) -> tuple[list[dict[str, float | str]], list[Path]]:
+    """Generate audio for each segment and measure durations. Returns (timing, clip_paths)."""
     timing: list[dict[str, float | str]] = []
     clip_paths: list[Path] = []
 
     for seg in segments:
-        clip_path = clips_dir / f"{args.name}_{seg['name']}.mp3"
+        clip_path = clips_dir / f"{name}_{seg['name']}.mp3"
         print(f"  Generating: {seg['name']} ({len(seg['text'])} chars)")
         generate_segment_audio(seg["text"], clip_path, api_key, voice_id)
 
-        # Step 3: Measure duration
         duration = get_audio_duration(clip_path)
         print(f"    Duration: {duration:.1f}s")
 
@@ -366,28 +423,73 @@ def main() -> None:
         })
         clip_paths.append(clip_path)
 
-    # Step 4: Write timing JSON
-    timing_path = output_dir / f"{args.name}_timing.json"
+    return timing, clip_paths
+
+
+def write_timing_and_summary(
+    timing: list[dict[str, float | str]],
+    clip_paths: list[Path],
+    output_dir: Path,
+    name: str,
+) -> None:
+    """Write timing JSON, concatenate narration track, and print the summary table."""
+    timing_path = output_dir / f"{name}_timing.json"
     timing_path.write_text(json.dumps(timing, indent=2) + "\n")
     print(f"\nTiming written to {timing_path}")
 
     total = sum(float(t["duration"]) for t in timing)
     print(f"Total narration: {total:.1f}s")
 
-    # Step 5: Concatenate into one narration track
-    narration_path = output_dir / f"{args.name}-narration.mp3"
+    narration_path = output_dir / f"{name}-narration.mp3"
     concatenate_audio(clip_paths, narration_path)
     print(f"Combined narration: {narration_path}")
 
-    # Print timing summary for demo script generation
     print("\n--- Segment Timing (use for demo script sleep values) ---")
     for t in timing:
         text_preview = str(t["text"])[:60]
         print(f"  {t['name']:20s}  {float(t['duration']):5.1f}s  \"{text_preview}...\"")
 
-    # Step 6 (optional): Generate Playwright demo skeleton
+
+def main() -> None:
+    args = build_parser().parse_args()
+
+    if not args.script.exists():
+        print(f"Script not found: {args.script}", file=sys.stderr)
+        sys.exit(1)
+
+    segments = parse_segments(args.script)
+    if not segments:
+        print("No segments found in script", file=sys.stderr)
+        sys.exit(1)
+    print(f"Found {len(segments)} narration segments")
+
+    warnings = lint_segments(segments)
+
+    if args.dry_run:
+        run_dry_run(segments, args.strict, warnings)
+        return
+
+    if args.strict and warnings:
+        print(
+            f"\n{warnings} contamination warning(s) in --strict mode. "
+            "Fix the narration or rerun without --strict.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    api_key, voice_id = validate_env()
+
+    clips_dir = args.output_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    timing, clip_paths = generate_audio_clips(
+        segments, clips_dir, args.name, api_key, voice_id
+    )
+
+    write_timing_and_summary(timing, clip_paths, args.output_dir, args.name)
+
     if args.playwright:
-        pw_path = output_dir / f"{args.name}-demo.spec.ts"
+        pw_path = args.output_dir / f"{args.name}-demo.spec.ts"
         generate_playwright_skeleton(timing, pw_path, args.name, args.base_url)
         print(f"\nPlaywright skeleton: {pw_path}")
 
