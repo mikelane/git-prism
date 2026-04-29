@@ -4,6 +4,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::treesitter::finalize_hex;
+
 /// SHA-256 hash of the canonicalized absolute path, hex-encoded.
 /// Deterministic: same path always produces the same hash.
 ///
@@ -15,7 +17,7 @@ pub fn hash_repo_path(path: &Path) -> String {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
-    format!("{:x}", hasher.finalize())
+    finalize_hex(hasher)
 }
 
 /// Bounded enum representing the pattern of a git ref string.
