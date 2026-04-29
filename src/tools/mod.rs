@@ -218,33 +218,89 @@ mod tests {
     fn create_repo_with_many_files(file_count: usize) -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
-        Command::new("git").args(["init", "--initial-branch=main"]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Test User"]).current_dir(&path).output().unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
         std::fs::write(path.join("README.md"), "# base\n").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "base commit"]).current_dir(&path).output().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "base commit"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
         for i in 0..file_count {
             std::fs::write(path.join(format!("file_{i}.txt")), format!("content {i}\n")).unwrap();
         }
-        Command::new("git").args(["add", "."]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "add many files"]).current_dir(&path).output().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add many files"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
         (dir, path)
     }
 
     fn create_repo_with_many_commits(commit_count: usize) -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
-        Command::new("git").args(["init", "--initial-branch=main"]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Test User"]).current_dir(&path).output().unwrap();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
         std::fs::write(path.join("README.md"), "# anchor\n").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(&path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "anchor"]).current_dir(&path).output().unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "anchor"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
         for i in 0..commit_count {
             std::fs::write(path.join(format!("file_{i}.txt")), format!("content {i}\n")).unwrap();
-            Command::new("git").args(["add", "."]).current_dir(&path).output().unwrap();
-            Command::new("git").args(["commit", "-m", &format!("commit {i}")]).current_dir(&path).output().unwrap();
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            Command::new("git")
+                .args(["commit", "-m", &format!("commit {i}")])
+                .current_dir(&path)
+                .output()
+                .unwrap();
         }
         (dir, path)
     }
@@ -252,7 +308,12 @@ mod tests {
     #[test]
     fn collect_all_manifest_pages_returns_all_files_when_single_page() {
         let (_dir, path) = create_repo_with_many_files(3);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 500).unwrap();
         assert_eq!(result.files.len(), 3);
         assert!(result.pagination.next_cursor.is_none());
@@ -262,7 +323,12 @@ mod tests {
     #[test]
     fn collect_all_manifest_pages_collects_across_multiple_pages() {
         let (_dir, path) = create_repo_with_many_files(5);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 2).unwrap();
         assert_eq!(result.files.len(), 5);
         assert!(result.pagination.next_cursor.is_none());
@@ -272,7 +338,12 @@ mod tests {
     #[test]
     fn collect_all_manifest_pages_preserves_metadata_from_first_page() {
         let (_dir, path) = create_repo_with_many_files(5);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 2).unwrap();
         assert_eq!(result.metadata.base_ref, "HEAD~1");
         assert_eq!(result.metadata.head_ref, "HEAD");
@@ -283,7 +354,12 @@ mod tests {
     #[test]
     fn collect_all_manifest_pages_with_page_size_1() {
         let (_dir, path) = create_repo_with_many_files(3);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_manifest_pages(&path, "HEAD~1", "HEAD", &options, 1).unwrap();
         assert_eq!(result.files.len(), 3);
         assert!(result.pagination.next_cursor.is_none());
@@ -292,7 +368,12 @@ mod tests {
     #[test]
     fn collect_all_history_pages_returns_all_commits_when_single_page() {
         let (_dir, path) = create_repo_with_many_commits(3);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 500).unwrap();
         assert_eq!(result.commits.len(), 3);
         assert!(result.pagination.next_cursor.is_none());
@@ -302,7 +383,12 @@ mod tests {
     #[test]
     fn collect_all_history_pages_collects_across_multiple_pages() {
         let (_dir, path) = create_repo_with_many_commits(5);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_history_pages(&path, "HEAD~5", "HEAD", &options, 2).unwrap();
         assert_eq!(result.commits.len(), 5);
         assert!(result.pagination.next_cursor.is_none());
@@ -312,7 +398,12 @@ mod tests {
     #[test]
     fn collect_all_history_pages_preserves_commit_order() {
         let (_dir, path) = create_repo_with_many_commits(4);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_history_pages(&path, "HEAD~4", "HEAD", &options, 2).unwrap();
         assert_eq!(result.commits.len(), 4);
         assert_eq!(result.commits[0].metadata.message, "commit 0");
@@ -324,7 +415,12 @@ mod tests {
     #[test]
     fn collect_all_history_pages_with_page_size_1() {
         let (_dir, path) = create_repo_with_many_commits(3);
-        let options = ManifestOptions { include_patterns: vec![], exclude_patterns: vec![], include_function_analysis: false, max_response_tokens: None };
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
         let result = collect_all_history_pages(&path, "HEAD~3", "HEAD", &options, 1).unwrap();
         assert_eq!(result.commits.len(), 3);
         assert!(result.pagination.next_cursor.is_none());

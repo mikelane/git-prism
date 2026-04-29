@@ -457,5 +457,4 @@ mod tests {
         let result = validate_commit_range(&ref_range, "snapshot");
         assert!(result.is_ok());
     }
-
 }

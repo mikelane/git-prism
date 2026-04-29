@@ -1026,13 +1026,25 @@ mod tests {
         let mut stdin = std::io::empty();
         let mut stdout_buf = Vec::<u8>::new();
         let mut stderr_buf = Vec::<u8>::new();
-        let code =
-            install_redirect_hook(&options, home, home, &mut stdin, &mut stdout_buf, &mut stderr_buf)
-                .unwrap();
+        let code = install_redirect_hook(
+            &options,
+            home,
+            home,
+            &mut stdin,
+            &mut stdout_buf,
+            &mut stderr_buf,
+        )
+        .unwrap();
         assert_eq!(code, 0);
         let out = String::from_utf8(stdout_buf).unwrap();
-        assert!(out.contains("Installed"), "expected 'Installed' in stdout, got: {out:?}");
-        assert!(out.contains("user"), "expected scope 'user' in stdout, got: {out:?}");
+        assert!(
+            out.contains("Installed"),
+            "expected 'Installed' in stdout, got: {out:?}"
+        );
+        assert!(
+            out.contains("user"),
+            "expected scope 'user' in stdout, got: {out:?}"
+        );
         assert!(
             String::from_utf8(stderr_buf).unwrap().is_empty(),
             "expected empty stderr on fresh install"
@@ -1057,9 +1069,15 @@ mod tests {
         let mut stdin2 = std::io::empty();
         let mut stdout_buf = Vec::<u8>::new();
         let mut stderr_buf = Vec::<u8>::new();
-        let code =
-            install_redirect_hook(&options, home, cwd, &mut stdin2, &mut stdout_buf, &mut stderr_buf)
-                .unwrap();
+        let code = install_redirect_hook(
+            &options,
+            home,
+            cwd,
+            &mut stdin2,
+            &mut stdout_buf,
+            &mut stderr_buf,
+        )
+        .unwrap();
         assert_eq!(code, 0);
         assert!(
             String::from_utf8(stdout_buf).unwrap().is_empty(),
@@ -1085,16 +1103,29 @@ mod tests {
         });
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
-        let options = InstallOptions { scope: Scope::User, dry_run: false, force: false };
+        let options = InstallOptions {
+            scope: Scope::User,
+            dry_run: false,
+            force: false,
+        };
         let mut stdin = std::io::empty();
         let mut stdout_buf = Vec::<u8>::new();
         let mut stderr_buf = Vec::<u8>::new();
-        let code =
-            install_redirect_hook(&options, home, cwd, &mut stdin, &mut stdout_buf, &mut stderr_buf)
-                .unwrap();
+        let code = install_redirect_hook(
+            &options,
+            home,
+            cwd,
+            &mut stdin,
+            &mut stdout_buf,
+            &mut stderr_buf,
+        )
+        .unwrap();
         assert_eq!(code, 0);
         let out = String::from_utf8(stdout_buf).unwrap();
-        assert!(out.contains("skipped"), "expected 'skipped' in stdout, got: {out:?}");
+        assert!(
+            out.contains("skipped"),
+            "expected 'skipped' in stdout, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1109,17 +1140,33 @@ mod tests {
         });
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
-        let options = InstallOptions { scope: Scope::User, dry_run: false, force: false };
+        let options = InstallOptions {
+            scope: Scope::User,
+            dry_run: false,
+            force: false,
+        };
         let mut stdin = std::io::empty();
         let mut stdout_buf = Vec::<u8>::new();
         let mut stderr_buf = Vec::<u8>::new();
-        let code =
-            install_redirect_hook(&options, home, home, &mut stdin, &mut stdout_buf, &mut stderr_buf)
-                .unwrap();
+        let code = install_redirect_hook(
+            &options,
+            home,
+            home,
+            &mut stdin,
+            &mut stdout_buf,
+            &mut stderr_buf,
+        )
+        .unwrap();
         assert_eq!(code, 1, "downgrade must return exit code 1");
         let err = String::from_utf8(stderr_buf).unwrap();
-        assert!(err.contains("v2"), "stderr must name the blocking version, got: {err:?}");
-        assert!(err.contains("uninstall"), "stderr must mention 'uninstall', got: {err:?}");
+        assert!(
+            err.contains("v2"),
+            "stderr must name the blocking version, got: {err:?}"
+        );
+        assert!(
+            err.contains("uninstall"),
+            "stderr must mention 'uninstall', got: {err:?}"
+        );
     }
 
     fn sha256_of_file(path: &Path) -> String {
