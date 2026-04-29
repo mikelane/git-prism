@@ -33,7 +33,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::tools::context::{ContextOptions, build_function_context_with_options};
+use crate::tools::context::{build_function_context_with_options, ContextOptions};
 use crate::tools::manifest::{build_manifest, build_worktree_manifest};
 use crate::tools::types::{FunctionContextResponse, ManifestOptions, ManifestResponse, ToolError};
 
@@ -133,7 +133,11 @@ pub fn split_budget(budget: usize) -> (usize, usize) {
 /// expect: `0` becomes `None` (budget disabled), positive values become
 /// `Some(n)`.
 fn budget_to_option(value: usize) -> Option<usize> {
-    if value == 0 { None } else { Some(value) }
+    if value == 0 {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// Build a combined `review_change` response by orchestrating the manifest
@@ -188,21 +192,50 @@ pub fn build_review_change(
     let page_size = crate::pagination::clamp_page_size(args.page_size);
 
     let mut manifest = match args.head_ref.as_deref() {
-        Some(head) => build_manifest(
-            repo_path,
-            &args.base_ref,
-            head,
-            &manifest_options,
-            manifest_offset,
-            page_size,
-        )?,
-        None => build_worktree_manifest(
-            repo_path,
-            &args.base_ref,
-            &manifest_options,
-            manifest_offset,
-            page_size,
-        )?,
+        Some(head) => {
+            tracing::debug!(
+                base_ref = %args.base_ref,
+                head_ref = %head,
+                manifest_budget,
+                "review_change: building manifest half"
+            );
+            build_manifest(
+                repo_path,
+                &args.base_ref,
+                head,
+                &manifest_options,
+                manifest_offset,
+                page_size,
+            )
+            .inspect_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    sub_tool = "get_change_manifest",
+                    "review_change: manifest half failed"
+                );
+            })?
+        }
+        None => {
+            tracing::debug!(
+                base_ref = %args.base_ref,
+                manifest_budget,
+                "review_change: building worktree manifest half"
+            );
+            build_worktree_manifest(
+                repo_path,
+                &args.base_ref,
+                &manifest_options,
+                manifest_offset,
+                page_size,
+            )
+            .inspect_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    sub_tool = "get_change_manifest",
+                    "review_change: worktree manifest half failed"
+                );
+            })?
+        }
     };
     manifest.metadata.budget_tokens = Some(manifest_budget);
 
@@ -215,12 +248,21 @@ pub fn build_review_change(
                 function_names: args.function_names.clone(),
                 max_response_tokens: budget_to_option(context_budget),
             };
-            let mut response = build_function_context_with_options(
-                repo_path,
-                &args.base_ref,
-                head,
-                &context_opts,
-            )?;
+            tracing::debug!(
+                base_ref = %args.base_ref,
+                head_ref = %head,
+                context_budget,
+                "review_change: building function-context half"
+            );
+            let mut response =
+                build_function_context_with_options(repo_path, &args.base_ref, head, &context_opts)
+                    .inspect_err(|e| {
+                        tracing::error!(
+                            error = %e,
+                            sub_tool = "get_function_context",
+                            "review_change: function-context half failed"
+                        );
+                    })?;
             response.metadata.budget_tokens = Some(context_budget);
             response
         }
@@ -357,5 +399,97 @@ mod tests {
         let args: ReviewChangeArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.manifest_cursor.as_deref(), Some("tok-m"));
         assert_eq!(args.function_context_cursor.as_deref(), Some("tok-fc"));
+    }
+
+    #[test]
+    fn split_budget_at_10_yields_correct_floor_and_round() {
+        // budget = 10: 10 * 0.4 = 4.0 (floor = 4), 10 * 0.6 = 6.0 (round = 6).
+        // Triangulates a round number where both halves are integers — rules out
+        // an impl that rounds both shares or uses complement arithmetic (which
+        // would also produce (4, 6) here but fails at 4096 and 16384).
+        assert_eq!(split_budget(10), (4, 6));
+    }
+
+    #[test]
+    fn split_budget_at_5_exercises_half_token_rounding_boundary() {
+        // budget = 5: 5 * 0.4 = 2.0 (floor = 2), 5 * 0.6 = 3.0 (round = 3).
+        // The two values are exact here; included to document behaviour at a
+        // small odd boundary where complement arithmetic (5 - 2 = 3) coincides.
+        assert_eq!(split_budget(5), (2, 3));
+    }
+
+    #[test]
+    fn split_budget_manifest_plus_context_equals_or_near_budget() {
+        // The two shares are computed independently (floor + round), so their
+        // sum may differ from the input by at most 1.  This is the documented
+        // design: the BDD spec accepts (1638, 2458) for budget 4096 (sum 4096)
+        // and (6553, 9830) for 16384 (sum 9383, off by 1). We assert that the
+        // absolute difference is at most 1 for a range of inputs so a mutation
+        // that changes one formula cannot silently double-count or drop tokens.
+        for budget in [100usize, 999, 4096, 8192, 16384, 65536] {
+            let (m, c) = split_budget(budget);
+            let diff = (budget as i64 - m as i64 - c as i64).unsigned_abs();
+            assert!(
+                diff <= 1,
+                "split_budget({budget}) = ({m}, {c}); sum {s} is more than 1 away from budget",
+                s = m + c,
+            );
+        }
+    }
+
+    #[test]
+    fn review_change_args_deserializes_zero_budget_as_disabled() {
+        // Callers pass max_response_tokens=0 to disable both sub-tool budgets.
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD", "max_response_tokens": 0}"#;
+        let args: ReviewChangeArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.max_response_tokens, 0);
+        // Splitting 0 must yield (0, 0) — both sub-tools see None via budget_to_option.
+        let (m, c) = split_budget(args.max_response_tokens);
+        assert_eq!(m, 0);
+        assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn review_change_args_deserializes_function_names_filter() {
+        let json = r#"{
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "function_names": ["foo", "bar"]
+        }"#;
+        let args: ReviewChangeArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            args.function_names.as_deref(),
+            Some(["foo".to_string(), "bar".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn review_change_args_function_names_is_none_when_absent() {
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD"}"#;
+        let args: ReviewChangeArgs = serde_json::from_str(json).unwrap();
+        assert!(
+            args.function_names.is_none(),
+            "function_names must be None when not supplied in JSON"
+        );
+    }
+
+    #[test]
+    fn review_change_args_deserializes_custom_page_size() {
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD", "page_size": 10}"#;
+        let args: ReviewChangeArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.page_size, 10);
+    }
+
+    #[test]
+    fn review_change_args_working_tree_mode_when_head_ref_absent() {
+        // When head_ref is omitted the tool runs in working-tree mode. The
+        // deserialised value must be None — not Some("") or Some("HEAD") —
+        // because build_review_change dispatches on the Option.
+        let json = r#"{"base_ref": "HEAD"}"#;
+        let args: ReviewChangeArgs = serde_json::from_str(json).unwrap();
+        assert!(
+            args.head_ref.is_none(),
+            "head_ref must be None when omitted from JSON (working-tree mode)"
+        );
     }
 }
