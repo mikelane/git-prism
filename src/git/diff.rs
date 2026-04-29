@@ -223,10 +223,11 @@ pub(crate) fn count_line_changes(
     old_data: Option<&[u8]>,
     new_data: Option<&[u8]>,
 ) -> (usize, usize) {
-    let old_text = old_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
-    let new_text = new_data.map_or(String::new(), |d| String::from_utf8_lossy(d).to_string());
+    use std::borrow::Cow;
+    let old_text: Cow<'_, str> = old_data.map_or(Cow::Borrowed(""), |d| String::from_utf8_lossy(d));
+    let new_text: Cow<'_, str> = new_data.map_or(Cow::Borrowed(""), |d| String::from_utf8_lossy(d));
 
-    let input = gix::diff::blob::InternedInput::new(old_text.as_str(), new_text.as_str());
+    let input = gix::diff::blob::InternedInput::new(old_text.as_ref(), new_text.as_ref());
     let diff = gix::diff::blob::Diff::compute(gix::diff::blob::Algorithm::Myers, &input);
 
     (
