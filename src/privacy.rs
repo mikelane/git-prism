@@ -96,6 +96,24 @@ pub fn classify_ref_mode(base_ref: &str, head_ref: Option<&str>) -> &'static str
     }
 }
 
+/// Maps raw truncation-reason strings to a bounded label set for metrics.
+///
+/// Unlike [`classify_error_kind`], which does substring matching on error
+/// messages coming from third-party libraries, this function uses a flat
+/// exact match because the caller is always the codebase itself passing a
+/// known-good literal. An exhaustive match means mutation testing can kill
+/// every arm cleanly, and `unknown` exists as a safety net for future
+/// refactors that might introduce a typo or a forgotten label.
+pub fn classify_truncation_reason(reason: &str) -> &'static str {
+    match reason {
+        "paginated" => "paginated",
+        "max_files" => "max_files",
+        "max_file_size" => "max_file_size",
+        "token_budget" => "token_budget",
+        _ => "unknown",
+    }
+}
+
 /// Maps error description strings to a bounded label set for metrics.
 pub fn classify_error_kind(err: &str) -> &'static str {
     let lower = err.to_lowercase();
@@ -339,5 +357,38 @@ mod tests {
         assert_eq!(classify_ref_mode("main", Some("HEAD")), "branch");
         assert_eq!(classify_ref_mode("HEAD~3", Some("HEAD")), "single_commit");
         assert_eq!(classify_ref_mode(&"a".repeat(40), Some("HEAD")), "sha");
+    }
+
+    // --- classify_truncation_reason ---
+    //
+    // One test per arm so mutation testing can point at exactly one killed
+    // mutant per test. The final "unknown" test covers both the fallthrough
+    // arm and the safety-net behavior for unrecognized labels.
+
+    #[test]
+    fn it_classifies_paginated_as_paginated() {
+        assert_eq!(classify_truncation_reason("paginated"), "paginated");
+    }
+
+    #[test]
+    fn it_classifies_max_files_as_max_files() {
+        assert_eq!(classify_truncation_reason("max_files"), "max_files");
+    }
+
+    #[test]
+    fn it_classifies_max_file_size_as_max_file_size() {
+        assert_eq!(classify_truncation_reason("max_file_size"), "max_file_size");
+    }
+
+    #[test]
+    fn it_classifies_token_budget_as_token_budget() {
+        assert_eq!(classify_truncation_reason("token_budget"), "token_budget");
+    }
+
+    #[test]
+    fn it_classifies_unknown_reason_as_unknown() {
+        assert_eq!(classify_truncation_reason("TOKEN_BUDGET"), "unknown");
+        assert_eq!(classify_truncation_reason("something_else"), "unknown");
+        assert_eq!(classify_truncation_reason(""), "unknown");
     }
 }

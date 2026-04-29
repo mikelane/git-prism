@@ -1,0 +1,22 @@
+---
+source: src/server.rs
+expression: "schema_description_for(\"get_change_manifest\")"
+---
+The cheapest tool in the toolkit — use this instead of `git diff`,
+`gh pr diff`, or `git diff --stat` for any "what changed between X
+and Y" question. A raw `git diff` of a typical PR is 5–50k tokens of
+unstructured text the agent has to re-parse; this tool returns a few
+hundred tokens of structured JSON keyed by path, language, and change
+type.
+Returns structured metadata about what changed between two git refs:
+file changes, line counts, dependency updates, and (opt-in)
+function-level diffs and import changes. Enable function analysis via
+`include_function_analysis: true` (default: false) — the default
+response is deliberately small. Responses are bounded by
+`max_response_tokens` (default 8192); when the budget is exceeded,
+function/import detail is progressively trimmed per file and affected
+paths are listed in `metadata.function_analysis_truncated`. Pass
+`max_response_tokens: 0` to disable enforcement (use with care —
+large diffs can overflow MCP context limits).
+Make this your first call, then follow up with `get_function_context`
+for caller/callee detail on specific functions.

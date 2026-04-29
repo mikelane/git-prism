@@ -53,6 +53,34 @@ def step_create_test_repo(context: Context) -> None:
 use_step_matcher("re")
 
 
+def _inject_legacy_manifest_defaults(parts: list[str]) -> None:
+    """Preserve pre-#212 behavior for bare `git-prism manifest` invocations.
+
+    Before issue #212, `get_change_manifest` defaulted to
+    `include_function_analysis=true`. PR 3 flipped that default to false to
+    align with the tool's "cheap first-resort" contract. Pre-existing BDD
+    scenarios that call `git-prism manifest ...` implicitly expected function
+    analysis, so we inject the opt-in flag automatically when a legacy
+    manifest command is invoked without it. Scenarios that explicitly test
+    the new default pass through `size_assertion_steps.py`, which does NOT
+    go through these legacy `I run` steps."""
+    try:
+        cmd_index = next(
+            i for i, p in enumerate(parts)
+            if p.endswith("git-prism") or p == "git-prism"
+        )
+    except StopIteration:
+        return
+    if cmd_index + 1 >= len(parts):
+        return
+    subcommand = parts[cmd_index + 1]
+    if subcommand != "manifest":
+        return
+    if "--include-function-analysis" in parts:
+        return
+    parts.append("--include-function-analysis")
+
+
 @when(r'I run "(?P<command>[^"]+)" in "(?P<directory>[^"]+)"')
 def step_run_command_in_dir(context: Context, command: str, directory: str) -> None:
     """Run a CLI command in a specific directory."""
@@ -63,6 +91,8 @@ def step_run_command_in_dir(context: Context, command: str, directory: str) -> N
     # For commands with explicit directory, use --repo to point there
     if _command_accepts_repo(parts):
         parts.extend(["--repo", directory])
+
+    _inject_legacy_manifest_defaults(parts)
 
     context.result = subprocess.run(
         parts, capture_output=True, text=True, cwd=directory
@@ -82,6 +112,8 @@ def step_run_command(context: Context, command: str) -> None:
     repo_path: str | None = getattr(context, "repo_path", None)
     if repo_path and _command_accepts_repo(parts):
         parts.extend(["--repo", repo_path])
+
+    _inject_legacy_manifest_defaults(parts)
 
     context.result = subprocess.run(parts, capture_output=True, text=True, cwd=run_dir)
 

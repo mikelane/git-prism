@@ -1,0 +1,15 @@
+---
+source: src/server.rs
+expression: "schema_description_for(\"review_change\")"
+---
+Use this **instead of `git diff <ref>..<ref>`** when reviewing a PR,
+auditing a refactor, or assessing merge safety — it answers "what
+changed and what might break" in one tool invocation, with structured
+JSON and per-function blast radius scores instead of raw diff text.
+Replaces the common two-step workflow:
+1. `get_change_manifest` — what changed
+2. `get_function_context` — blast radius and callers
+with a single call that runs both internally and splits the token
+budget 40/60 (manifest / function_context). Two independent cursors
+(`manifest_cursor`, `function_context_cursor`) let you page each half
+separately without resetting the other.

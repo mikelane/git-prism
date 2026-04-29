@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`get_change_manifest` default for `include_function_analysis` flipped to `false`.** Function-level diffs are now opt-in, aligning the tool's default with its "cheap first-resort" contract. Pass `include_function_analysis: true` to restore the previous behavior. The CLI adds an `--include-function-analysis` flag with the same effect.
+- **`get_change_manifest` enforces a token budget (default 8192).** When the response would exceed the budget, function/import analysis is progressively stripped per file via a three-tier algorithm (full → signatures-only → bare). Trimmed files that preserved their function signatures are listed in `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0` (or the CLI `--max-response-tokens 0`) to disable enforcement. Internal callers (e.g. `get_function_context`) bypass enforcement via `ManifestOptions.max_response_tokens = None`.
+- **`record_truncated` metric now carries a `reason` label.** New `reason="token_budget"` events are emitted whenever the manifest budget trims any file detail. Cardinality is bounded via `classify_truncation_reason` in `src/privacy.rs`.
+
+### Changed
+
+- **MCP tool descriptions rewritten with comparative framing vs raw git.** All four tool doc comments in `src/server.rs` now name the raw git command they replace, so agents reading `tools/list` see when to reach for git-prism instead of falling back to `git diff` / `git log` / `git show` / `git log -S`. `get_commit_history` was promoted from a one-line `description = "..."` argument to a full `///` doc block; `get_function_context` gained its first proper doc comment (it previously had none). Snapshot tests under `src/snapshots/` lock the prose against silent drift, and `it_publishes_comparative_framing_for_every_tool` mirrors the `@ISSUE-237` BDD scenario as an in-binary regression net.
+
+### Added
+
+- **`review_change` MCP tool.** New orchestration tool that returns a combined `{ manifest, function_context }` payload for the same ref range in a single call, splitting `max_response_tokens` 40/60 (manifest / function_context). Designed to compete head-to-head with `git diff <ref>..<ref>`: the doc comment leads with "Use this instead of `git diff`" so agents reach for it during PR review and refactor audits. Pure orchestration — internally calls the existing `get_change_manifest` and `get_function_context` handlers, no diff or analysis logic is duplicated. Pagination uses two independent opaque cursors (`manifest_cursor` / `function_context_cursor`) so each half can advance without re-paginating the other. Each sub-response stamps `metadata.budget_tokens` with its share for downstream observability. (#240)
+- **`get_function_context` gains pagination, a name filter, and a response-size budget.** Four new `ContextArgs` fields — `cursor`, `page_size` (1–500, default 25), `function_names`, `max_response_tokens` (default 8192, `0` disables) — mirror the manifest tool's guardrails so the second-resort read tool can no longer exceed MCP context limits. The CLI exposes the same knobs: `--cursor`, `--page-size`, `--function-names=a,b`, `--max-response-tokens`.
+- **Per-entry `truncated` flag on `FunctionContextEntry`.** When the budget clamps an entry's caller / callee / test-reference lists (top 5 callers, top 5 callees, top 3 test references are kept), the entry's `truncated` flag is set and its name lands in `metadata.function_analysis_truncated`. The flag is also set on the last kept entry when the response was cut short by the budget or page-size, so `function_analysis_truncated` is never empty on a truncated response.
+- **`function_names` as the escape hatch for re-querying clamped entries.** Agents that need the full caller / callee list for an entry that was clamped on a prior paginated call should re-request with `function_names: ["name"]` — the filtered response fits comfortably within the budget.
+- **Metadata mirrors pagination cursor.** `ContextMetadata.next_cursor` duplicates `pagination.next_cursor` for agents reading only the metadata block.
+- **Bounded-cardinality truncation metric.** `get_function_context` now emits `record_truncated(tool, reason)` with `reason="paginated"` when a next-page cursor is returned and `reason="token_budget"` when any entry was clamped, matching the manifest tool's signalling contract.
+
 ## [0.6.0] — 2026-04-09
 
 > Released 2026-04-10 (retroactively tagged; see ADR 0007 for history).

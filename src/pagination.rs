@@ -2,7 +2,13 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const CURSOR_VERSION: u32 = 1;
+pub(crate) const CURSOR_VERSION: u32 = 1;
+
+/// Version tag for [`FunctionPaginationCursor`]. Kept separate from
+/// [`CURSOR_VERSION`] so the file- and function-level cursor shapes can evolve
+/// independently — at launch both are `1`, but a future bump to one must not
+/// invalidate the other.
+pub(crate) const FUNCTION_CURSOR_VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CursorError {
@@ -18,7 +24,9 @@ pub enum CursorError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PaginationCursor {
-    pub v: u32,
+    /// Serialized as `"v"` to keep the opaque cursor payload compact.
+    #[serde(rename = "v")]
+    pub version: u32,
     pub offset: usize,
     pub base_sha: String,
     pub head_sha: String,
@@ -46,9 +54,9 @@ pub fn validate_cursor(
     current_base_sha: &str,
     current_head_sha: &str,
 ) -> Result<(), CursorError> {
-    if cursor.v != CURSOR_VERSION {
+    if cursor.version != CURSOR_VERSION {
         return Err(CursorError::UnsupportedVersion {
-            got: cursor.v,
+            got: cursor.version,
             expected: CURSOR_VERSION,
         });
     }
@@ -66,13 +74,58 @@ pub fn decode_cursor(s: &str) -> Result<PaginationCursor, CursorError> {
     serde_json::from_str(&json).map_err(|e| CursorError::InvalidEncoding(e.to_string()))
 }
 
+/// Opaque pagination token for `get_function_context` responses.
+///
+/// Offset is into the *filtered* function list (after any `function_names`
+/// filter is applied), not the raw list. The filter must be identical across
+/// paginated calls; it is not serialized into the cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FunctionPaginationCursor {
+    /// Serialized as `"v"` to keep the opaque cursor payload compact.
+    #[serde(rename = "v")]
+    pub version: u32,
+    pub offset: usize,
+    pub base_sha: String,
+    pub head_sha: String,
+}
+
+pub fn encode_function_cursor(cursor: &FunctionPaginationCursor) -> String {
+    let json = serde_json::to_string(cursor).expect("function cursor serializes");
+    STANDARD.encode(json.as_bytes())
+}
+
+pub fn decode_function_cursor(s: &str) -> Result<FunctionPaginationCursor, CursorError> {
+    let bytes = STANDARD
+        .decode(s)
+        .map_err(|e| CursorError::InvalidEncoding(e.to_string()))?;
+    let json = String::from_utf8(bytes).map_err(|e| CursorError::InvalidEncoding(e.to_string()))?;
+    serde_json::from_str(&json).map_err(|e| CursorError::InvalidEncoding(e.to_string()))
+}
+
+pub fn validate_function_cursor(
+    cursor: &FunctionPaginationCursor,
+    current_base_sha: &str,
+    current_head_sha: &str,
+) -> Result<(), CursorError> {
+    if cursor.version != FUNCTION_CURSOR_VERSION {
+        return Err(CursorError::UnsupportedVersion {
+            got: cursor.version,
+            expected: FUNCTION_CURSOR_VERSION,
+        });
+    }
+    if cursor.base_sha != current_base_sha || cursor.head_sha != current_head_sha {
+        return Err(CursorError::StaleRepository);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn make_cursor(offset: usize, base_sha: &str, head_sha: &str) -> PaginationCursor {
         PaginationCursor {
-            v: CURSOR_VERSION,
+            version: CURSOR_VERSION,
             offset,
             base_sha: base_sha.into(),
             head_sha: head_sha.into(),
@@ -103,7 +156,7 @@ mod tests {
         let cursor = make_cursor(100, "abc123", "def456");
         let encoded = encode_cursor(&cursor);
         let decoded = decode_cursor(&encoded).unwrap();
-        assert_eq!(decoded.v, CURSOR_VERSION);
+        assert_eq!(decoded.version, CURSOR_VERSION);
         assert_eq!(decoded.offset, 100);
         assert_eq!(decoded.base_sha, "abc123");
         assert_eq!(decoded.head_sha, "def456");
@@ -150,7 +203,7 @@ mod tests {
     #[test]
     fn validate_cursor_rejects_wrong_version() {
         let cursor = PaginationCursor {
-            v: 99,
+            version: 99,
             offset: 0,
             base_sha: "abc".into(),
             head_sha: "def".into(),
@@ -207,5 +260,110 @@ mod tests {
         assert_eq!(clamp_page_size(100), 100);
         assert_eq!(clamp_page_size(500), 500);
         assert_eq!(clamp_page_size(1), 1);
+    }
+
+    // --- FunctionPaginationCursor tests (parallel to PaginationCursor) ---
+
+    fn make_function_cursor(
+        offset: usize,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> FunctionPaginationCursor {
+        FunctionPaginationCursor {
+            version: FUNCTION_CURSOR_VERSION,
+            offset,
+            base_sha: base_sha.into(),
+            head_sha: head_sha.into(),
+        }
+    }
+
+    #[test]
+    fn function_cursor_decode_rejects_invalid_base64() {
+        let result = decode_function_cursor("not-valid-base64!!!");
+        assert!(matches!(result, Err(CursorError::InvalidEncoding(_))));
+    }
+
+    #[test]
+    fn function_cursor_decode_rejects_valid_base64_but_invalid_json() {
+        let encoded = STANDARD.encode(b"not json at all");
+        let result = decode_function_cursor(&encoded);
+        assert!(matches!(result, Err(CursorError::InvalidEncoding(_))));
+    }
+
+    #[test]
+    fn function_cursor_decode_rejects_empty_string() {
+        let result = decode_function_cursor("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_cursor_encode_then_decode_round_trips() {
+        let cursor = make_function_cursor(37, "abc123", "def456");
+        let encoded = encode_function_cursor(&cursor);
+        let decoded = decode_function_cursor(&encoded).unwrap();
+        assert_eq!(decoded.version, FUNCTION_CURSOR_VERSION);
+        assert_eq!(decoded.offset, 37);
+        assert_eq!(decoded.base_sha, "abc123");
+        assert_eq!(decoded.head_sha, "def456");
+    }
+
+    #[test]
+    fn function_cursor_encode_then_decode_round_trips_different_values() {
+        // Edge case: offset=0 (first page) with realistic 40-char SHAs. A
+        // mutation that stripped the offset from the serialized form would
+        // still pass the "37" round-trip above if it accidentally hardcoded
+        // that value; the zero offset lets us see that.
+        let cursor = make_function_cursor(
+            0,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5",
+        );
+        let encoded = encode_function_cursor(&cursor);
+        let decoded = decode_function_cursor(&encoded).unwrap();
+        assert_eq!(decoded.version, FUNCTION_CURSOR_VERSION);
+        assert_eq!(decoded.offset, 0);
+        assert_eq!(decoded.base_sha, cursor.base_sha);
+        assert_eq!(decoded.head_sha, cursor.head_sha);
+    }
+
+    #[test]
+    fn function_cursor_validate_succeeds_when_shas_match() {
+        let cursor = make_function_cursor(50, "abc", "def");
+        assert!(validate_function_cursor(&cursor, "abc", "def").is_ok());
+    }
+
+    #[test]
+    fn function_cursor_validate_fails_when_base_sha_changed() {
+        let cursor = make_function_cursor(50, "abc", "def");
+        assert!(matches!(
+            validate_function_cursor(&cursor, "DIFFERENT", "def"),
+            Err(CursorError::StaleRepository)
+        ));
+    }
+
+    #[test]
+    fn function_cursor_validate_fails_when_head_sha_changed() {
+        let cursor = make_function_cursor(50, "abc", "def");
+        assert!(matches!(
+            validate_function_cursor(&cursor, "abc", "DIFFERENT"),
+            Err(CursorError::StaleRepository)
+        ));
+    }
+
+    #[test]
+    fn function_cursor_validate_rejects_wrong_version() {
+        let cursor = FunctionPaginationCursor {
+            version: 99,
+            offset: 0,
+            base_sha: "abc".into(),
+            head_sha: "def".into(),
+        };
+        assert!(matches!(
+            validate_function_cursor(&cursor, "abc", "def"),
+            Err(CursorError::UnsupportedVersion {
+                got: 99,
+                expected: 1
+            })
+        ));
     }
 }

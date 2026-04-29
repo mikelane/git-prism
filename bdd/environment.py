@@ -9,12 +9,11 @@ import shutil
 import subprocess
 import sys
 
+from behave.model import Scenario
+from behave.runner import Context
 
-BINARY_PATH = None
 
-
-def before_all(context):
-    global BINARY_PATH
+def before_all(context: Context) -> None:
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     context.project_root = project_root
 
@@ -33,17 +32,31 @@ def before_all(context):
             check=True,
         )
 
-    BINARY_PATH = binary
-    context.binary_path = BINARY_PATH
+    context.binary_path = binary
 
 
-def before_scenario(context, scenario):
+def before_scenario(context: Context, scenario: Scenario) -> None:
     context.cleanup_dirs = []
     context.json_data = None
     context.server_procs = []
+    # Reset redirect-hook scenario state so values from a previous scenario
+    # cannot leak in (e.g., a stale `fake_home` would skip the isolated-HOME
+    # setup and let the test read the developer's real ~/.claude/...).
+    context.fake_home = None
+    context.hook_payload = None
+    context.hook_command = None
+    context.hook_extra_env = {}
+    context.review_change_payload = None
+    context.captured_sha256 = None
+    context.captured_pretooluse_length = None
+    context.user_settings_path = None
+    context.user_hooks_dir = None
+    context.project_repo_path = None
+    context.project_settings_path = None
+    context.project_hooks_dir = None
 
 
-def after_scenario(context, scenario):
+def after_scenario(context: Context, scenario: Scenario) -> None:
     # Telemetry scenarios spawn an MCP server and a mock OTLP collector;
     # tear both down before removing the temp repo directory so file
     # handles can't keep the repo alive on shutdown. The helper no-ops

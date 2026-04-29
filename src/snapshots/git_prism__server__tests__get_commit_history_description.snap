@@ -1,0 +1,13 @@
+---
+source: src/server.rs
+expression: "schema_description_for(\"get_commit_history\")"
+---
+Returns one structured manifest per commit in a range — use this
+**instead of `git log --stat`** or `git log -p` when you need to walk
+a branch commit-by-commit. Each entry includes the commit SHA, author,
+message, timestamp, per-file change metadata, and a summary. No diff
+text to parse; no `+`/`-` prefixes to strip.
+Call `get_change_manifest` first when you only need the collapsed
+view across the whole range. Use this tool when you need to attribute
+changes to specific commits — for example, to bisect a regression or
+audit an author's contribution.

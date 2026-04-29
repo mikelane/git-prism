@@ -66,6 +66,29 @@ pub struct ManifestMetadata {
     pub head_sha: String,
     pub generated_at: DateTime<Utc>,
     pub version: String,
+    /// Estimated token count of the serialized response, via the ~4-chars-
+    /// per-token heuristic in [`crate::tools::size::estimate_response_tokens`].
+    /// Agents use this as a cheap pre-flight hint before requesting a follow-
+    /// up call (e.g., `get_function_context` on the same range). Populated in
+    /// a two-pass build: the response is first constructed with `0`, then the
+    /// estimate is computed on that struct and written back. The final value
+    /// is therefore a lower bound that undercounts by the single-digit
+    /// character delta between `"token_estimate":0` and the real value, which
+    /// is acceptable for a budgeting hint.
+    pub token_estimate: usize,
+    /// Paths of files whose function analysis was trimmed to fit the token
+    /// budget. Only includes "tier 1" files (signatures preserved, imports
+    /// stripped). Files stripped to bare entries are not listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_analysis_truncated: Vec<String>,
+    /// Token budget that produced this response, when applicable. Set by the
+    /// `review_change` orchestration tool, which splits its `max_response_tokens`
+    /// 40/60 between the manifest and function-context sub-responses, so each
+    /// sub-response carries its share for downstream observability. Standalone
+    /// `get_change_manifest` calls leave this `None` (and serde skips the
+    /// field) — the standalone tool already records its budget elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -153,8 +176,13 @@ pub struct ManifestArgs {
     pub include_patterns: Vec<String>,
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub include_function_analysis: bool,
+    /// Maximum estimated tokens for the full response. When exceeded,
+    /// function/import analysis is progressively stripped per file.
+    /// Default 8192. Pass 0 to disable budget enforcement.
+    #[serde(default = "default_token_budget")]
+    pub max_response_tokens: usize,
     /// Opaque pagination cursor from a previous response.
     pub cursor: Option<String>,
     /// Maximum file entries per page (1-500, default 100).
@@ -198,10 +226,31 @@ pub struct ContextArgs {
     pub head_ref: String,
     /// Path to the git repository (defaults to the server's working directory).
     pub repo_path: Option<String>,
+    /// Opaque pagination cursor from a prior response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Maximum functions per page (1–500, default 25). Function-context
+    /// entries carry caller/callee/test lists that are expensive per entry,
+    /// so the default is smaller than the manifest tool's 100-file default.
+    #[serde(default = "default_context_page_size")]
+    pub page_size: usize,
+    /// When set, restrict the response to functions with these names. Useful
+    /// for re-querying a function that was clamped on a prior paginated call.
+    /// Must be identical across paginated calls (not validated by the cursor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_names: Option<Vec<String>>,
+    /// Response-size budget in estimated tokens. `0` disables the budget.
+    /// Default 8192.
+    #[serde(default = "default_context_max_tokens")]
+    pub max_response_tokens: usize,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_token_budget() -> usize {
+    8192
 }
 
 fn default_max_file_size() -> usize {
@@ -210,6 +259,14 @@ fn default_max_file_size() -> usize {
 
 fn default_page_size() -> usize {
     100
+}
+
+fn default_context_max_tokens() -> usize {
+    8192
+}
+
+fn default_context_page_size() -> usize {
+    25
 }
 
 // --- History types ---
@@ -275,7 +332,24 @@ pub struct FunctionContextEntry {
     pub callers: Vec<CallerEntry>,
     pub callees: Vec<CalleeEntry>,
     pub test_references: Vec<CallerEntry>,
+    /// Total callers (production + test) before any budget clamping. Preserved
+    /// so agents can compute how many entries were omitted once `truncated`
+    /// fires: `omitted = caller_count - callers.len() - test_references.len()`.
     pub caller_count: usize,
+    /// True when this entry's caller / callee / test-reference lists were
+    /// clamped by the response-size budget. The full lists can be recovered
+    /// by re-querying with `function_names: [name]`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+/// `skip_serializing_if` predicate used on the `truncated` flag — named so
+/// the derive macro reads as intent ("skip when false") instead of the
+/// opaque `std::ops::Not::not`. Takes `&bool` because serde's contract
+/// requires the predicate accept a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -322,12 +396,40 @@ pub struct ContextMetadata {
     pub base_sha: String,
     pub head_sha: String,
     pub generated_at: DateTime<Utc>,
+    /// Estimated token count of the serialized response. See
+    /// [`ManifestMetadata::token_estimate`] for the semantics and caveats;
+    /// the same two-pass construction trick applies.
+    pub token_estimate: usize,
+    /// Names of function entries whose caller / callee / test-reference lists
+    /// were clamped by the response-size budget. Each entry in this list
+    /// corresponds to a `FunctionContextEntry` with `truncated = true`; use
+    /// `function_names` to re-query individual entries with the full lists.
+    ///
+    /// Shares the field name with [`ManifestMetadata::function_analysis_truncated`]
+    /// so the two budget-bearing tools emit the same shape and a single
+    /// telemetry/metric assertion can key on one path across both tools.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub function_analysis_truncated: Vec<String>,
+    /// Opaque pagination cursor to request the next page. `None` means this
+    /// is the last page. Mirrors `pagination.next_cursor`; duplicated in
+    /// metadata so agents reading only the metadata block can see whether
+    /// follow-up calls are required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Token budget that produced this response, when applicable. Set by the
+    /// `review_change` orchestration tool, which splits its `max_response_tokens`
+    /// 40/60 between the manifest and function-context sub-responses. Mirrors
+    /// [`ManifestMetadata::budget_tokens`] so a single agent assertion path
+    /// covers both halves of a `review_change` payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FunctionContextResponse {
     pub metadata: ContextMetadata,
     pub functions: Vec<FunctionContextEntry>,
+    pub pagination: PaginationInfo,
 }
 
 // --- Tool options (for internal use) ---
@@ -337,6 +439,10 @@ pub struct ManifestOptions {
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub include_function_analysis: bool,
+    /// Token budget for the response. `None` disables enforcement (used by
+    /// internal callers like `context.rs` that need full data). `Some(n)`
+    /// triggers per-file tiered trimming when the response exceeds `n` tokens.
+    pub max_response_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +459,9 @@ pub struct SnapshotOptions {
 pub enum ToolError {
     #[error("git error: {0}")]
     Git(#[from] crate::git::reader::GitError),
+
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(#[from] crate::pagination::CursorError),
 }
 
 // --- Helper ---
@@ -514,6 +623,9 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
                 version: "0.1.0".into(),
+                token_estimate: 0,
+                function_analysis_truncated: vec![],
+                budget_tokens: None,
             },
             summary: ManifestSummary {
                 total_files_changed: 1,
@@ -540,6 +652,7 @@ mod tests {
         assert_eq!(json["summary"]["total_files_changed"], 1);
         assert!(json["summary"]["total_functions_changed"].is_null());
         assert!(json["pagination"]["next_cursor"].is_null());
+        assert_eq!(json["metadata"]["token_estimate"], 0);
     }
 
     #[test]
@@ -611,7 +724,8 @@ mod tests {
         let args: ManifestArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.base_ref, "main");
         assert!(args.head_ref.is_none());
-        assert!(args.include_function_analysis);
+        assert!(!args.include_function_analysis);
+        assert_eq!(args.max_response_tokens, 8192);
         assert!(args.include_patterns.is_empty());
     }
 
@@ -759,5 +873,111 @@ mod tests {
         let medium = BlastRadius::compute(3, 1);
         assert_eq!(low.risk, RiskLevel::Low);
         assert_eq!(medium.risk, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn context_args_deserializes_with_defaults() {
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD"}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.base_ref, "main");
+        assert_eq!(args.head_ref, "HEAD");
+        assert!(args.cursor.is_none());
+        assert_eq!(args.page_size, 25);
+        assert!(args.function_names.is_none());
+        assert_eq!(args.max_response_tokens, 8192);
+    }
+
+    #[test]
+    fn context_args_accepts_pagination_params() {
+        let json =
+            r#"{"base_ref": "main", "head_ref": "HEAD", "cursor": "tok123", "page_size": 10}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.cursor.as_deref(), Some("tok123"));
+        assert_eq!(args.page_size, 10);
+    }
+
+    #[test]
+    fn context_args_accepts_function_names_filter() {
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD", "function_names": ["foo", "bar"]}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            args.function_names.as_deref(),
+            Some(vec!["foo".to_string(), "bar".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn context_args_zero_max_response_tokens_deserializes() {
+        // Callers pass 0 to disable budget enforcement; must round-trip cleanly.
+        let json = r#"{"base_ref": "main", "head_ref": "HEAD", "max_response_tokens": 0}"#;
+        let args: ContextArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.max_response_tokens, 0);
+    }
+
+    #[test]
+    fn function_context_response_serializes_to_json() {
+        use chrono::Utc;
+        let response = FunctionContextResponse {
+            metadata: ContextMetadata {
+                base_ref: "HEAD~1".into(),
+                head_ref: "HEAD".into(),
+                base_sha: "abc123".into(),
+                head_sha: "def456".into(),
+                generated_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                token_estimate: 42,
+                function_analysis_truncated: vec![],
+                next_cursor: None,
+                budget_tokens: None,
+            },
+            functions: vec![],
+            pagination: PaginationInfo {
+                total_items: 0,
+                page_start: 0,
+                page_size: 25,
+                next_cursor: None,
+            },
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["metadata"]["base_ref"], "HEAD~1");
+        assert_eq!(json["metadata"]["head_ref"], "HEAD");
+        assert_eq!(json["metadata"]["token_estimate"], 42);
+        assert!(json["metadata"]["next_cursor"].is_null());
+        // function_analysis_truncated skipped when empty
+        assert!(
+            json["metadata"]
+                .get("function_analysis_truncated")
+                .is_none()
+        );
+        assert_eq!(json["functions"].as_array().unwrap().len(), 0);
+        assert_eq!(json["pagination"]["total_items"], 0);
+        assert_eq!(json["pagination"]["page_size"], 25);
+    }
+
+    #[test]
+    fn context_metadata_serializes_next_cursor_when_present() {
+        use chrono::Utc;
+        let metadata = ContextMetadata {
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            base_sha: "a".into(),
+            head_sha: "b".into(),
+            generated_at: Utc::now(),
+            token_estimate: 0,
+            function_analysis_truncated: vec!["some_fn".into()],
+            next_cursor: Some("cursor_opaque_token".into()),
+            budget_tokens: None,
+        };
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["next_cursor"], "cursor_opaque_token");
+        assert_eq!(
+            json["function_analysis_truncated"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(json["function_analysis_truncated"][0], "some_fn");
     }
 }

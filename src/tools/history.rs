@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::git::reader::RepoReader;
-use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
+use crate::pagination::{CURSOR_VERSION, PaginationCursor, PaginationInfo, encode_cursor};
 use crate::tools::manifest::build_manifest;
 use crate::tools::types::{
     CommitManifest, CommitMetadata, HistoryResponse, ManifestOptions, ToolError,
@@ -53,7 +53,7 @@ pub fn build_history(
 
     let next_cursor = if page_end < total_commits {
         Some(encode_cursor(&PaginationCursor {
-            v: 1,
+            version: CURSOR_VERSION,
             offset: page_end,
             base_sha,
             head_sha,
@@ -160,6 +160,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~2", "HEAD", &options, 0, 500).unwrap();
@@ -174,6 +175,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 0, 500).unwrap();
@@ -191,6 +193,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~1", "HEAD", &options, 0, 500).unwrap();
@@ -209,6 +212,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~2", "HEAD", &options, 0, 500).unwrap();
@@ -229,6 +233,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = build_history(&path, "nonexistent", "HEAD", &options, 0, 500);
@@ -242,6 +247,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let result = build_history(&path, "HEAD~1", "nonexistent", &options, 0, 500);
@@ -255,6 +261,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD", "HEAD", &options, 0, 500).unwrap();
@@ -268,6 +275,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 0, 10).unwrap();
@@ -286,6 +294,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 0, 2).unwrap();
@@ -306,6 +315,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 2, 2).unwrap();
@@ -325,6 +335,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 0, 1).unwrap();
@@ -343,6 +354,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~3", "HEAD", &options, 0, 1).unwrap();
@@ -352,7 +364,7 @@ mod tests {
         assert_eq!(cursor.offset, 1);
         assert!(!cursor.base_sha.is_empty());
         assert!(!cursor.head_sha.is_empty());
-        assert_eq!(cursor.v, 1);
+        assert_eq!(cursor.version, 1);
     }
 
     #[test]
@@ -362,6 +374,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let history = build_history(&path, "HEAD~1", "HEAD", &options, 0, 500).unwrap();

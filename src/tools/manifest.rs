@@ -7,7 +7,9 @@ use crate::git::depfiles::{diff_dependencies, is_dependency_file};
 use crate::git::diff::ChangeType;
 use crate::git::generated::GeneratedFileDetector;
 use crate::git::reader::RepoReader;
-use crate::pagination::{PaginationCursor, PaginationInfo, encode_cursor};
+use crate::pagination::{CURSOR_VERSION, PaginationCursor, PaginationInfo, encode_cursor};
+use crate::tools::extension_from_path;
+use crate::tools::size;
 use crate::tools::types::{
     FunctionChange, FunctionChangeType, ImportChange, ManifestFileEntry, ManifestMetadata,
     ManifestOptions, ManifestResponse, ManifestSummary, ToolError, detect_language,
@@ -116,13 +118,6 @@ pub fn diff_imports(base_imports: &[String], head_imports: &[String]) -> ImportC
     removed.sort();
 
     ImportChange { added, removed }
-}
-
-fn extension_from_path(path: &str) -> &str {
-    path.rsplit('.')
-        .next()
-        .filter(|ext| path.len() > ext.len() + 1)
-        .unwrap_or("")
 }
 
 fn matches_glob_pattern(path: &str, pattern: &str) -> bool {
@@ -343,7 +338,7 @@ pub fn build_manifest(
 
     let next_cursor = if page_end < total_files {
         Some(encode_cursor(&PaginationCursor {
-            v: 1,
+            version: CURSOR_VERSION,
             offset: page_end,
             base_sha: base_commit.sha.clone(),
             head_sha: head_commit.sha.clone(),
@@ -368,7 +363,7 @@ pub fn build_manifest(
         languages_affected: all_languages_affected,
     };
 
-    Ok(ManifestResponse {
+    let mut response = ManifestResponse {
         metadata: ManifestMetadata {
             repo_path: repo_path.display().to_string(),
             base_ref: base_ref.to_string(),
@@ -377,6 +372,12 @@ pub fn build_manifest(
             head_sha: head_commit.sha,
             generated_at: Utc::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            // Placeholder; overwritten below via a two-pass estimate so the
+            // final value reflects the fully-populated response. See the
+            // ManifestMetadata::token_estimate doc comment for the caveat.
+            token_estimate: 0,
+            function_analysis_truncated: vec![],
+            budget_tokens: None,
         },
         summary,
         files: manifest_files,
@@ -387,7 +388,34 @@ pub fn build_manifest(
             page_size,
             next_cursor,
         },
-    })
+    };
+    let trimmed = if options.include_function_analysis {
+        match options.max_response_tokens {
+            Some(budget) if budget > 0 => enforce_token_budget(&mut response, budget),
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    };
+    response.metadata.function_analysis_truncated = trimmed;
+
+    // If budget enforcement reduced the file count, update pagination cursor
+    let actual_page_files = response.files.len();
+    if actual_page_files < page_end.saturating_sub(offset) {
+        let actual_end = offset + actual_page_files;
+        response.pagination.page_size = actual_page_files;
+        if actual_end < total_files {
+            response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
+                version: CURSOR_VERSION,
+                offset: actual_end,
+                base_sha: response.metadata.base_sha.clone(),
+                head_sha: response.metadata.head_sha.clone(),
+            }));
+        }
+    }
+
+    response.metadata.token_estimate = size::estimate_response_tokens(&response);
+    Ok(response)
 }
 
 /// Build a manifest comparing a committed ref against the current working tree.
@@ -566,7 +594,7 @@ pub fn build_worktree_manifest(
 
     let next_cursor = if page_end < total_files {
         Some(encode_cursor(&PaginationCursor {
-            v: 1,
+            version: CURSOR_VERSION,
             offset: page_end,
             base_sha: base_commit.sha.clone(),
             head_sha: "WORKTREE".to_string(),
@@ -591,7 +619,7 @@ pub fn build_worktree_manifest(
         languages_affected: all_languages_affected,
     };
 
-    Ok(ManifestResponse {
+    let mut response = ManifestResponse {
         metadata: ManifestMetadata {
             repo_path: repo_path.display().to_string(),
             base_ref: base_ref.to_string(),
@@ -600,6 +628,10 @@ pub fn build_worktree_manifest(
             head_sha: "WORKTREE".to_string(),
             generated_at: Utc::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            // Placeholder; see build_manifest for the two-pass rationale.
+            token_estimate: 0,
+            function_analysis_truncated: vec![],
+            budget_tokens: None,
         },
         summary,
         files: manifest_files,
@@ -610,7 +642,175 @@ pub fn build_worktree_manifest(
             page_size,
             next_cursor,
         },
-    })
+    };
+    let trimmed = if options.include_function_analysis {
+        match options.max_response_tokens {
+            Some(budget) if budget > 0 => enforce_token_budget(&mut response, budget),
+            _ => vec![],
+        }
+    } else {
+        vec![]
+    };
+    response.metadata.function_analysis_truncated = trimmed;
+
+    // If budget enforcement reduced the file count, update pagination cursor
+    let actual_page_files = response.files.len();
+    if actual_page_files < page_end.saturating_sub(offset) {
+        let actual_end = offset + actual_page_files;
+        response.pagination.page_size = actual_page_files;
+        if actual_end < total_files {
+            response.pagination.next_cursor = Some(encode_cursor(&PaginationCursor {
+                version: CURSOR_VERSION,
+                offset: actual_end,
+                base_sha: response.metadata.base_sha.clone(),
+                head_sha: "WORKTREE".to_string(),
+            }));
+        }
+    }
+
+    response.metadata.token_estimate = size::estimate_response_tokens(&response);
+    Ok(response)
+}
+
+/// Enforce a token budget on a fully-constructed manifest response by
+/// progressively stripping function/import analysis from file entries.
+///
+/// Returns the paths of "tier 1" trimmed files — those whose imports were
+/// stripped but function signatures were preserved. Files stripped all the
+/// way to bare entries (tier 2) are NOT included in the returned list
+/// because the BDD assertion requires trimmed files to have non-empty
+/// `functions_changed`.
+///
+/// Three-tier algorithm:
+/// 1. Measure skeleton overhead (metadata + summary + deps + pagination)
+/// 2. Walk files in page order, deducting each file's token cost
+/// 3. When a file exceeds remaining budget:
+///    - Tier 1: strip `imports_changed`, keep `functions_changed` (signatures)
+///    - Tier 2: strip both — the file becomes a bare entry
+pub fn enforce_token_budget(response: &mut ManifestResponse, budget: usize) -> Vec<String> {
+    // Measure skeleton overhead (everything except files)
+    let files = std::mem::take(&mut response.files);
+    let skeleton_cost = size::estimate_response_tokens(response);
+    response.files = files;
+
+    // Safety margin for the `function_analysis_truncated` list that gets
+    // populated AFTER enforcement runs. Each trimmed path serializes as ~25
+    // chars (path + JSON quoting + comma), and large changes can produce
+    // dozens of trimmed paths, adding hundreds of tokens we didn't budget for.
+    // Reserve ~5% of the budget (min 256 tokens) as headroom.
+    let safety_margin = (budget / 20).max(16);
+    let file_budget = budget
+        .saturating_sub(skeleton_cost)
+        .saturating_sub(safety_margin);
+
+    // Phase 1: measure per-file costs at each tier
+    struct FileCosts {
+        full: usize,
+        tier1: usize, // functions kept, imports stripped
+        bare: usize,  // both stripped
+        has_analysis: bool,
+    }
+    let costs: Vec<FileCosts> = response
+        .files
+        .iter()
+        .map(|f| {
+            let full = size::estimate_response_tokens(f);
+            // Tier 1: same as full but without imports
+            let tier1 = if f.imports_changed.is_some() {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            } else {
+                full
+            };
+            // Bare: no functions, no imports
+            let bare = {
+                let mut clone = f.clone();
+                clone.functions_changed = None;
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            };
+            FileCosts {
+                full,
+                tier1,
+                bare,
+                has_analysis: f.functions_changed.is_some(),
+            }
+        })
+        .collect();
+
+    // Phase 2: determine how many files fit and at what tier.
+    // Strategy: uniform downgrade — try all-full, then all-tier1, then mix tier1+tier2.
+    let total_full: usize = costs.iter().map(|c| c.full).sum();
+    let total_tier1: usize = costs.iter().map(|c| c.tier1).sum();
+
+    if total_full <= file_budget {
+        // Everything fits at full analysis — no trimming needed
+        return vec![];
+    }
+
+    if total_tier1 <= file_budget {
+        // Everything fits at tier 1 — strip imports from files that had them,
+        // record only those as trimmed (files without imports aren't actually
+        // altered and shouldn't be listed).
+        let mut trimmed = Vec::new();
+        for file in &mut response.files {
+            if file.imports_changed.is_some() {
+                file.imports_changed = None;
+                trimmed.push(file.path.clone());
+            }
+        }
+        return trimmed;
+    }
+
+    // Phase 3: greedy tier1-first — walk files in order, preferring tier1
+    // (functions preserved) over tier2 (bare). This ensures we get a non-
+    // empty `function_analysis_truncated` list whenever budget allows.
+    let mut remaining = file_budget;
+    let mut decisions: Vec<TierChoice> = Vec::with_capacity(costs.len());
+
+    for c in &costs {
+        if c.has_analysis && c.tier1 <= remaining {
+            remaining -= c.tier1;
+            decisions.push(TierChoice::Tier1);
+        } else if c.bare <= remaining {
+            remaining -= c.bare;
+            decisions.push(TierChoice::Bare);
+        } else {
+            // File doesn't fit even at bare cost — stop. Files are returned in
+            // page order (matching the git diff order), so we preserve ordering
+            // rather than skipping to find smaller files that might fit.
+            // Agents needing files beyond this point should re-request with a
+            // larger budget or without enforcement (max_response_tokens: 0).
+            break;
+        }
+    }
+
+    let files_to_keep = decisions.len();
+    response.files.truncate(files_to_keep);
+
+    let mut trimmed = Vec::new();
+    for (i, file) in response.files.iter_mut().enumerate() {
+        match decisions[i] {
+            TierChoice::Tier1 => {
+                // Keep functions (signatures), strip imports
+                file.imports_changed = None;
+                trimmed.push(file.path.clone());
+            }
+            TierChoice::Bare => {
+                file.functions_changed = None;
+                file.imports_changed = None;
+            }
+        }
+    }
+
+    trimmed
+}
+
+#[derive(Clone, Copy)]
+enum TierChoice {
+    Tier1,
+    Bare,
 }
 
 fn read_worktree_file(repo_path: &Path, file_path: &str) -> Option<String> {
@@ -621,6 +821,7 @@ fn read_worktree_file(repo_path: &Path, file_path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::diff::ChangeScope;
 
     #[test]
     fn it_detects_added_function() {
@@ -1199,12 +1400,35 @@ mod tests {
     }
 
     #[test]
+    fn it_reports_a_positive_token_estimate_for_a_non_trivial_manifest() {
+        let (_dir, path) = create_repo_with_go_file();
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+            max_response_tokens: None,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        // The response includes two changed files plus function/import detail,
+        // so the serialized JSON is well over 4 characters and the estimate
+        // must be strictly positive. Exact value is not asserted because it
+        // depends on metadata fields like `generated_at` that vary at runtime.
+        assert!(
+            manifest.metadata.token_estimate > 0,
+            "expected a positive token_estimate on a non-trivial manifest response, got {}",
+            manifest.metadata.token_estimate,
+        );
+    }
+
+    #[test]
     fn it_builds_manifest_with_function_analysis() {
         let (_dir, path) = create_repo_with_go_file();
         let options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1240,6 +1464,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec!["*.md".to_string()],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1254,6 +1479,7 @@ mod tests {
             include_patterns: vec!["*.go".to_string()],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1268,6 +1494,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1346,6 +1573,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1422,6 +1650,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1498,6 +1727,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1574,6 +1804,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1616,33 +1847,6 @@ mod tests {
         let changes = diff_functions(&base, &head);
         assert_eq!(changes[0].name, "alpha");
         assert_eq!(changes[1].name, "zebra");
-    }
-
-    // --- extension_from_path tests ---
-
-    #[test]
-    fn it_extracts_extension_from_normal_path() {
-        assert_eq!(extension_from_path("src/main.rs"), "rs");
-    }
-
-    #[test]
-    fn it_returns_empty_for_dotfile() {
-        assert_eq!(extension_from_path(".gitignore"), "");
-    }
-
-    #[test]
-    fn it_returns_empty_for_no_extension() {
-        assert_eq!(extension_from_path("Makefile"), "");
-    }
-
-    #[test]
-    fn it_extracts_last_extension_from_multiple_dots() {
-        assert_eq!(extension_from_path("archive.tar.gz"), "gz");
-    }
-
-    #[test]
-    fn it_returns_empty_for_empty_string() {
-        assert_eq!(extension_from_path(""), "");
     }
 
     // --- matches_glob_pattern tests ---
@@ -1760,6 +1964,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -1833,6 +2038,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -1907,6 +2113,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -1925,6 +2132,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
 
@@ -1950,6 +2158,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2029,6 +2238,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2097,6 +2307,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2167,6 +2378,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2235,6 +2447,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2307,6 +2520,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2378,6 +2592,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
 
@@ -2450,6 +2665,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec!["*.log".to_string()],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options_exclude, 0, 200).unwrap();
 
@@ -2467,6 +2683,7 @@ mod tests {
             include_patterns: vec!["*.txt".to_string()],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options_include, 0, 200).unwrap();
 
@@ -2540,6 +2757,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -2558,6 +2776,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
 
@@ -2622,6 +2841,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -2699,6 +2919,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 0, 200).unwrap();
 
@@ -2753,6 +2974,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // First page
@@ -2773,6 +2995,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let page1 = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
@@ -2798,6 +3021,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // Request page starting at offset 3 with page_size 3 => covers files 3,4 (indices)
@@ -2820,6 +3044,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // With a page_size of 1 and 2 total files, we are paginating
@@ -2837,6 +3062,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // page_size 200 with 2 files => no pagination
@@ -2899,6 +3125,7 @@ mod tests {
             include_patterns: vec!["*.go".to_string()],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // Page 1: only first Go file
@@ -2923,6 +3150,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let page1 = build_worktree_manifest(&path, "HEAD", &options, 0, 3).unwrap();
@@ -2942,6 +3170,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 3, 3).unwrap();
@@ -2959,13 +3188,14 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 3).unwrap();
         let cursor_str = manifest.pagination.next_cursor.as_ref().unwrap();
         let cursor = crate::pagination::decode_cursor(cursor_str).unwrap();
         assert_eq!(cursor.offset, 3, "next cursor offset should be page_end");
-        assert_eq!(cursor.v, 1);
+        assert_eq!(cursor.version, 1);
         // SHAs should match the metadata
         assert_eq!(cursor.base_sha, manifest.metadata.base_sha);
         assert_eq!(cursor.head_sha, manifest.metadata.head_sha);
@@ -3028,6 +3258,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // Even with page_size=1, dependency changes should be present
@@ -3045,6 +3276,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         // The repo has ~2 changed files; offset 999 is way past the end
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 999, 100).unwrap();
@@ -3063,6 +3295,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: true,
+            max_response_tokens: None,
         };
 
         // 2 files, page_size=2 → NOT paginating, total_functions_changed present
@@ -3138,6 +3371,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         // Use a small page to ensure we're paginating but summary is still complete
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
@@ -3203,6 +3437,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
         let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 1).unwrap();
         // Dep analysis should show added deps even though page_size=1
@@ -3222,6 +3457,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // offset at last file
@@ -3283,6 +3519,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // 3 staged files, page_size=3 → not paginating, no cursor
@@ -3345,6 +3582,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // page_size=1 to force pagination, but summary must reflect all 3 changes
@@ -3364,6 +3602,7 @@ mod tests {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
+            max_response_tokens: None,
         };
 
         // offset at last file
@@ -3374,5 +3613,732 @@ mod tests {
         let manifest = build_worktree_manifest(&path, "HEAD", &options, 3, 100).unwrap();
         assert!(manifest.files.is_empty());
         assert!(manifest.pagination.next_cursor.is_none());
+    }
+
+    // --- enforce_token_budget tests ---
+
+    fn make_test_file_entry(
+        path: &str,
+        with_functions: bool,
+        with_imports: bool,
+    ) -> ManifestFileEntry {
+        ManifestFileEntry {
+            path: path.to_string(),
+            old_path: None,
+            change_type: ChangeType::Modified,
+            change_scope: ChangeScope::Committed,
+            language: "rust".to_string(),
+            is_binary: false,
+            is_generated: false,
+            lines_added: 10,
+            lines_removed: 5,
+            size_before: 100,
+            size_after: 120,
+            functions_changed: if with_functions {
+                Some(vec![FunctionChange {
+                    name: format!("fn_in_{path}"),
+                    old_name: None,
+                    change_type: FunctionChangeType::Modified,
+                    start_line: 1,
+                    end_line: 10,
+                    signature: format!("pub fn fn_in_{path}()"),
+                }])
+            } else {
+                None
+            },
+            imports_changed: if with_imports {
+                Some(ImportChange {
+                    added: vec!["use std::io".to_string()],
+                    removed: vec![],
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    fn make_test_response(files: Vec<ManifestFileEntry>) -> ManifestResponse {
+        ManifestResponse {
+            metadata: ManifestMetadata {
+                repo_path: "/test".to_string(),
+                base_ref: "HEAD~1".to_string(),
+                head_ref: "HEAD".to_string(),
+                base_sha: "aaa".to_string(),
+                head_sha: "bbb".to_string(),
+                generated_at: Utc::now(),
+                version: "0.0.0".to_string(),
+                token_estimate: 0,
+                function_analysis_truncated: vec![],
+                budget_tokens: None,
+            },
+            summary: ManifestSummary {
+                total_files_changed: files.len(),
+                files_added: 0,
+                files_modified: files.len(),
+                files_deleted: 0,
+                files_renamed: 0,
+                total_lines_added: 0,
+                total_lines_removed: 0,
+                total_functions_changed: None,
+                languages_affected: vec!["rust".to_string()],
+            },
+            files,
+            dependency_changes: vec![],
+            pagination: PaginationInfo {
+                total_items: 0,
+                page_start: 0,
+                page_size: 100,
+                next_cursor: None,
+            },
+        }
+    }
+
+    #[test]
+    fn enforce_token_budget_under_budget_returns_empty() {
+        let files = vec![
+            make_test_file_entry("a.rs", true, true),
+            make_test_file_entry("b.rs", true, true),
+        ];
+        let mut response = make_test_response(files);
+        // Use a very large budget so nothing gets trimmed
+        let trimmed = enforce_token_budget(&mut response, 100_000);
+        assert!(
+            trimmed.is_empty(),
+            "nothing should be trimmed under a large budget"
+        );
+        // All files should retain their function analysis
+        for file in &response.files {
+            assert!(file.functions_changed.is_some());
+            assert!(file.imports_changed.is_some());
+        }
+    }
+
+    #[test]
+    fn enforce_token_budget_over_budget_trims_imports_first() {
+        let files = vec![
+            make_test_file_entry("a.rs", true, true),
+            make_test_file_entry("b.rs", true, true),
+            make_test_file_entry("c.rs", true, true),
+        ];
+        let mut response = make_test_response(files);
+        // Pick a budget that fits the skeleton + first file fully but
+        // forces tier 1 trim on subsequent files
+        let skeleton_cost = {
+            let files_saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = files_saved;
+            cost
+        };
+        let first_file_cost = size::estimate_response_tokens(&response.files[0]);
+        // Budget fits roughly 1.5 files — forces tier-1 trim (imports stripped)
+        // on at least some files while keeping function signatures.
+        let budget = skeleton_cost + first_file_cost + first_file_cost / 2;
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // At least one file should be tier-1 trimmed (imports stripped, functions kept)
+        assert!(
+            !trimmed.is_empty(),
+            "at least one file should be listed as tier-1 trimmed"
+        );
+        // Trimmed paths must all still have functions_changed (signatures preserved)
+        for path in &trimmed {
+            let file = response.files.iter().find(|f| &f.path == path).unwrap();
+            assert!(
+                file.functions_changed.is_some(),
+                "trimmed file {path} must retain function signatures"
+            );
+            assert!(
+                file.imports_changed.is_none(),
+                "trimmed file {path} must have imports stripped"
+            );
+        }
+    }
+
+    #[test]
+    fn enforce_token_budget_very_tight_strips_to_bare() {
+        let files = vec![
+            make_test_file_entry("a.rs", true, true),
+            make_test_file_entry("b.rs", true, true),
+        ];
+        let mut response = make_test_response(files);
+        // Use a budget barely larger than skeleton — forces tier 2 on all files
+        let skeleton_cost = {
+            let files_saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = files_saved;
+            cost
+        };
+        let budget = skeleton_cost + 10; // almost no room for file data
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // Both files should be stripped to bare (tier 2)
+        for file in &response.files {
+            assert!(
+                file.functions_changed.is_none(),
+                "file {} should be bare (tier 2)",
+                file.path
+            );
+            assert!(file.imports_changed.is_none());
+        }
+        // Tier 2 files should NOT appear in trimmed list
+        assert!(
+            trimmed.is_empty(),
+            "tier 2 files must not appear in trimmed list"
+        );
+    }
+
+    #[test]
+    fn enforce_token_budget_zero_budget_returns_empty() {
+        // budget=0 is not called by production code (callers filter b > 0 first),
+        // but the function must not panic and must deterministically drop all files.
+        let files = vec![make_test_file_entry("a.rs", true, true)];
+        let mut response = make_test_response(files);
+        let trimmed = enforce_token_budget(&mut response, 0);
+        assert!(
+            trimmed.is_empty(),
+            "zero budget produces no tier-1 trimmed paths"
+        );
+        assert!(
+            response.files.is_empty(),
+            "zero budget drops all files from the response"
+        );
+    }
+
+    #[test]
+    fn enforce_token_budget_trimmed_list_excludes_tier2_files() {
+        // Create enough files that some get tier 1 and others get tier 2
+        let files = (0..10)
+            .map(|i| make_test_file_entry(&format!("file_{i}.rs"), true, true))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+        // Estimate total cost and use half as budget
+        let total_cost = size::estimate_response_tokens(&response);
+        let budget = total_cost / 2;
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // Every path in trimmed must point to a file with functions_changed still set
+        for path in &trimmed {
+            let file = response.files.iter().find(|f| &f.path == path).unwrap();
+            assert!(
+                file.functions_changed.is_some(),
+                "trimmed file {path} listed in function_analysis_truncated must have functions_changed"
+            );
+            assert!(
+                file.imports_changed.is_none(),
+                "trimmed file {path} should have imports stripped"
+            );
+        }
+        // Files with functions_changed=None (tier 2) must NOT be in the list
+        for file in &response.files {
+            if file.functions_changed.is_none() {
+                assert!(
+                    !trimmed.contains(&file.path),
+                    "tier 2 file {} must not be in trimmed list",
+                    file.path
+                );
+            }
+        }
+    }
+
+    // --- enforce_token_budget arithmetic and boundary mutants ---
+    //
+    // These tests target surviving mutants reported by cargo-mutants
+    // (issue #222 / CI run 24620558846, shard 1) in enforce_token_budget:
+    //   * `budget / 20` → `budget % 20` (safety margin uses division, not modulo)
+    //   * `remaining -= c.tier1` → `remaining += c.tier1` or `/=` (budget
+    //      accounting decreases the remaining budget, doesn't grow or shrink it
+    //      by division)
+    //   * `remaining -= c.bare` → `remaining += c.bare` or `/=`
+    // Each test is written so the mutant would flip the assertion outcome.
+
+    #[test]
+    fn it_uses_division_not_modulo_for_safety_margin() {
+        // The safety_margin is computed as `(budget / 20).max(16)`. A mutant
+        // that replaces `/` with `%` computes `budget % 20` — always < 20 —
+        // then clamps to 16. The `.max(16)` clamp masks the mutation for any
+        // budget < 320, so the test must use a larger budget to make the
+        // mutation observable.
+        //
+        // Strategy: many small files so per_file_full_total is in the
+        // thousands of tokens, then pick a budget that sits in the sweet
+        // spot where the ~400-token gap between `budget/20` and 16
+        // determines whether the `total_full <= file_budget` fast path
+        // fires.
+        let files = (0..80)
+            .map(|i| make_test_file_entry(&format!("f{i}.rs"), true, true))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+
+        // Measure the skeleton (response with files emptied) and the sum of
+        // per-file full costs independently — enforce_token_budget does the
+        // same decomposition internally.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let token_count = size::estimate_response_tokens(&response);
+            response.files = saved;
+            token_count
+        };
+        let per_file_full_total: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+
+        // We want:
+        //     budget - skeleton - budget/20 < per_file_full_total   (trim under /)
+        //     budget - skeleton - 16        >= per_file_full_total  (no trim under %)
+        // i.e. budget/20 - 16 > budget - skeleton - per_file_full_total >= 0
+        //
+        // Let target = skeleton + per_file_full_total. Pick budget so that
+        // budget/20 is between 17 and budget - target + 1 (some nonzero
+        // gap), and budget is at least 1 more than target so the % form
+        // satisfies the lower bound.
+        //
+        // Solve the two inequalities:
+        //     budget >= target + 16                   (modulo margin leaves
+        //                                              room for everything)
+        //     budget * 19 / 20 < target               (division margin eats
+        //                                              budget - target)
+        //     i.e. budget < target * 20 / 19
+        // Sweet spot: pick midpoint between (target + 16) and the upper bound.
+        let target = skeleton_cost + per_file_full_total;
+        let lower = target + 16;
+        let upper = target * 20 / 19; // exclusive upper bound
+        assert!(
+            upper > lower,
+            "fixture must be large enough for the safety-margin sweet spot \
+             to exist: target={target} needs target/19 > 16, i.e. target > 304",
+        );
+        let budget = (lower + upper) / 2;
+
+        // Verify construction: under the correct implementation the fast
+        // path should miss (trim required), under the mutant it should
+        // fire (no trim).
+        let margin_div = (budget / 20).max(16);
+        let margin_mod = (budget % 20).max(16);
+        assert!(
+            margin_div > margin_mod,
+            "test presumes budget/20 > budget%20 (clamped); \
+             budget={budget} /20={margin_div} %20={margin_mod}",
+        );
+        let file_budget_under_div = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_div);
+        let file_budget_under_mod = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_mod);
+        assert!(
+            file_budget_under_div < per_file_full_total,
+            "test construction invalid: under correct `/`, file_budget \
+             ({file_budget_under_div}) must be < per_file_full_total \
+             ({per_file_full_total}) so trimming is required. \
+             budget={budget} skeleton={skeleton_cost} margin_div={margin_div}",
+        );
+        assert!(
+            file_budget_under_mod >= per_file_full_total,
+            "test construction invalid: under mutant `%`, file_budget \
+             ({file_budget_under_mod}) must be ≥ per_file_full_total \
+             ({per_file_full_total}) so no trimming occurs. \
+             budget={budget} skeleton={skeleton_cost} margin_mod={margin_mod}",
+        );
+
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // Under correct `/`: trimming happens — imports stripped from at
+        // least one file, so trimmed is non-empty OR some file has
+        // functions_changed=None (bare tier). Under mutant `%`: fast path
+        // fires, trimmed is empty AND every file keeps imports.
+        let some_imports_stripped = response.files.iter().any(|f| f.imports_changed.is_none());
+        assert!(
+            !trimmed.is_empty(),
+            "with budget {budget} (skeleton={skeleton_cost}, \
+             per_file_full_total={per_file_full_total}) the /20 safety margin \
+             of {margin_div} tokens must force trimming; a modulo-based \
+             margin would be clamped to {margin_mod} and leave room for every file"
+        );
+        assert!(
+            some_imports_stripped,
+            "trimming must strip imports from at least one file; \
+             budget={budget} margin_div={margin_div}"
+        );
+    }
+
+    #[test]
+    fn it_decreases_remaining_budget_after_each_tier1_decision() {
+        // Target `remaining -= c.tier1` mutants (→ `+=` grows budget, → `/=`
+        // collapses it toward 1). We need a scenario where the greedy walk is
+        // actually used (not the "all fits at full" or "all fits at tier1"
+        // fast paths). That means total_tier1 > file_budget.
+        //
+        // Construction: several identical files, budget sized so only the
+        // first ~half fit at tier1 and the rest must be stripped to bare.
+        // Under `-=`: remaining shrinks after each kept file; eventually
+        // even tier1 cost > remaining, and subsequent files fall to bare.
+        // Under `+=`: remaining grows, every file stays at tier1, no file
+        // goes to bare. The presence of at least one bare file distinguishes.
+        // Under `/=`: after the first file remaining becomes tier1/tier1 = 1,
+        // every subsequent file must fall to bare (even weaker than `-=`),
+        // but the SAME file-count invariant fails differently — no files
+        // survive at tier1 beyond the first, so many more bare files appear.
+        let files = (0..6)
+            .map(|i| make_test_file_entry(&format!("f{i}.rs"), true, true))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+        // Sum of tier1 costs to target the middle. We want total_tier1 > budget
+        // (so the tier1 fast path is skipped) but budget large enough that at
+        // least two files can fit at tier1 (so `-=` and `+=` diverge visibly).
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        // Measure one file's tier1 cost (imports stripped, functions kept).
+        let one_tier1 = {
+            let mut clone = response.files[0].clone();
+            clone.imports_changed = None;
+            size::estimate_response_tokens(&clone)
+        };
+        // Budget fits ~3 tier1 files after skeleton + safety margin.
+        // Safety margin is (budget/20).max(16); account for that by over-
+        // budgeting the "fits 3" target.
+        let raw_budget = skeleton_cost + one_tier1 * 3;
+        // Inflate by 25% to absorb safety_margin without blowing past tier1
+        // for all 6 files. 6*tier1 would make the fast path fire; 3*tier1
+        // * 1.25 = 3.75*tier1 < 6*tier1.
+        let budget = raw_budget + raw_budget / 4;
+        // Pre-flight: confirm the greedy walk actually executes. If fixture cost
+        // ever drifts such that total_tier1 <= file_budget, enforce_token_budget
+        // short-circuits into the tier1 fast path and all three mutants survive
+        // silently. The assertion below is what the other budget tests in this
+        // file do explicitly — keep the invariant local.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        let total_tier1: usize = response
+            .files
+            .iter()
+            .map(|f| {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            })
+            .sum();
+        assert!(
+            total_tier1 > file_budget,
+            "construction invalid: greedy walk must execute; \
+             total_tier1={total_tier1} file_budget={file_budget} \
+             budget={budget} skeleton_cost={skeleton_cost} \
+             one_tier1={one_tier1}",
+        );
+        let trimmed = enforce_token_budget(&mut response, budget);
+        // Under correct `-=`: remaining drains monotonically; once a file
+        // no longer fits at tier1, it falls to bare.
+        // Under `+=`: remaining grows, every file stays at tier1.
+        // Under `/=`: remaining collapses to ~1 after the first file, so
+        // only one file is tier1 and the rest go to bare.
+        //
+        // Invariant: with this budget, SOME files are tier1 (→ trimmed list
+        // non-empty) AND SOME are bare (→ functions_changed=None on at least
+        // one). `+=` breaks the "some bare" half; `/=` breaks "some tier1"
+        // half. The two-sided check is what kills both directional mutants.
+        let tier1_count = trimmed.len();
+        let bare_count = response
+            .files
+            .iter()
+            .filter(|f| f.functions_changed.is_none())
+            .count();
+        assert!(
+            tier1_count >= 1,
+            "at least one file must survive at tier1 (functions kept, imports \
+             stripped) after a partial-fit budget; tier1_count={tier1_count}, \
+             bare_count={bare_count}",
+        );
+        assert!(
+            tier1_count >= 2,
+            "at least two files must survive at tier1; under a /= mutant, remaining \
+             collapses to ~1 after the first tier1 decision so only one file can \
+             stay at tier1: tier1_count={tier1_count}",
+        );
+        assert!(
+            bare_count >= 1,
+            "at least one file must fall to bare once the remaining budget \
+             is drained by earlier tier1 decisions; tier1_count={tier1_count}, \
+             bare_count={bare_count}. If every file stayed at tier1, remaining \
+             is not being decreased (mutant: `remaining += c.tier1`)",
+        );
+    }
+
+    #[test]
+    fn it_decreases_remaining_budget_after_each_bare_decision() {
+        // Target `remaining -= c.bare` mutants. This branch fires when a file
+        // does not fit at tier1 but does fit at bare.
+        //
+        // To force every file through the bare arm we need `c.tier1 >
+        // remaining` from the very first iteration. The greedy walk clones
+        // each file and measures both tier1 (functions kept, imports
+        // stripped) and bare (both stripped) costs. If a file has MANY
+        // functions, tier1 ≫ bare — the gap is proportional to the
+        // function count. Pick file_budget so a single tier1 doesn't fit
+        // but several bares do.
+        //
+        // Build a fixture with many functions per file to widen tier1 vs
+        // bare.
+        fn make_many_fn_entry(path: &str, fn_count: usize) -> ManifestFileEntry {
+            let functions = (0..fn_count)
+                .map(|i| FunctionChange {
+                    name: format!("really_long_function_name_number_{i}"),
+                    old_name: None,
+                    change_type: FunctionChangeType::Modified,
+                    start_line: i * 10,
+                    end_line: i * 10 + 5,
+                    signature: format!(
+                        "pub fn really_long_function_name_number_{i}\
+                         (arg_alpha: i64, arg_beta: String) -> Result<usize, Box<dyn Error>>"
+                    ),
+                })
+                .collect();
+            ManifestFileEntry {
+                path: path.to_string(),
+                old_path: None,
+                change_type: ChangeType::Modified,
+                change_scope: ChangeScope::Committed,
+                language: "rust".to_string(),
+                is_binary: false,
+                is_generated: false,
+                lines_added: 10,
+                lines_removed: 5,
+                size_before: 100,
+                size_after: 120,
+                functions_changed: Some(functions),
+                imports_changed: None, // no imports → tier1 == full
+            }
+        }
+        let files = (0..8)
+            .map(|i| make_many_fn_entry(&format!("f{i}.rs"), 10))
+            .collect::<Vec<_>>();
+        let mut response = make_test_response(files);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.files[0]);
+        let one_bare = {
+            let mut clone = response.files[0].clone();
+            clone.functions_changed = None;
+            clone.imports_changed = None;
+            size::estimate_response_tokens(&clone)
+        };
+        assert!(
+            one_full >= 4 * one_bare,
+            "fixture construction requires full >> bare to leave room for \
+             a tight budget that admits several bare files but no tier1 \
+             file: full={one_full} bare={one_bare}",
+        );
+
+        // target_file_budget in the sweet spot: <= one_full - 1 (tier1
+        // branch misses even for the first file) and >= 3 * one_bare (at
+        // least 3 bares fit so dropping is observable).
+        // target_file_budget fits several bares but strictly less than
+        // one_full. Pick midpoint between 3*one_bare (minimum "observable"
+        // cutoff) and one_full - 1 (upper bound). The earlier
+        // `one_full >= 4 * one_bare` guard already implies `one_full >
+        // 3 * one_bare`, so no separate check is needed here.
+        let target_file_budget = (3 * one_bare + one_full - 1) / 2;
+        // Solve for budget so file_budget == target after safety_margin.
+        //   budget - skeleton - (budget/20) = target
+        //   budget * 19 / 20 = skeleton + target
+        //   budget = (skeleton + target) * 20 / 19
+        // Use ceiling division to stay consistent with the parallel
+        // construction in the tier1-fast-path test below; the explicit
+        // `file_budget < one_full` cross-check after this guards against
+        // the rounding pushing us above one_full.
+        let budget = ((skeleton_cost + target_file_budget) * 20).div_ceil(19);
+        // Cross-check construction.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        assert!(
+            file_budget < one_full,
+            "construction invalid: tier1 branch would fire for the first \
+             file (file_budget={file_budget} >= one_full={one_full})",
+        );
+        assert!(
+            file_budget >= 2 * one_bare,
+            "construction invalid: fewer than 2 bare files fit \
+             (file_budget={file_budget} < 2*one_bare={})",
+            2 * one_bare,
+        );
+
+        let files_before = response.files.len();
+        let _ = enforce_token_budget(&mut response, budget);
+        let files_after = response.files.len();
+        assert!(
+            files_after < files_before,
+            "with a tight budget that fits only a few bare entries, \
+             enforcement must drop files from the 8-file input: \
+             files_before={files_before} files_after={files_after}. \
+             If all files survive, remaining is not being decreased \
+             (mutant: `remaining += c.bare`)",
+        );
+        assert!(
+            files_after >= 2,
+            "at least two files should fit bare with this budget; \
+             files_after={files_after} suggests remaining collapsed to near \
+             zero after a single decision (mutant: `remaining /= c.bare`)",
+        );
+        for file in &response.files {
+            assert!(
+                file.functions_changed.is_none(),
+                "file {} survived at tier1 but construction forces bare path \
+                 (file_budget={file_budget} one_full={one_full})",
+                file.path,
+            );
+        }
+    }
+
+    #[test]
+    fn it_returns_empty_trimmed_and_keeps_all_files_when_everything_fits() {
+        // Matches existing enforce_token_budget_under_budget_returns_empty but
+        // triangulates on the specific early-return invariant: when
+        // total_full <= file_budget, the function returns an empty Vec AND
+        // leaves every file untouched. Pins down the "fast-path skip" branch.
+        let files = vec![
+            make_test_file_entry("a.rs", true, true),
+            make_test_file_entry("b.rs", true, true),
+        ];
+        let mut response = make_test_response(files);
+        let files_before: Vec<_> = response.files.iter().map(|f| f.path.clone()).collect();
+        // Budget is 100x the actual content cost — guaranteed to fit under any
+        // reasonable cost-estimator drift without being a magic constant.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let per_file_full_total: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+        let budget = (skeleton_cost + per_file_full_total) * 100;
+        let trimmed = enforce_token_budget(&mut response, budget);
+        assert!(trimmed.is_empty(), "nothing trimmed under huge budget");
+        assert_eq!(
+            response.files.len(),
+            files_before.len(),
+            "no files dropped under huge budget"
+        );
+        for (i, f) in response.files.iter().enumerate() {
+            assert_eq!(f.path, files_before[i], "file order unchanged");
+            assert!(
+                f.functions_changed.is_some(),
+                "functions_changed preserved for {}",
+                f.path
+            );
+            assert!(
+                f.imports_changed.is_some(),
+                "imports_changed preserved for {}",
+                f.path
+            );
+        }
+    }
+
+    #[test]
+    fn it_strips_imports_only_from_files_that_had_them_at_tier1_fast_path() {
+        // Pins the tier1 fast path (total_tier1 <= file_budget branch): only
+        // files that originally had imports are added to the returned list;
+        // files without imports are NOT reported even though they pass
+        // through the same loop. A mutant that always pushed to the trimmed
+        // list regardless of `imports_changed.is_some()` would fail this test.
+        //
+        // Construction: one file with imports, one without. Budget sized so
+        // total_tier1 <= file_budget < total_full, which means:
+        //   * total_full fast path misses (trimming required)
+        //   * total_tier1 fast path fires (everything fits once imports
+        //     stripped, no greedy walk)
+        // Under the fast path, imports_changed is cleared only on files that
+        // originally had them.
+        let files = vec![
+            make_test_file_entry("has_imports.rs", true, true),
+            make_test_file_entry("no_imports.rs", true, false),
+        ];
+        let mut response = make_test_response(files);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.files);
+            let cost = size::estimate_response_tokens(&response);
+            response.files = saved;
+            cost
+        };
+        let total_full: usize = response
+            .files
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+        let total_tier1: usize = response
+            .files
+            .iter()
+            .map(|f| {
+                let mut clone = f.clone();
+                clone.imports_changed = None;
+                size::estimate_response_tokens(&clone)
+            })
+            .sum();
+        assert!(
+            total_tier1 < total_full,
+            "fixture must include a file with imports so total_tier1 \
+             ({total_tier1}) < total_full ({total_full})",
+        );
+        // Pick file_budget strictly between total_tier1 and total_full.
+        // Then pick budget so `budget - skeleton - safety_margin ==
+        // file_budget`. Safety margin is `(budget/20).max(16)`. For a
+        // sufficiently large budget (≥ 320), this is `budget/20`, giving a
+        // fixed-point equation: budget = skeleton + file_budget + budget/20
+        //   → budget * 19/20 = skeleton + file_budget
+        //   → budget = (skeleton + file_budget) * 20 / 19
+        // Use the midpoint of (total_tier1, total_full) as the file_budget
+        // target. Round up slightly so integer-division floor doesn't push
+        // us back under total_tier1.
+        let mid_file_budget = total_tier1 + (total_full - total_tier1) / 2 + 1;
+        let budget = ((skeleton_cost + mid_file_budget) * 20).div_ceil(19);
+        // Verify construction: under the correct implementation the fast
+        // tier1 path should fire.
+        let safety_margin = (budget / 20).max(16);
+        let file_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        assert!(
+            total_full > file_budget,
+            "construction invalid: total_full ({total_full}) must exceed \
+             file_budget ({file_budget}) to skip the all-full fast path",
+        );
+        assert!(
+            total_tier1 <= file_budget,
+            "construction invalid: total_tier1 ({total_tier1}) must fit in \
+             file_budget ({file_budget}) to enter the tier1 fast path",
+        );
+
+        let trimmed = enforce_token_budget(&mut response, budget);
+        assert_eq!(trimmed.len(), 1, "exactly one file should be trimmed");
+        assert!(
+            trimmed.contains(&"has_imports.rs".to_string()),
+            "has_imports.rs must appear in the trimmed list; trimmed={trimmed:?}"
+        );
+        assert!(
+            !trimmed.contains(&"no_imports.rs".to_string()),
+            "no_imports.rs was never altered and must not appear; trimmed={trimmed:?}"
+        );
+        // no_imports.rs still has functions_changed because we didn't drop
+        // to bare for either file.
+        let no_imports_entry = response
+            .files
+            .iter()
+            .find(|f| f.path == "no_imports.rs")
+            .expect("no_imports.rs must still be present");
+        assert!(
+            no_imports_entry.functions_changed.is_some(),
+            "no_imports.rs should keep its function signatures at tier1"
+        );
     }
 }
