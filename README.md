@@ -55,6 +55,29 @@ claude mcp add git-prism -- git-prism serve
 That's it. The server uses stdio transport and is available in all Claude Code
 sessions.
 
+## Bundled redirect hooks
+
+### What it does
+
+The bundled redirect hook blocks accidental bash redirections that overwrite tracked files in agentic sessions. It soft-warns on watch-listed paths and hard-blocks `gh pr diff` and `mcp__github__*` tool calls that use output redirection. The hook uses a Python stdlib tokenizer (`shlex`) to parse bash structurally, catching compound commands (`&&`), subshells, pipelines, and variable expansion — not just simple regexes.
+
+Requires `python3` (3.9+) on PATH. macOS ships this; Linux users can install via the system package manager.
+
+### Install
+
+```bash
+git-prism hooks install
+```
+
+The command copies `~/.claude/hooks/git-prism-redirect.sh` and the Python helper alongside it, then writes a `PreToolUse` hook entry into Claude Code's `~/.claude/settings.json`. Default scope is `user` because Claude Code issue [anthropics/claude-code#13898](https://github.com/anthropics/claude-code/issues/13898) prevents custom subagents from correctly calling project-scoped MCP servers — using user scope ensures the redirect works in both root agents and subagents.
+
+### Uninstall and status
+
+```bash
+git-prism hooks uninstall   # removes the hook file and settings.json entry
+git-prism hooks status      # shows whether the hook is installed and at which scope
+```
+
 ## Tools
 
 ### `get_change_manifest`
