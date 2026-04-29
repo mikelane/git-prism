@@ -33,7 +33,7 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::tools::context::{build_function_context_with_options, ContextOptions};
+use crate::tools::context::{ContextOptions, build_function_context_with_options};
 use crate::tools::manifest::{build_manifest, build_worktree_manifest};
 use crate::tools::types::{FunctionContextResponse, ManifestOptions, ManifestResponse, ToolError};
 
@@ -133,11 +133,7 @@ pub fn split_budget(budget: usize) -> (usize, usize) {
 /// expect: `0` becomes `None` (budget disabled), positive values become
 /// `Some(n)`.
 fn budget_to_option(value: usize) -> Option<usize> {
-    if value == 0 {
-        None
-    } else {
-        Some(value)
-    }
+    if value == 0 { None } else { Some(value) }
 }
 
 /// Build a combined `review_change` response by orchestrating the manifest
