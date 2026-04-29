@@ -171,14 +171,14 @@ echo -e "${BLUE}╚════════════════════�
 
 echo -e "${DIM}# Inside git-prism's own repo. First the porcelain agents reach for.${RESET}"
 type_cmd "git diff HEAD~1..HEAD"
-(cd "$REPO_ROOT" && git --no-pager diff HEAD~1..HEAD | head -25)
+(cd "$REPO_ROOT" && git --no-pager diff HEAD~1..HEAD | head -25) || true
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
 sleep 15.0  # git_diff_problem: 16.4s
 
 echo -e "${DIM}# Same change, structured per-file metadata — no @@ hunks, no +/- noise.${RESET}"
 type_cmd "git-prism manifest HEAD~1..HEAD"
 (cd "$REPO_ROOT" && "$BINARY" manifest HEAD~1..HEAD 2>/dev/null \
-    | python3 -m json.tool | head -30)
+    | python3 -m json.tool | head -30) || true
 echo -e "${DIM}  ... (truncated for demo) ...${RESET}\n"
 sleep 17.0  # review_change: 18.8s
 
