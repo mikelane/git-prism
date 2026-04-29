@@ -33,6 +33,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 
+/// Resolve `$HOME` for the current process. Returns an error rather than a
+/// silent fallback so misconfigured environments fail loudly instead of
+/// quietly writing into `/.claude/settings.json`.
+pub fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("HOME environment variable is not set"))
+}
+
 /// Sentinel id this binary writes into `PreToolUse` entries. Bumping the
 /// trailing version is how we communicate breaking changes in the hook's
 /// on-disk contract; older binaries refuse to downgrade.
@@ -437,7 +446,7 @@ pub fn install_redirect_hook(
         Ok(InstallOutcome::Updated) => {
             writeln!(
                 stdout,
-                "Updated git-prism redirect hook at {} scope (stale path replaced)",
+                "git-prism redirect hook at {} scope: updated (stale path replaced)",
                 options.scope.as_str()
             )?;
             Ok(0)
@@ -452,7 +461,7 @@ pub fn install_redirect_hook(
         Ok(InstallOutcome::UpdatedForced) => {
             writeln!(
                 stdout,
-                "Updated git-prism redirect hook at {} scope (--force overwrote user-edited entry)",
+                "git-prism redirect hook at {} scope: updated (--force overwrote user-edited entry)",
                 options.scope.as_str()
             )?;
             Ok(0)
@@ -545,7 +554,7 @@ mod tests {
         }
     }
 
-    fn read_json(path: &Path) -> Value {
+    fn read_settings_json(path: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -559,7 +568,7 @@ mod tests {
             plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Installed));
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["id"], json!(SENTINEL_ID));
@@ -604,7 +613,7 @@ mod tests {
         let sha_after = sha256_of_file(&settings);
         assert_eq!(sha_before, sha_after);
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1, "duplicate entry was appended on no-op");
     }
@@ -633,7 +642,7 @@ mod tests {
             plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Updated));
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         let cmd = entries[0]["command"].as_str().unwrap();
@@ -663,7 +672,7 @@ mod tests {
             plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Skipped));
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries[0]["command"], json!("echo HAND-EDITED"));
     }
@@ -689,7 +698,7 @@ mod tests {
         let outcome = plan_and_apply_install(&settings, &hooks, &options).unwrap();
         assert!(matches!(outcome, InstallOutcome::UpdatedForced));
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         let cmd = entries[0]["command"].as_str().unwrap();
         assert_ne!(cmd, "echo HAND-EDITED");
@@ -719,7 +728,7 @@ mod tests {
         assert!(msg.contains("uninstall"), "{msg}");
 
         // Settings are unchanged.
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["id"], json!("git-prism-bash-redirect-v2"));
@@ -743,7 +752,7 @@ mod tests {
 
         uninstall_redirect_hook(Scope::User, home, home).unwrap();
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["id"], json!("user-custom-hook"));
@@ -929,12 +938,188 @@ mod tests {
 
         plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
 
-        let data = read_json(&settings);
+        let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
         let ids: Vec<_> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"user-custom-hook"));
         assert!(ids.contains(&SENTINEL_ID));
+    }
+
+    // -------------------------------------------------------------------------
+    // uninstall_redirect_hook edge cases
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn uninstall_is_a_no_op_when_settings_file_does_not_exist() {
+        // Exercises the early-return guard. If the guard is removed the
+        // function would error trying to read a nonexistent file.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let result = uninstall_redirect_hook(Scope::User, home, home);
+        assert!(result.is_ok(), "uninstall on absent settings must succeed");
+        assert!(
+            !home.join(".claude").join("settings.json").exists(),
+            "uninstall must not create settings.json when it did not exist"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // other_scopes_with_sentinel
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn other_scopes_with_sentinel_returns_empty_when_only_current_scope_has_it() {
+        // Installs only at user scope. Scanning from user scope must return
+        // an empty list — the function skips the scope it is scanning for.
+        let home_dir = TempDir::new().unwrap();
+        let proj_dir = TempDir::new().unwrap();
+        let home = home_dir.path();
+        let cwd = proj_dir.path();
+        plan_and_apply_install(
+            &home.join(".claude/settings.json"),
+            &home.join(".claude/hooks"),
+            &install_options(Scope::User),
+        )
+        .unwrap();
+        let hits = other_scopes_with_sentinel(Scope::User, home, cwd);
+        assert!(hits.is_empty(), "expected no other scopes, got: {hits:?}");
+    }
+
+    #[test]
+    fn other_scopes_with_sentinel_returns_user_when_project_also_installed() {
+        // Installs at both user and project. Scanning from the project scope
+        // must return [User] so the cross-scope duplicate-redirect prompt fires.
+        let home_dir = TempDir::new().unwrap();
+        let proj_dir = TempDir::new().unwrap();
+        let home = home_dir.path();
+        let cwd = proj_dir.path();
+        plan_and_apply_install(
+            &home.join(".claude/settings.json"),
+            &home.join(".claude/hooks"),
+            &install_options(Scope::User),
+        )
+        .unwrap();
+        plan_and_apply_install(
+            &cwd.join(".claude/settings.json"),
+            &cwd.join(".claude/hooks"),
+            &install_options(Scope::Project),
+        )
+        .unwrap();
+        let hits = other_scopes_with_sentinel(Scope::Project, home, cwd);
+        assert_eq!(hits, vec![Scope::User]);
+    }
+
+    // -------------------------------------------------------------------------
+    // install_redirect_hook outcome-to-message wiring
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn install_redirect_hook_prints_installed_message_on_fresh_install() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let options = InstallOptions {
+            scope: Scope::User,
+            dry_run: false,
+            force: false,
+        };
+        let mut stdin = std::io::empty();
+        let mut stdout_buf = Vec::<u8>::new();
+        let mut stderr_buf = Vec::<u8>::new();
+        let code =
+            install_redirect_hook(&options, home, home, &mut stdin, &mut stdout_buf, &mut stderr_buf)
+                .unwrap();
+        assert_eq!(code, 0);
+        let out = String::from_utf8(stdout_buf).unwrap();
+        assert!(out.contains("Installed"), "expected 'Installed' in stdout, got: {out:?}");
+        assert!(out.contains("user"), "expected scope 'user' in stdout, got: {out:?}");
+        assert!(
+            String::from_utf8(stderr_buf).unwrap().is_empty(),
+            "expected empty stderr on fresh install"
+        );
+    }
+
+    #[test]
+    fn install_redirect_hook_is_silent_on_already_installed() {
+        let home_dir = TempDir::new().unwrap();
+        let cwd_dir = TempDir::new().unwrap(); // separate dir so project-scope scan doesn't collide
+        let home = home_dir.path();
+        let cwd = cwd_dir.path();
+        let options = InstallOptions {
+            scope: Scope::User,
+            dry_run: false,
+            force: false,
+        };
+        // First install — seeds the file.
+        let (mut s, mut o, mut e) = (std::io::empty(), Vec::<u8>::new(), Vec::<u8>::new());
+        install_redirect_hook(&options, home, cwd, &mut s, &mut o, &mut e).unwrap();
+        // Second install — AlreadyInstalled must produce zero output.
+        let mut stdin2 = std::io::empty();
+        let mut stdout_buf = Vec::<u8>::new();
+        let mut stderr_buf = Vec::<u8>::new();
+        let code =
+            install_redirect_hook(&options, home, cwd, &mut stdin2, &mut stdout_buf, &mut stderr_buf)
+                .unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            String::from_utf8(stdout_buf).unwrap().is_empty(),
+            "no-op install must produce no stdout"
+        );
+        assert!(
+            String::from_utf8(stderr_buf).unwrap().is_empty(),
+            "no-op install must produce no stderr"
+        );
+    }
+
+    #[test]
+    fn install_redirect_hook_prints_skipped_when_entry_is_user_edited() {
+        let home_dir = TempDir::new().unwrap();
+        let cwd_dir = TempDir::new().unwrap(); // separate dir so project-scope scan doesn't collide
+        let home = home_dir.path();
+        let cwd = cwd_dir.path();
+        let settings = home.join(".claude").join("settings.json");
+        let edited = json!({
+            "hooks": { "PreToolUse": [
+                {"id": SENTINEL_ID, "matcher": "Bash", "command": "echo HAND-EDITED"}
+            ]}
+        });
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+        let options = InstallOptions { scope: Scope::User, dry_run: false, force: false };
+        let mut stdin = std::io::empty();
+        let mut stdout_buf = Vec::<u8>::new();
+        let mut stderr_buf = Vec::<u8>::new();
+        let code =
+            install_redirect_hook(&options, home, cwd, &mut stdin, &mut stdout_buf, &mut stderr_buf)
+                .unwrap();
+        assert_eq!(code, 0);
+        let out = String::from_utf8(stdout_buf).unwrap();
+        assert!(out.contains("skipped"), "expected 'skipped' in stdout, got: {out:?}");
+    }
+
+    #[test]
+    fn install_redirect_hook_returns_exit_1_on_downgrade_attempt() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let settings = home.join(".claude").join("settings.json");
+        let v2 = json!({
+            "hooks": { "PreToolUse": [
+                {"id": "git-prism-bash-redirect-v2", "matcher": "Bash", "command": "echo v2"}
+            ]}
+        });
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
+        let options = InstallOptions { scope: Scope::User, dry_run: false, force: false };
+        let mut stdin = std::io::empty();
+        let mut stdout_buf = Vec::<u8>::new();
+        let mut stderr_buf = Vec::<u8>::new();
+        let code =
+            install_redirect_hook(&options, home, home, &mut stdin, &mut stdout_buf, &mut stderr_buf)
+                .unwrap();
+        assert_eq!(code, 1, "downgrade must return exit code 1");
+        let err = String::from_utf8(stderr_buf).unwrap();
+        assert!(err.contains("v2"), "stderr must name the blocking version, got: {err:?}");
+        assert!(err.contains("uninstall"), "stderr must mention 'uninstall', got: {err:?}");
     }
 
     fn sha256_of_file(path: &Path) -> String {

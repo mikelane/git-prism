@@ -388,7 +388,7 @@ class Decision:
 SILENT = Decision("silent")
 
 
-def decide_redirect(payload: dict) -> Decision:
+def decide_redirect(hook_event_payload: dict) -> Decision:
     """Map a Claude Code PreToolUse payload to a redirect decision.
 
     The function inspects ``tool_name`` first (so the MCP-shaped GitHub
@@ -396,7 +396,7 @@ def decide_redirect(payload: dict) -> Decision:
     bash command parser when the tool is ``Bash``. Any other tool kind
     is a silent no-op.
     """
-    tool_name = payload.get("tool_name", "")
+    tool_name = hook_event_payload.get("tool_name", "")
 
     if tool_name == "mcp__github__get_commit":
         return Decision(
@@ -414,14 +414,14 @@ def decide_redirect(payload: dict) -> Decision:
     if tool_name != "Bash":
         return SILENT
 
-    command = payload.get("tool_input", {}).get("command", "")
+    command = hook_event_payload.get("tool_input", {}).get("command", "")
     if not command:
         return SILENT
 
-    return _decide_bash(command)
+    return _decide_redirect_for_bash_command(command)
 
 
-def _decide_bash(command: str) -> Decision:
+def _decide_redirect_for_bash_command(command: str) -> Decision:
     """Dispatch a bash command string to the right Decision."""
     # ``gh pr diff`` is a hard block — don't even let the bash tokenizer
     # claim it, because we want exit 2 not exit 0.
@@ -501,8 +501,8 @@ def _matches_gh_pr_diff(command: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _is_functionally_empty(raw: str) -> bool:
-    """Return True when ``raw`` contains nothing but whitespace.
+def _is_functionally_empty(raw_stdin_content: str) -> bool:
+    """Return True when ``raw_stdin_content`` contains nothing but whitespace.
 
     A test harness that pipes a string like ``"\\n  \\n"`` into stdin
     sends the literal four-character escape sequence rather than a real
@@ -511,10 +511,10 @@ def _is_functionally_empty(raw: str) -> bool:
     counterparts before the emptiness check so a literal ``\\n`` is not
     mistaken for non-whitespace garbage.
     """
-    if not raw:
+    if not raw_stdin_content:
         return True
-    interpreted = raw.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
-    return not interpreted.strip()
+    decoded_content = raw_stdin_content.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+    return not decoded_content.strip()
 
 
 def _read_payload(stdin: io.TextIOBase) -> dict | None:
@@ -524,11 +524,11 @@ def _read_payload(stdin: io.TextIOBase) -> dict | None:
     input (fail-open with a single-line warning), and valid JSON (parse
     and dispatch). The caller is responsible for surfacing the warning.
     """
-    raw = stdin.read()
-    if _is_functionally_empty(raw):
+    raw_stdin_content = stdin.read()
+    if _is_functionally_empty(raw_stdin_content):
         return None
     try:
-        return json.loads(raw)
+        return json.loads(raw_stdin_content)
     except json.JSONDecodeError:
         sys.stderr.write(
             "git-prism-redirect: malformed JSON on stdin — skipping redirect\n"

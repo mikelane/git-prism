@@ -27,7 +27,7 @@ from typing import Any
 from behave import given, then, when
 from behave.runner import Context
 
-from repo_setup_steps import _commit, _init_repo, _write_file
+from repo_setup_steps import commit as _commit, init_repo as _init_repo, write_file as _write_file
 
 
 # A loose alias for "JSON-shaped object" — we accept any value type because
@@ -179,7 +179,8 @@ def _send_jsonrpc_to_server(
         timeout=20,
     )
     context.result = proc
-    # Find the response with id == 2
+    # Find the response with id == 2; collect malformed lines for diagnostics.
+    malformed_lines: list[str] = []
     for raw_line in proc.stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -187,13 +188,15 @@ def _send_jsonrpc_to_server(
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            malformed_lines.append(line)
             continue
         if obj.get("id") == 2:
             return obj
     raise AssertionError(
         f"No JSON-RPC response with id=2 found.\n"
-        f"stdout: {proc.stdout[:1000]}\n"
-        f"stderr: {proc.stderr[:1000]}"
+        f"stdout: {proc.stdout[:2000]}\n"
+        f"stderr: {proc.stderr[:1000]}\n"
+        f"malformed lines ({len(malformed_lines)}): {malformed_lines}"
     )
 
 
