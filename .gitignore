@@ -7,3 +7,23 @@ mutants.out*
 bdd/.venv/
 __pycache__/
 *.pyc
+
+# Secret files — never commit credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+service-account.json
+google-credentials.json
+*-credentials.json
+*.crt
+*.cer
+id_rsa
+id_ecdsa
+id_ed25519
