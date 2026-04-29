@@ -27,7 +27,11 @@ from typing import Any
 from behave import given, then, when
 from behave.runner import Context
 
-from repo_setup_steps import commit as _commit, init_repo as _init_repo, write_file as _write_file
+from repo_setup_steps import (
+    commit as _commit,
+    init_repo as _init_repo,
+    write_file as _write_file,
+)
 
 
 # A loose alias for "JSON-shaped object" — we accept any value type because

@@ -76,8 +76,7 @@ class TestHasRefRange(unittest.TestCase):
 
     def test_bare_double_dot_is_excluded(self):
         # ".." is the parent-directory shorthand, not a ref range.
-        self.assertFalse(_has_ref_range([".."]));
-
+        self.assertFalse(_has_ref_range([".."]))
     def test_bare_triple_dot_is_excluded(self):
         self.assertFalse(_has_ref_range(["..."]))
 
@@ -393,6 +392,21 @@ class TestDecideRedirect(unittest.TestCase):
     def test_mcp_github_get_commit_as_bash_command_returns_block(self):
         decision = decide_redirect(
             self._bash_payload("mcp__github__get_commit owner=foo repo=bar sha=abc")
+        )
+        self.assertEqual(decision.mode, "block")
+
+    def test_mcp_github_list_commits_tool_name_returns_block(self):
+        payload = {
+            "tool_name": "mcp__github__list_commits",
+            "tool_input": {},
+            "hook_event_name": "PreToolUse",
+        }
+        decision = decide_redirect(payload)
+        self.assertEqual(decision.mode, "block")
+
+    def test_mcp_github_list_commits_as_bash_command_returns_block(self):
+        decision = decide_redirect(
+            self._bash_payload("mcp__github__list_commits owner=foo repo=bar")
         )
         self.assertEqual(decision.mode, "block")
 

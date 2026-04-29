@@ -45,13 +45,13 @@ pub fn home_dir() -> Result<PathBuf> {
 /// Sentinel id this binary writes into `PreToolUse` entries. Bumping the
 /// trailing version is how we communicate breaking changes in the hook's
 /// on-disk contract; older binaries refuse to downgrade.
-pub const SENTINEL_ID: &str = "git-prism-bash-redirect-v1";
+pub(crate) const SENTINEL_ID: &str = "git-prism-bash-redirect-v1";
 
 /// Filename of the redirect launcher script that's exec'd by Claude Code.
-pub const REDIRECT_SCRIPT_NAME: &str = "git-prism-redirect.sh";
+pub(crate) const REDIRECT_SCRIPT_NAME: &str = "git-prism-redirect.sh";
 
 /// Sibling Python helper invoked by the bash launcher.
-pub const REDIRECT_PY_NAME: &str = "bash_redirect_hook.py";
+pub(crate) const REDIRECT_PY_NAME: &str = "bash_redirect_hook.py";
 
 /// Embedded copy of `hooks/git-prism-redirect.sh` written next to the
 /// settings file at install time.
@@ -166,12 +166,13 @@ pub struct InstallOptions {
 }
 
 /// Compose the canonical `PreToolUse` entry written by this binary.
-fn canonical_entry(hooks_dir: &Path) -> Value {
-    json!({
-        "id": SENTINEL_ID,
-        "matcher": "Bash",
-        "command": hooks_dir.join(REDIRECT_SCRIPT_NAME).to_string_lossy(),
-    })
+fn canonical_entry(hooks_dir: &Path) -> Result<Value> {
+    let command = hooks_dir
+        .join(REDIRECT_SCRIPT_NAME)
+        .to_str()
+        .ok_or_else(|| anyhow!("hooks directory path contains non-UTF-8 bytes"))?
+        .to_string();
+    Ok(json!({ "id": SENTINEL_ID, "matcher": "Bash", "command": command }))
 }
 
 /// Read the settings file at `path` if it exists. Returns an empty object
@@ -294,12 +295,8 @@ fn set_executable(_path: &Path) -> Result<()> {
 /// points to the current `hooks_dir` but the suffix still matches the
 /// bundled launcher name. This catches users who moved `~/.claude` or
 /// upgraded an install whose absolute path drifted.
-fn is_stale_path(existing_command: &str, hooks_dir: &Path) -> bool {
-    let canonical = hooks_dir
-        .join(REDIRECT_SCRIPT_NAME)
-        .to_string_lossy()
-        .to_string();
-    if existing_command == canonical {
+fn is_stale_path(existing_command: &str, canonical_command: &str) -> bool {
+    if existing_command == canonical_command {
         return false;
     }
     existing_command.ends_with(REDIRECT_SCRIPT_NAME)
@@ -336,7 +333,7 @@ pub fn other_scopes_with_sentinel(scope: Scope, home: &Path, cwd: &Path) -> Vec<
 /// while `install_redirect_hook` (CLI entry) wires up `home`/`cwd` and
 /// the cross-scope prompt. Splitting them lets the unit tests drive every
 /// idempotency branch without invoking subprocesses.
-pub fn plan_and_apply_install(
+pub fn execute_install(
     settings_path: &Path,
     hooks_dir: &Path,
     options: &InstallOptions,
@@ -351,7 +348,7 @@ pub fn plan_and_apply_install(
         }
     }
 
-    let canonical = canonical_entry(hooks_dir);
+    let canonical = canonical_entry(hooks_dir)?;
     let canonical_command = canonical
         .get("command")
         .and_then(|v| v.as_str())
@@ -383,7 +380,7 @@ pub fn plan_and_apply_install(
                 if existing_command == canonical_command {
                     return Ok(InstallOutcome::AlreadyInstalled);
                 }
-                if is_stale_path(&existing_command, hooks_dir) {
+                if is_stale_path(&existing_command, &canonical_command) {
                     entries[idx] = canonical;
                     InstallOutcome::Updated
                 } else if options.force {
@@ -396,8 +393,8 @@ pub fn plan_and_apply_install(
         }
     };
 
-    write_settings(settings_path, &settings)?;
     copy_bundled_scripts(hooks_dir)?;
+    write_settings(settings_path, &settings)?;
     Ok(outcome)
 }
 
@@ -433,7 +430,7 @@ pub fn install_redirect_hook(
         }
     }
 
-    match plan_and_apply_install(&paths.settings_file, &paths.hooks_dir, options) {
+    match execute_install(&paths.settings_file, &paths.hooks_dir, options) {
         Ok(InstallOutcome::Installed) => {
             writeln!(
                 stdout,
@@ -564,8 +561,7 @@ mod tests {
         let settings = dir.path().join("settings.json");
         let hooks = dir.path().join("hooks");
 
-        let outcome =
-            plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        let outcome = execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Installed));
 
         let data = read_settings_json(&settings);
@@ -583,7 +579,7 @@ mod tests {
         let settings = dir.path().join("settings.json");
         let hooks = dir.path().join("hooks");
 
-        plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
 
         let sh = hooks.join(REDIRECT_SCRIPT_NAME);
         let py = hooks.join(REDIRECT_PY_NAME);
@@ -604,11 +600,10 @@ mod tests {
         let settings = dir.path().join("settings.json");
         let hooks = dir.path().join("hooks");
 
-        plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         let sha_before = sha256_of_file(&settings);
 
-        let outcome =
-            plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        let outcome = execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::AlreadyInstalled));
         let sha_after = sha256_of_file(&settings);
         assert_eq!(sha_before, sha_after);
@@ -638,8 +633,7 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
 
-        let outcome =
-            plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        let outcome = execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Updated));
 
         let data = read_settings_json(&settings);
@@ -668,8 +662,7 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
 
-        let outcome =
-            plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        let outcome = execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Skipped));
 
         let data = read_settings_json(&settings);
@@ -695,7 +688,7 @@ mod tests {
 
         let mut options = install_options(Scope::User);
         options.force = true;
-        let outcome = plan_and_apply_install(&settings, &hooks, &options).unwrap();
+        let outcome = execute_install(&settings, &hooks, &options).unwrap();
         assert!(matches!(outcome, InstallOutcome::UpdatedForced));
 
         let data = read_settings_json(&settings);
@@ -721,7 +714,7 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
 
-        let err = plan_and_apply_install(&settings, &hooks, &install_options(Scope::User))
+        let err = execute_install(&settings, &hooks, &install_options(Scope::User))
             .expect_err("downgrade must be refused");
         let msg = err.to_string();
         assert!(msg.contains("v2"), "{msg}");
@@ -766,7 +759,7 @@ mod tests {
 
         let mut options = install_options(Scope::User);
         options.dry_run = true;
-        let outcome = plan_and_apply_install(&settings, &hooks, &options).unwrap();
+        let outcome = execute_install(&settings, &hooks, &options).unwrap();
         match outcome {
             InstallOutcome::DryRun(preview) => {
                 let entries = preview["hooks"]["PreToolUse"].as_array().unwrap();
@@ -819,7 +812,7 @@ mod tests {
         let home = dir.path();
         let settings = home.join(".claude").join("settings.json");
         let hooks = home.join(".claude").join("hooks");
-        plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
 
         let report = status_report(home, home, false).unwrap();
         assert_eq!(report.lines, vec![format!("user: {SENTINEL_ID}")]);
@@ -832,13 +825,13 @@ mod tests {
         let home = home_dir.path();
         let cwd = proj_dir.path();
 
-        plan_and_apply_install(
+        execute_install(
             &home.join(".claude/settings.json"),
             &home.join(".claude/hooks"),
             &install_options(Scope::User),
         )
         .unwrap();
-        plan_and_apply_install(
+        execute_install(
             &cwd.join(".claude/settings.json"),
             &cwd.join(".claude/hooks"),
             &install_options(Scope::Project),
@@ -915,8 +908,7 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, "").unwrap();
 
-        let outcome =
-            plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        let outcome = execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
         assert!(matches!(outcome, InstallOutcome::Installed));
     }
 
@@ -936,7 +928,7 @@ mod tests {
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
 
-        plan_and_apply_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
+        execute_install(&settings, &hooks, &install_options(Scope::User)).unwrap();
 
         let data = read_settings_json(&settings);
         let entries = data["hooks"]["PreToolUse"].as_array().unwrap();
@@ -976,7 +968,7 @@ mod tests {
         let proj_dir = TempDir::new().unwrap();
         let home = home_dir.path();
         let cwd = proj_dir.path();
-        plan_and_apply_install(
+        execute_install(
             &home.join(".claude/settings.json"),
             &home.join(".claude/hooks"),
             &install_options(Scope::User),
@@ -994,13 +986,13 @@ mod tests {
         let proj_dir = TempDir::new().unwrap();
         let home = home_dir.path();
         let cwd = proj_dir.path();
-        plan_and_apply_install(
+        execute_install(
             &home.join(".claude/settings.json"),
             &home.join(".claude/hooks"),
             &install_options(Scope::User),
         )
         .unwrap();
-        plan_and_apply_install(
+        execute_install(
             &cwd.join(".claude/settings.json"),
             &cwd.join(".claude/hooks"),
             &install_options(Scope::Project),
@@ -1063,8 +1055,17 @@ mod tests {
             force: false,
         };
         // First install — seeds the file.
-        let (mut s, mut o, mut e) = (std::io::empty(), Vec::<u8>::new(), Vec::<u8>::new());
-        install_redirect_hook(&options, home, cwd, &mut s, &mut o, &mut e).unwrap();
+        let (mut setup_stdin, mut setup_stdout, mut setup_stderr) =
+            (std::io::empty(), Vec::<u8>::new(), Vec::<u8>::new());
+        install_redirect_hook(
+            &options,
+            home,
+            cwd,
+            &mut setup_stdin,
+            &mut setup_stdout,
+            &mut setup_stderr,
+        )
+        .unwrap();
         // Second install — AlreadyInstalled must produce zero output.
         let mut stdin2 = std::io::empty();
         let mut stdout_buf = Vec::<u8>::new();

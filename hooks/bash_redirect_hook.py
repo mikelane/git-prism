@@ -35,7 +35,8 @@ import io
 import json
 import shlex
 import sys
-from typing import Iterable
+from collections.abc import Iterable
+from typing import IO, Any
 
 # Tokens that mark a command boundary inside the flat shlex output. After
 # tokenization we split the list at these tokens and treat each slice as
@@ -58,7 +59,7 @@ _NEWLINE_MARKER = "\n"
 
 
 def _tokenize_line(line: str) -> list[str]:
-    """Tokenize a single line of bash with shlex.
+    r"""Tokenize a single line of bash with shlex.
 
     A line is everything between two newline characters in the original
     command. Each line is lexed independently so a heredoc body whose
@@ -66,7 +67,7 @@ def _tokenize_line(line: str) -> list[str]:
     only close inside the body, for instance) cannot poison the parse
     of the surrounding code. On lex failure the offending line is
     represented by an empty list — the heredoc walker still sees the
-    surrounding ``\\n`` markers and the matcher safely no-ops on the
+    surrounding ``\n`` markers and the matcher safely no-ops on the
     blank slice.
     """
     if not line.strip():
@@ -106,10 +107,10 @@ def _heredoc_tag(token: str) -> tuple[str, bool] | None:
 
 
 def _tokenize_raw(command: str) -> list[str]:
-    """Produce a flat token list with explicit ``\\n`` separator tokens.
+    r"""Produce a flat token list with explicit ``\n`` separator tokens.
 
     Newline tokens act as line boundaries downstream: the heredoc walker
-    uses them to detect the closing tag (``\\n TAG \\n``), and the
+    uses them to detect the closing tag (``\n TAG \n``), and the
     candidate-command splitter treats them as command separators.
     """
     cleaned = _strip_backticks(command)
@@ -125,12 +126,12 @@ def _tokenize_raw(command: str) -> list[str]:
 
 
 def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
-    """Walk the token list and drop heredoc body tokens.
+    r"""Walk the token list and drop heredoc body tokens.
 
     Bash heredoc semantics: ``<<TAG`` consumes every line until a line
     whose only content is ``TAG``. The token stream from ``_tokenize_raw``
-    surfaces line boundaries as explicit ``\\n`` tokens, so the closing
-    line appears as ``\\n``, ``TAG``, ``\\n`` (or ``\\n``, ``TAG`` at
+    surfaces line boundaries as explicit ``\n`` tokens, so the closing
+    line appears as ``\n``, ``TAG``, ``\n`` (or ``\n``, ``TAG`` at
     end-of-stream). We walk linearly and drop body tokens until that
     sequence appears.
 
@@ -318,30 +319,30 @@ def _classify_git_command(tokens: list[str]) -> str | None:
     """
     if len(tokens) < 2 or tokens[0] != "git":
         return None
-    sub = tokens[1]
+    git_subcommand = tokens[1]
     rest = tokens[2:]
 
     # ``git log -S/-G`` is pickaxe — distinct redirect target. Check
     # before the generic ``git log a..b`` rule, which would otherwise
     # claim the same call.
-    if sub == "log" and _has_pickaxe_flag(rest):
+    if git_subcommand == "log" and _has_pickaxe_flag(rest):
         return "get_function_context"
-    if sub == "diff" and _has_ref_range(rest):
+    if git_subcommand == "diff" and _has_ref_range(rest):
         return "get_change_manifest"
-    if sub == "log" and _has_ref_range(rest):
+    if git_subcommand == "log" and _has_ref_range(rest):
         return "get_commit_history"
-    if sub == "blame":
+    if git_subcommand == "blame":
         return "get_file_snapshots"
-    if sub == "show":
+    if git_subcommand == "show":
         return "get_file_snapshots"
     return None
 
 
-def _advice_for_tool(tool_name: str, sub: str | None = None) -> str:
+def _advice_for_tool(tool_name: str, git_subcommand: str | None = None) -> str:
     """Return the ``additionalContext`` payload for a redirect target.
 
-    ``sub`` distinguishes ``git blame`` from ``git show`` when both map
-    to ``get_file_snapshots`` — the agent benefits from seeing the form
+    ``git_subcommand`` distinguishes ``git blame`` from ``git show`` when both
+    map to ``get_file_snapshots`` — the agent benefits from seeing the form
     that matches its original intent.
     """
     if tool_name == "get_change_manifest":
@@ -351,7 +352,7 @@ def _advice_for_tool(tool_name: str, sub: str | None = None) -> str:
     if tool_name == "get_function_context":
         return ADVICE_GET_FUNCTION_CONTEXT
     if tool_name == "get_file_snapshots":
-        if sub == "blame":
+        if git_subcommand == "blame":
             return ADVICE_GET_FILE_SNAPSHOTS_BLAME
         return ADVICE_GET_FILE_SNAPSHOTS_SHOW
     raise ValueError(f"Unknown redirect tool: {tool_name!r}")
@@ -388,7 +389,7 @@ class Decision:
 SILENT = Decision("silent")
 
 
-def decide_redirect(hook_event_payload: dict) -> Decision:
+def decide_redirect(hook_event_payload: dict[str, Any]) -> Decision:
     """Map a Claude Code PreToolUse payload to a redirect decision.
 
     The function inspects ``tool_name`` first (so the MCP-shaped GitHub
@@ -454,10 +455,10 @@ def _decide_redirect_for_bash_command(command: str) -> Decision:
         target = _classify_git_command(tokens)
         if target is None:
             continue
-        sub = tokens[1] if len(tokens) > 1 else None
+        git_subcommand = tokens[1] if len(tokens) > 1 else None
         return Decision(
             "advise",
-            advice=_advice_with_echo(_advice_for_tool(target, sub), tokens),
+            advice=_advice_with_echo(_advice_for_tool(target, git_subcommand), tokens),
             tool_name="Bash",
         )
 
@@ -502,22 +503,24 @@ def _matches_gh_pr_diff(command: str) -> bool:
 
 
 def _is_functionally_empty(raw_stdin_content: str) -> bool:
-    """Return True when ``raw_stdin_content`` contains nothing but whitespace.
+    r"""Return True when ``raw_stdin_content`` contains nothing but whitespace.
 
-    A test harness that pipes a string like ``"\\n  \\n"`` into stdin
+    A test harness that pipes a string like ``"\n  \n"`` into stdin
     sends the literal four-character escape sequence rather than a real
     newline. Bash and other shells uniformly treat such input as a
     no-op. Translate the common whitespace escapes back into their real
-    counterparts before the emptiness check so a literal ``\\n`` is not
+    counterparts before the emptiness check so a literal ``\n`` is not
     mistaken for non-whitespace garbage.
     """
     if not raw_stdin_content:
         return True
-    decoded_content = raw_stdin_content.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+    decoded_content = (
+        raw_stdin_content.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+    )
     return not decoded_content.strip()
 
 
-def _read_payload(stdin: io.TextIOBase) -> dict | None:
+def _read_payload(stdin: IO[str]) -> dict[str, Any] | None:
     """Return the parsed payload, ``None`` for empty/whitespace input.
 
     Distinguishes three states: no input at all (silent allow), garbage
@@ -528,7 +531,8 @@ def _read_payload(stdin: io.TextIOBase) -> dict | None:
     if _is_functionally_empty(raw_stdin_content):
         return None
     try:
-        return json.loads(raw_stdin_content)
+        parsed: dict[str, Any] = json.loads(raw_stdin_content)
+        return parsed
     except json.JSONDecodeError:
         sys.stderr.write(
             "git-prism-redirect: malformed JSON on stdin — skipping redirect\n"
