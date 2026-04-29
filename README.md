@@ -1,9 +1,10 @@
 # git-prism
 
-Agent-optimized git data for LLM agents. Four MCP tools that replace human-oriented
+Agent-optimized git data for LLM agents. Five MCP tools that replace human-oriented
 diffs with structured JSON -- function-level granularity, import tracking,
-dependency changes, complete file snapshots, per-commit history, and function
-context (callers, callees, test references).
+dependency changes, complete file snapshots, per-commit history, function
+context (callers, callees, test references), and a one-call `review_change`
+orchestration that combines manifest and function-context for PR review.
 
 ## The Problem
 
@@ -69,7 +70,7 @@ Returns structured metadata about what changed between two git refs.
 | `repo_path` | string | cwd | Path to the git repository |
 | `include_patterns` | string[] | `[]` | Glob patterns to include (e.g. `["*.rs", "*.go"]`) |
 | `exclude_patterns` | string[] | `[]` | Glob patterns to exclude (e.g. `["*.lock"]`) |
-| `include_function_analysis` | bool | `true` | Enable tree-sitter function/import analysis |
+| `include_function_analysis` | bool | `false` | Enable tree-sitter function/import analysis (opt-in; default keeps the response compact) |
 | `cursor` | string | `null` | Opaque pagination cursor from a previous response |
 | `page_size` | int | `100` | Max file entries per page (1-500) |
 
@@ -274,6 +275,10 @@ large repos. Unsupported languages fall back to full-repo scanning.
 | `base_ref` | string | _(required)_ | Base git ref |
 | `head_ref` | string | _(required)_ | Head git ref |
 | `repo_path` | string | cwd | Path to the git repository |
+| `cursor` | string | `null` | Opaque pagination cursor from a previous response |
+| `page_size` | int | `25` | Max function entries per page (1-500). Lower default than the manifest tool because each entry carries caller/callee lists |
+| `function_names` | string[] | `null` | Restrict the response to functions with these names. Use this to re-query a function whose lists were clamped on a prior call |
+| `max_response_tokens` | int | `8192` | Response-size budget in estimated tokens. When exceeded, caller/callee lists are trimmed per entry. `0` disables the budget |
 
 **Example output:**
 
@@ -320,6 +325,66 @@ use unusual import patterns), while `"fallback"` means the scan parsed every
 file in the repo (authoritative but slower). Use this to decide whether a
 zero-caller result is definitive or potentially incomplete.
 
+### `review_change`
+
+Returns combined change manifest and function-level blast radius for a ref
+range, in one call. Use this **instead of `git diff <ref>..<ref>`** when
+reviewing a PR, auditing a refactor, or assessing merge safety -- it answers
+"what changed and what might break" in one tool invocation, with structured
+JSON instead of raw diff text.
+
+Replaces the common two-step workflow (`get_change_manifest` then
+`get_function_context`) with a single call that runs both internally and splits
+the response-size budget 40/60 (manifest / function_context).
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `base_ref` | string | _(required)_ | Base git ref |
+| `head_ref` | string | _(omitted → working tree)_ | Head git ref. Omit to compare against the working tree (manifest only; the function-context half returns empty since callers/callees need committed content) |
+| `repo_path` | string | cwd | Path to the git repository |
+| `include_patterns` | string[] | `[]` | Glob patterns to include |
+| `exclude_patterns` | string[] | `[]` | Glob patterns to exclude |
+| `function_names` | string[] | `null` | Restrict the function-context half to these names |
+| `max_response_tokens` | int | `8192` | Combined budget; split 40/60 between manifest and function_context. `0` disables both halves' budgets |
+| `manifest_cursor` | string | `null` | Opaque cursor advancing only the manifest half |
+| `function_context_cursor` | string | `null` | Opaque cursor advancing only the function-context half |
+| `page_size` | int | `25` | Page size used for both halves |
+
+The two cursors are independent so an agent can advance one half (e.g., walk
+through a long file list) without re-paginating the other. Each sub-response
+carries its share of the budget in `metadata.budget_tokens` so downstream
+observability can audit the split decision.
+
+**Example output:**
+
+```json
+{
+  "manifest": {
+    "metadata": {
+      "base_ref": "HEAD~1",
+      "head_ref": "HEAD",
+      "budget_tokens": 1638,
+      "...": "..."
+    },
+    "summary": { "total_files_changed": 3, "...": "..." },
+    "files": [{ "path": "src/lib.rs", "...": "..." }],
+    "pagination": { "next_cursor": null, "...": "..." }
+  },
+  "function_context": {
+    "metadata": {
+      "base_ref": "HEAD~1",
+      "head_ref": "HEAD",
+      "budget_tokens": 2458,
+      "...": "..."
+    },
+    "functions": [{ "name": "validate", "blast_radius": { "risk": "medium" }, "...": "..." }],
+    "pagination": { "next_cursor": null, "...": "..." }
+  }
+}
+```
+
 ## CLI Usage
 
 git-prism also works as a standalone CLI for scripting and debugging:
@@ -354,7 +419,23 @@ result. The `languages` command outputs plain text.
 
 ## Agent Workflow
 
-The typical agent pattern is three calls -- triage, blast radius, then deep dive:
+### One-call path: PR review and refactor audits
+
+For PR review, refactor audits, or any "what changed and what might break" question,
+use `review_change` instead of `git diff`:
+
+```
+review_change(base_ref="main", head_ref="HEAD")
+```
+
+This returns a combined `{ manifest, function_context }` payload in one call, splitting
+the token budget 40/60 between the two halves. It replaces the two-step manifest +
+function_context workflow when you need both in the same session.
+
+### Three-call path: targeted inspection
+
+When you need finer control -- different budgets per half, filtering by function name,
+or deep-diving into specific files -- use the individual tools in order:
 
 **Step 1: Triage with `get_change_manifest`**
 
@@ -380,9 +461,10 @@ highest-impact files. You get complete before/after content -- no reconstructing
 files from diff hunks. Use `line_range` to focus on specific sections and
 `include_before: false` when you only need the current state.
 
-This three-step approach keeps token usage low. The manifest is compact metadata;
-context identifies the blast radius without reading file content; snapshots are
-requested only for files that need inspection.
+Both paths keep token usage low. `review_change` is the most efficient starting
+point for most review tasks; the three-call path is worth it when you need
+targeted re-queries or want to page through a large manifest separately from
+a large function list.
 
 ## Pagination
 

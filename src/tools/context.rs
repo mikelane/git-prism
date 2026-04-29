@@ -403,6 +403,7 @@ pub fn build_function_context_with_options(
             // Placeholder; see build_manifest for the two-pass estimate trick.
             token_estimate: 0,
             function_analysis_truncated: vec![],
+            budget_tokens: None,
             next_cursor: None,
         },
         functions: function_entries,

@@ -8,9 +8,9 @@ use crate::git::diff::ChangeScope;
 use crate::tools::types::{FunctionContextEntry, detect_language};
 use crate::tools::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,
-    ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions, SnapshotResponse,
-    build_function_context_with_options, build_history, build_manifest, build_snapshots,
-    build_worktree_manifest,
+    ManifestOptions, ManifestResponse, ReviewChangeArgs, ReviewChangeResponse, SnapshotArgs,
+    SnapshotOptions, SnapshotResponse, build_function_context_with_options, build_history,
+    build_manifest, build_review_change, build_snapshots, build_worktree_manifest,
 };
 
 /// Convert a `ChangeScope` variant to a static metric label string.
@@ -20,6 +20,26 @@ fn change_scope_label(scope: ChangeScope) -> &'static str {
         ChangeScope::Staged => "staged",
         ChangeScope::Unstaged => "unstaged",
     }
+}
+
+/// True when either half of a `review_change` response was truncated either by
+/// pagination (a non-`None` `next_cursor`) or by the token budget (a non-empty
+/// `function_analysis_truncated` list). Used by the span attribute and the
+/// truncation metric on the `review_change` handler — keeping one helper
+/// avoids the two-place check drifting if a third truncation source is added.
+fn review_change_response_truncated(response: &crate::tools::ReviewChangeResponse) -> bool {
+    response.manifest.pagination.next_cursor.is_some()
+        || response.function_context.pagination.next_cursor.is_some()
+        || !response
+            .manifest
+            .metadata
+            .function_analysis_truncated
+            .is_empty()
+        || !response
+            .function_context
+            .metadata
+            .function_analysis_truncated
+            .is_empty()
 }
 
 /// Group changed-function context entries by the language of their containing
@@ -60,22 +80,26 @@ impl Default for GitPrismServer {
 
 #[tool_router]
 impl GitPrismServer {
+    /// The cheapest tool in the toolkit — use this instead of `git diff`,
+    /// `gh pr diff`, or `git diff --stat` for any "what changed between X
+    /// and Y" question. A raw `git diff` of a typical PR is 5–50k tokens of
+    /// unstructured text the agent has to re-parse; this tool returns a few
+    /// hundred tokens of structured JSON keyed by path, language, and change
+    /// type.
+    ///
     /// Returns structured metadata about what changed between two git refs:
-    /// file changes, line counts, and dependency updates. Function-level
-    /// diffs and import changes are opt-in via `include_function_analysis:
-    /// true` (default: false) — the default response is deliberately small
-    /// so this tool stays cheap as a first call.
+    /// file changes, line counts, dependency updates, and (opt-in)
+    /// function-level diffs and import changes. Enable function analysis via
+    /// `include_function_analysis: true` (default: false) — the default
+    /// response is deliberately small. Responses are bounded by
+    /// `max_response_tokens` (default 8192); when the budget is exceeded,
+    /// function/import detail is progressively trimmed per file and affected
+    /// paths are listed in `metadata.function_analysis_truncated`. Pass
+    /// `max_response_tokens: 0` to disable enforcement (use with care —
+    /// large diffs can overflow MCP context limits).
     ///
-    /// Responses are bounded by `max_response_tokens` (default 8192). When
-    /// the response would exceed the budget, function/import detail is
-    /// progressively trimmed per file; affected paths are listed in
-    /// `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0`
-    /// to disable enforcement (use with care — large diffs can overflow
-    /// MCP context limits).
-    ///
-    /// This is the cheapest tool in the toolkit and should be your first
-    /// call for any "what changed between X and Y" question. Follow up with
-    /// `get_function_context` for caller/callee detail on specific functions.
+    /// Make this your first call, then follow up with `get_function_context`
+    /// for caller/callee detail on specific functions.
     #[tool(name = "get_change_manifest")]
     async fn get_change_manifest(
         &self,
@@ -243,12 +267,17 @@ impl GitPrismServer {
         result
     }
 
-    /// Returns one manifest per commit in a range, so agents can see
-    /// what changed in each commit separately.
-    #[tool(
-        name = "get_commit_history",
-        description = "Returns per-commit manifests for a range of commits"
-    )]
+    /// Returns one structured manifest per commit in a range — use this
+    /// **instead of `git log --stat`** or `git log -p` when you need to walk
+    /// a branch commit-by-commit. Each entry includes the commit SHA, author,
+    /// message, timestamp, per-file change metadata, and a summary. No diff
+    /// text to parse; no `+`/`-` prefixes to strip.
+    ///
+    /// Call `get_change_manifest` first when you only need the collapsed
+    /// view across the whole range. Use this tool when you need to attribute
+    /// changes to specific commits — for example, to bisect a regression or
+    /// audit an author's contribution.
+    #[tool(name = "get_commit_history")]
     async fn get_commit_history(
         &self,
         Parameters(args): Parameters<HistoryArgs>,
@@ -388,7 +417,10 @@ impl GitPrismServer {
 
     /// ⚠ COST WARNING: This is the most expensive tool in the toolkit. A single
     /// call with default flags returns (before_len + after_len) bytes PER path —
-    /// typically 5–20k tokens for a single modified source file.
+    /// typically 5–20k tokens for a single modified source file. Use this
+    /// instead of `git show <sha>:<path>` or `git show <sha> -- <path>` only
+    /// when you genuinely need the raw before/after source; for everything
+    /// else, the cheaper tools below already encode the answer.
     ///
     /// Before calling this tool:
     /// 1. Call `get_change_manifest` first — it returns function-level change
@@ -459,11 +491,11 @@ impl GitPrismServer {
             match &result {
                 Ok(response) => {
                     root_span.record("response_files_count", response.files.len() as i64);
-                    let any_truncated = response.files.iter().any(|f| {
+                    let is_any_file_truncated = response.files.iter().any(|f| {
                         f.before.as_ref().is_some_and(|c| c.truncated)
                             || f.after.as_ref().is_some_and(|c| c.truncated)
                     });
-                    root_span.record("response_truncated", any_truncated);
+                    root_span.record("response_truncated", is_any_file_truncated);
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }
@@ -514,13 +546,21 @@ impl GitPrismServer {
         result
     }
 
-    /// Returns callers, callees, and test references for each function that
-    /// changed between two git refs. Answers "what calls this function?" and
-    /// "what does this function call?" without the agent having to grep.
+    /// Use this instead of `git log -S '<symbol>'`, `git blame`, or recursive
+    /// `grep` for caller analysis — those force the agent to re-implement
+    /// symbol resolution from raw text, while this tool walks real tree-sitter
+    /// ASTs across 13 languages with import-scoped scanning so a "no callers"
+    /// result is authoritative, not just an unlucky grep.
     ///
-    /// This is the recommended second call after `get_change_manifest` when
-    /// you need to assess blast radius or understand how changed functions
-    /// are used.
+    /// The recommended second call after `get_change_manifest`: returns
+    /// callers, callees, and test references for each changed function, plus
+    /// a structured `blast_radius` score. Answers "what calls this function?",
+    /// "what does this function call?", and "is this change risky to land?"
+    /// Use when you need to assess blast radius or understand how changed
+    /// functions are used. Default page size is 25 entries with an opaque
+    /// cursor for further pages; `max_response_tokens` (default 8192) clamps
+    /// oversized caller/callee lists and surfaces them via `truncated: true`,
+    /// which you can re-query with `function_names: ["name"]` for full detail.
     #[tool(name = "get_function_context")]
     async fn get_function_context(
         &self,
@@ -610,8 +650,9 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. Double cost is acceptable at
+                // current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -646,6 +687,156 @@ impl GitPrismServer {
                 if !response.metadata.function_analysis_truncated.is_empty() {
                     metrics.record_truncated(tool_name, "token_budget");
                 }
+            }
+            Err(e) => {
+                metrics.record_request(tool_name, "error");
+                metrics.record_error(tool_name, crate::privacy::classify_error_kind(e));
+            }
+        }
+
+        result
+    }
+
+    /// Use this **instead of `git diff <ref>..<ref>`** when reviewing a PR,
+    /// auditing a refactor, or assessing merge safety — it answers "what
+    /// changed and what might break" in one tool invocation, with structured
+    /// JSON and per-function blast radius scores instead of raw diff text.
+    ///
+    /// Replaces the common two-step workflow:
+    ///   1. `get_change_manifest` — what changed
+    ///   2. `get_function_context` — blast radius and callers
+    /// with a single call that runs both internally and splits the token
+    /// budget 40/60 (manifest / function_context). Two independent cursors
+    /// (`manifest_cursor`, `function_context_cursor`) let you page each half
+    /// separately without resetting the other.
+    #[tool(name = "review_change")]
+    async fn review_change(
+        &self,
+        Parameters(args): Parameters<ReviewChangeArgs>,
+    ) -> Result<Json<ReviewChangeResponse>, String> {
+        let start = std::time::Instant::now();
+        let tool_name = "review_change";
+
+        // Extract ref info before moving args into spawn_blocking.
+        let base_ref_clone = args.base_ref.clone();
+        let head_ref_clone = args.head_ref.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let repo_path = match args.repo_path.as_deref() {
+                Some(p) => PathBuf::from(p),
+                None => std::env::current_dir()
+                    .map_err(|e| format!("cannot determine working directory: {e}"))?,
+            };
+
+            let root_span = tracing::info_span!(
+                "mcp.tool.review_change",
+                tool_name = "review_change",
+                repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
+                ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
+                ref_head = tracing::field::Empty,
+                response_files_count = tracing::field::Empty,
+                response_functions_count = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                response_truncated = tracing::field::Empty,
+            );
+            let _enter = root_span.enter();
+
+            if let Some(ref head) = args.head_ref {
+                root_span.record(
+                    "ref_head",
+                    crate::privacy::normalize_ref_pattern(head).as_str(),
+                );
+            } else {
+                root_span.record("ref_head", "worktree");
+            }
+
+            // Pagination metric — count any cursor-bearing call as a page
+            // traversal, on either sub-response. Mirrors the per-tool counters
+            // emitted by the underlying handlers.
+            if args.manifest_cursor.is_some() || args.function_context_cursor.is_some() {
+                crate::metrics::get().record_pagination_page(tool_name);
+            }
+
+            let result = build_review_change(&repo_path, args);
+
+            match &result {
+                Ok(response) => {
+                    root_span.record("response_files_count", response.manifest.files.len() as i64);
+                    root_span.record(
+                        "response_functions_count",
+                        response.function_context.functions.len() as i64,
+                    );
+                    root_span.record(
+                        "response_truncated",
+                        review_change_response_truncated(response),
+                    );
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "tool invocation failed");
+                }
+            }
+
+            result.map(Json).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let metrics = crate::metrics::get();
+        let duration_ms = start.elapsed().as_millis() as f64;
+        metrics.record_duration(tool_name, duration_ms);
+
+        match &result {
+            Ok(Json(response)) => {
+                metrics.record_request(tool_name, "success");
+
+                let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                metrics.record_response_bytes(tool_name, json_bytes as f64);
+                metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                metrics.record_files_returned(response.manifest.files.len() as f64);
+
+                for file in &response.manifest.files {
+                    if file.language != "unknown" {
+                        metrics.record_language(&file.language);
+                    }
+                    metrics.record_change_scope(change_scope_label(file.change_scope));
+                    if let Some(fns) = &file.functions_changed {
+                        metrics.record_functions_changed(&file.language, fns.len() as f64);
+                    }
+                }
+
+                let functions_per_language =
+                    functions_per_language_counts(&response.function_context.functions);
+                for (language, count) in &functions_per_language {
+                    metrics.record_language(language);
+                    metrics.record_functions_changed(language, *count as f64);
+                }
+
+                if response.manifest.pagination.next_cursor.is_some()
+                    || response.function_context.pagination.next_cursor.is_some()
+                {
+                    metrics.record_truncated(tool_name, "paginated");
+                }
+                if !response
+                    .manifest
+                    .metadata
+                    .function_analysis_truncated
+                    .is_empty()
+                    || !response
+                        .function_context
+                        .metadata
+                        .function_analysis_truncated
+                        .is_empty()
+                {
+                    metrics.record_truncated(tool_name, "token_budget");
+                }
+
+                metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
+                    &base_ref_clone,
+                    head_ref_clone.as_deref(),
+                ));
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");
@@ -714,6 +905,7 @@ mod tests {
         "get_commit_history",
         "get_file_snapshots",
         "get_function_context",
+        "review_change",
     ];
 
     #[test]
@@ -752,6 +944,66 @@ mod tests {
         );
     }
 
+    /// Build a minimal `FunctionContextEntry` for use in unit tests. Only the
+    /// `name` and `file` fields vary between test cases; all other fields are
+    /// zeroed/empty so tests stay focused on the behavior under test rather
+    /// than struct construction boilerplate.
+    fn make_entry(name: &str, file: &str) -> crate::tools::types::FunctionContextEntry {
+        use crate::tools::types::{
+            BlastRadius, CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
+            ScopingMode,
+        };
+        FunctionContextEntry {
+            name: name.to_string(),
+            file: file.to_string(),
+            change_type: FunctionChangeType::Modified,
+            blast_radius: BlastRadius::compute(0, 0),
+            scoping_mode: ScopingMode::Scoped,
+            callers: Vec::<CallerEntry>::new(),
+            callees: Vec::<CalleeEntry>::new(),
+            test_references: Vec::<CallerEntry>::new(),
+            caller_count: 0,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn it_registers_review_change_tool() {
+        let router = GitPrismServer::tool_router();
+        assert!(
+            router.has_route("review_change"),
+            "review_change must be registered as an MCP tool (issue #240)"
+        );
+    }
+
+    #[test]
+    fn it_publishes_comparative_git_diff_framing_in_review_change_schema() {
+        // The "instead of git diff" framing is the load-bearing pitch that
+        // makes review_change compete with raw git diff. Regress here if the
+        // doc comment ever loses it (issue #240).
+        let desc = schema_description_for("review_change");
+        assert!(
+            desc.contains("git diff"),
+            "review_change MCP schema description must mention 'git diff' to compete with the \
+             porcelain agents reach for by default. Got: {desc}"
+        );
+        assert!(
+            desc.contains("instead of"),
+            "review_change MCP schema description must use the 'instead of' framing — that's the \
+             load-bearing pitch flipping pretraining bias. Got: {desc}"
+        );
+        assert!(
+            desc.contains("blast radius"),
+            "review_change MCP schema description must mention 'blast radius' so agents know \
+             they get caller analysis, not just a manifest. Got: {desc}"
+        );
+        assert!(
+            desc.contains("40/60"),
+            "review_change MCP schema description must document the 40/60 budget split so agents \
+             know how their max_response_tokens is allocated. Got: {desc}"
+        );
+    }
+
     #[test]
     fn it_returns_empty_map_when_entries_is_empty() {
         let counts = functions_per_language_counts(&[]);
@@ -763,60 +1015,11 @@ mod tests {
 
     #[test]
     fn it_counts_function_context_entries_per_language() {
-        use crate::tools::types::{
-            BlastRadius, CalleeEntry, CallerEntry, FunctionChangeType, FunctionContextEntry,
-            ScopingMode,
-        };
-
         let entries = vec![
-            FunctionContextEntry {
-                name: "calculate".to_string(),
-                file: "src/lib.rs".to_string(),
-                change_type: FunctionChangeType::Modified,
-                blast_radius: BlastRadius::compute(0, 0),
-                scoping_mode: ScopingMode::Scoped,
-                callers: Vec::<CallerEntry>::new(),
-                callees: Vec::<CalleeEntry>::new(),
-                test_references: Vec::<CallerEntry>::new(),
-                caller_count: 0,
-                truncated: false,
-            },
-            FunctionContextEntry {
-                name: "helper".to_string(),
-                file: "src/main.rs".to_string(),
-                change_type: FunctionChangeType::Added,
-                blast_radius: BlastRadius::compute(0, 0),
-                scoping_mode: ScopingMode::Scoped,
-                callers: Vec::<CallerEntry>::new(),
-                callees: Vec::<CalleeEntry>::new(),
-                test_references: Vec::<CallerEntry>::new(),
-                caller_count: 0,
-                truncated: false,
-            },
-            FunctionContextEntry {
-                name: "process_data".to_string(),
-                file: "scripts/tool.py".to_string(),
-                change_type: FunctionChangeType::Added,
-                blast_radius: BlastRadius::compute(0, 0),
-                scoping_mode: ScopingMode::Scoped,
-                callers: Vec::<CallerEntry>::new(),
-                callees: Vec::<CalleeEntry>::new(),
-                test_references: Vec::<CallerEntry>::new(),
-                caller_count: 0,
-                truncated: false,
-            },
-            FunctionContextEntry {
-                name: "Binary".to_string(),
-                file: "blob.bin".to_string(),
-                change_type: FunctionChangeType::Added,
-                blast_radius: BlastRadius::compute(0, 0),
-                scoping_mode: ScopingMode::Scoped,
-                callers: Vec::<CallerEntry>::new(),
-                callees: Vec::<CalleeEntry>::new(),
-                test_references: Vec::<CallerEntry>::new(),
-                caller_count: 0,
-                truncated: false,
-            },
+            make_entry("calculate", "src/lib.rs"),
+            make_entry("helper", "src/main.rs"),
+            make_entry("process_data", "scripts/tool.py"),
+            make_entry("Binary", "blob.bin"),
         ];
 
         let counts = functions_per_language_counts(&entries);
@@ -830,14 +1033,14 @@ mod tests {
     }
 
     #[test]
-    fn it_registers_exactly_four_tools() {
+    fn it_registers_exactly_five_tools() {
         let router = GitPrismServer::tool_router();
         let tools = router.list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tools.len(),
-            4,
-            "expected exactly four MCP tools, found {}: {:?}",
+            5,
+            "expected exactly five MCP tools, found {}: {:?}",
             tools.len(),
             names
         );
@@ -862,13 +1065,13 @@ mod tests {
         // Advertising unimplemented capabilities causes MCP clients to call endpoints
         // that do not exist, producing confusing errors.
         let server = GitPrismServer::new();
-        let info = server.get_info();
+        let server_info = server.get_info();
         assert!(
-            info.capabilities.resources.is_none(),
+            server_info.capabilities.resources.is_none(),
             "resources capability must not be advertised — this server does not implement resources"
         );
         assert!(
-            info.capabilities.prompts.is_none(),
+            server_info.capabilities.prompts.is_none(),
             "prompts capability must not be advertised — this server does not implement prompts"
         );
     }
@@ -880,19 +1083,37 @@ mod tests {
         assert_eq!(change_scope_label(ChangeScope::Unstaged), "unstaged");
     }
 
+    /// Minimum description length below which a tool's MCP schema cannot
+    /// give an LLM agent enough context to make a routing decision. Mirrors
+    /// the `minimum_description_chars` guard in
+    /// `bdd/steps/redirect_hook_steps.py::step_description_mentions` so a
+    /// description that scrapes by the BDD layer would also be caught here
+    /// (and vice-versa). If you change this, change both call sites.
+    const MIN_DESCRIPTION_CHARS: usize = 80;
+
     /// Look up the MCP schema description for `tool_name` via the actual
     /// router, so assertions run against the same metadata MCP clients see
     /// over the wire (not just the doc comments in source).
     fn schema_description_for(tool_name: &str) -> String {
         let router = GitPrismServer::tool_router();
         let tools = router.list_all();
+        let registered: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         let tool = tools
             .iter()
             .find(|t| t.name.as_ref() == tool_name)
-            .unwrap_or_else(|| panic!("tool {tool_name} must be registered"));
+            .unwrap_or_else(|| {
+                panic!(
+                    "tool {tool_name:?} must be registered; registered tools are: {registered:?}"
+                )
+            });
         tool.description
             .as_deref()
-            .unwrap_or_else(|| panic!("tool {tool_name} must have a description in its MCP schema"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "tool {tool_name:?} must have a non-empty description in its MCP schema; \
+                     the description field is None — add a doc comment to the #[tool] handler"
+                )
+            })
             .to_string()
     }
 
@@ -1042,6 +1263,122 @@ mod tests {
             "MCP tool set drifted from EXPECTED_TOOLS. \
              If you added, removed, or renamed a tool, update the EXPECTED_TOOLS constant \
              in src/server.rs AND update README.md 'N MCP tools' count, CHANGELOG, and CLAUDE.md."
+        );
+    }
+
+    /// Each tool description must reference the raw git command(s) the tool
+    /// replaces, so an agent reading the MCP schema knows when to reach for
+    /// `git-prism` instead of falling back to its pretraining-default
+    /// `git diff`/`git log`/`git show`/`git log -S` reflex. These tests are
+    /// the fast in-binary mirror of the `@ISSUE-237` BDD scenario in
+    /// `bdd/features/redirect_hook.feature` — that scenario shells out to
+    /// `git-prism serve` and reads the descriptions over JSON-RPC, while
+    /// these tests read them straight off the in-process `tool_router`. Both
+    /// must agree.
+    #[test]
+    fn it_publishes_comparative_framing_for_get_change_manifest() {
+        let desc = schema_description_for("get_change_manifest");
+        assert!(
+            desc.contains("git diff"),
+            "get_change_manifest description must reference \"git diff\" (issue #237). Got: {desc}",
+        );
+        assert!(
+            desc.len() >= MIN_DESCRIPTION_CHARS,
+            "get_change_manifest description is only {} chars; need >= {} (issue #237). Got: {desc}",
+            desc.len(),
+            MIN_DESCRIPTION_CHARS,
+        );
+    }
+
+    #[test]
+    fn it_publishes_comparative_framing_for_get_commit_history() {
+        let desc = schema_description_for("get_commit_history");
+        assert!(
+            desc.contains("git log"),
+            "get_commit_history description must reference \"git log\" (issue #237). Got: {desc}",
+        );
+        assert!(
+            desc.len() >= MIN_DESCRIPTION_CHARS,
+            "get_commit_history description is only {} chars; need >= {} (issue #237). Got: {desc}",
+            desc.len(),
+            MIN_DESCRIPTION_CHARS,
+        );
+    }
+
+    #[test]
+    fn it_publishes_comparative_framing_for_get_file_snapshots() {
+        let desc = schema_description_for("get_file_snapshots");
+        assert!(
+            desc.contains("git show"),
+            "get_file_snapshots description must reference \"git show\" (issue #237). Got: {desc}",
+        );
+        assert!(
+            desc.len() >= MIN_DESCRIPTION_CHARS,
+            "get_file_snapshots description is only {} chars; need >= {} (issue #237). Got: {desc}",
+            desc.len(),
+            MIN_DESCRIPTION_CHARS,
+        );
+    }
+
+    #[test]
+    fn it_publishes_comparative_framing_for_get_function_context() {
+        let desc = schema_description_for("get_function_context");
+        assert!(
+            desc.contains("git log -S"),
+            "get_function_context description must reference \"git log -S\" (issue #237). Got: {desc}",
+        );
+        assert!(
+            desc.len() >= MIN_DESCRIPTION_CHARS,
+            "get_function_context description is only {} chars; need >= {} (issue #237). Got: {desc}",
+            desc.len(),
+            MIN_DESCRIPTION_CHARS,
+        );
+    }
+
+    /// Snapshot the full MCP-schema description for each tool so any future
+    /// drift in the prose surfaces as a reviewable diff in the snapshot file
+    /// rather than a silent change. The snapshots are the canonical record
+    /// of what agents see; substring assertions above prevent accidental
+    /// removal of load-bearing phrases, but only the snapshot catches "the
+    /// description got rewritten in a way that changes the agent's mental
+    /// model" (issue #237).
+    #[test]
+    fn it_snapshots_get_change_manifest_description() {
+        insta::assert_snapshot!(
+            "get_change_manifest_description",
+            schema_description_for("get_change_manifest")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_get_commit_history_description() {
+        insta::assert_snapshot!(
+            "get_commit_history_description",
+            schema_description_for("get_commit_history")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_get_file_snapshots_description() {
+        insta::assert_snapshot!(
+            "get_file_snapshots_description",
+            schema_description_for("get_file_snapshots")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_get_function_context_description() {
+        insta::assert_snapshot!(
+            "get_function_context_description",
+            schema_description_for("get_function_context")
+        );
+    }
+
+    #[test]
+    fn it_snapshots_review_change_description() {
+        insta::assert_snapshot!(
+            "review_change_description",
+            schema_description_for("review_change")
         );
     }
 }

@@ -377,6 +377,7 @@ pub fn build_manifest(
             // ManifestMetadata::token_estimate doc comment for the caveat.
             token_estimate: 0,
             function_analysis_truncated: vec![],
+            budget_tokens: None,
         },
         summary,
         files: manifest_files,
@@ -630,6 +631,7 @@ pub fn build_worktree_manifest(
             // Placeholder; see build_manifest for the two-pass rationale.
             token_estimate: 0,
             function_analysis_truncated: vec![],
+            budget_tokens: None,
         },
         summary,
         files: manifest_files,
@@ -3667,6 +3669,7 @@ mod tests {
                 version: "0.0.0".to_string(),
                 token_estimate: 0,
                 function_analysis_truncated: vec![],
+                budget_tokens: None,
             },
             summary: ManifestSummary {
                 total_files_changed: files.len(),
