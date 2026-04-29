@@ -1,6 +1,6 @@
 # ADR 0008: Redirect Hook Architecture
 
-- **Status**: Accepted
+- **Status**: Implemented
 - **Date**: 2026-04-26
 - **Context**: Spike for Epic #234 — bundled redirect hooks for git-prism
 
@@ -207,6 +207,16 @@ The hook script invokes `python3 -m bash_redirect_hook` after `cd`-ing into the 
 The principle is straightforward: a broken redirect hook must never block a working `git` command. Any other failure mode (silently dropping the warning, exiting non-zero, falling back to the legacy regex) trades a real cost — every git invocation becomes flaky on machines without `python3` — for a benefit the user will not notice (one missing redirect hint).
 
 Documented as a runtime prerequisite in the README `hooks` section: "Requires `python3` (3.9+) on PATH. macOS ships this; Linux package as appropriate."
+
+## Implementation
+
+Each decision item shipped in v0.7.0:
+
+- Decision 1 (tokenizer): PR #248
+- Decision 2 (wrapper script behavior): PR #248
+- Decision 3 (install ceremony): PR #249
+- Decision 4 (tool description rewrites): PR #245
+- Decision 5 (review_change parity tool): PR #247
 
 ## Consequences
 

@@ -81,7 +81,8 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 
 - `src/git/` — Git data access. Wraps `gix`. Returns structured Rust types, never strings.
 - `src/treesitter/` — Function/import extraction. Each language is a self-contained file implementing `LanguageAnalyzer` trait.
-- `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses. `context.rs` handles function context (callers/callees/test references).
+- `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses. `context.rs` handles function context (callers/callees/test references). `review_change.rs` combines manifest + function-context for a ref range, splitting the response budget 40/60 between the two halves.
+- `src/hooks.rs` — Implementation of `git-prism hooks install/uninstall/status`. Copies the bundled `hooks/git-prism-redirect.sh` (and `bash_redirect_hook.py`) into the target scope's hooks directory and writes a `PreToolUse` entry with sentinel `id: "git-prism-bash-redirect-v1"` into Claude Code's `settings.json`.
 - `src/pagination.rs` — Cursor encoding, pagination types, validation.
 - `src/metrics.rs` — OpenTelemetry metric catalog. Single `Metrics` struct with `record_*` helpers for requests, durations, response bytes, languages seen, change scopes, truncation reasons, pagination pages, gix ops, and tree-sitter parses. Attribute cardinality is bounded by construction.
 - `src/privacy.rs` — Privacy normalization for telemetry: SHA-256 `hash_repo_path`, `normalize_ref_pattern` enum mapping, `classify_ref_mode`, `classify_error_kind`. Keeps raw paths, ref names, and error messages out of exported spans.

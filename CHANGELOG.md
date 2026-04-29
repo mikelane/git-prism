@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.7.0] — TODO(release-day)
+
 ### Breaking Changes
 
 - **`get_change_manifest` default for `include_function_analysis` flipped to `false`.** Function-level diffs are now opt-in, aligning the tool's default with its "cheap first-resort" contract. Pass `include_function_analysis: true` to restore the previous behavior. The CLI adds an `--include-function-analysis` flag with the same effect.
@@ -25,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`function_names` as the escape hatch for re-querying clamped entries.** Agents that need the full caller / callee list for an entry that was clamped on a prior paginated call should re-request with `function_names: ["name"]` — the filtered response fits comfortably within the budget.
 - **Metadata mirrors pagination cursor.** `ContextMetadata.next_cursor` duplicates `pagination.next_cursor` for agents reading only the metadata block.
 - **Bounded-cardinality truncation metric.** `get_function_context` now emits `record_truncated(tool, reason)` with `reason="paginated"` when a next-page cursor is returned and `reason="token_budget"` when any entry was clamped, matching the manifest tool's signalling contract.
+- **Python bash tokenizer and bundled redirect hook script.** `hooks/bash_redirect_hook.py` uses `shlex.shlex(posix=True, punctuation_chars=True)` to structurally parse bash commands, covering compound (`&&`), subshell `(...)`, pipeline `|`, variable expansion, and heredoc-body suppression. The bundled `hooks/git-prism-redirect.sh` wraps it and implements the three-state exit-code protocol (0 = allow, 0+JSON = advisory, 2 = hard block). Stdlib-only; no third-party parser dependency. Includes a pytest suite under `hooks/tests/`. (#248)
+- **`git-prism hooks install/uninstall/status` subcommand group.** New CLI subcommand (`src/hooks.rs`) copies the bundled redirect hook into the target scope's hooks directory and writes a `PreToolUse` entry with a stable sentinel `id: "git-prism-bash-redirect-v1"` into Claude Code's `settings.json`. Default scope is `user` (`~/.claude/settings.json`) to avoid Claude Code issue anthropics/claude-code#13898, which prevents custom subagents from calling project-scoped MCP servers correctly. Re-install is idempotent; `--force` overwrites user-edited entries. `hooks status` prints a table of which scopes have the hook installed and at what version. (#249)
+- **ADR 0008: redirect hook architecture.** Documents all six architectural decisions for the redirect-hook epic: bash tokenizer choice (`shlex` over `bashlex` and handwritten parsers), `--scope` semantics mirroring `claude mcp add`, idempotency via sentinel `id` field, BDD testability contract, `--scope user` default to dodge the project-scope subagent MCP bug (#13898), and fail-open behavior when `python3` is missing. (#243)
+- **`.claudeignore` to reduce LLM scan noise.** Excludes build artifacts (`target/`), vendored grammars, BDD fixtures, and demo recordings from LLM context windows. (#251)
+
+### Dependencies
+
+- `tree-sitter-c` bumped from 0.23.4 to 0.24.2 (#233)
+- `gix` bumped from 0.81.0 to 0.83.0 (0.82.0 was yanked) (#232)
+- `sha2` bumped from 0.10.9 to 0.11.0 (#199)
 
 ## [0.6.0] — 2026-04-09
 
@@ -162,6 +180,7 @@ Function-level analysis now covers 13 languages (was 8). The selection targets w
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.7.0]: https://github.com/mikelane/git-prism/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mikelane/git-prism/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mikelane/git-prism/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mikelane/git-prism/compare/v0.3.1...v0.4.0
