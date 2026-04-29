@@ -531,7 +531,7 @@ def _read_payload(stdin: io.TextIOBase) -> dict | None:
         return json.loads(raw)
     except json.JSONDecodeError:
         sys.stderr.write(
-            "git-prism-redirect: malformed JSON on stdin; skipping redirect\n"
+            "git-prism-redirect: malformed JSON on stdin — skipping redirect\n"
         )
         return None
 
@@ -553,19 +553,18 @@ def _emit_advice(advice: str) -> None:
     sys.stdout.write("\n")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     """Read the hook payload from stdin and dispatch a Decision.
 
     Returns the exit code (0 for silent / advise, 2 for block). The
     function never raises; any unexpected error is converted into a
     fail-open silent allow with a single-line stderr warning.
     """
-    _ = argv  # CLI args reserved for future flags; ignored today.
     try:
         payload = _read_payload(sys.stdin)
     except Exception:  # pragma: no cover - last-resort safety net
         sys.stderr.write(
-            "git-prism-redirect: unexpected stdin error; skipping redirect\n"
+            "git-prism-redirect: unexpected stdin error — skipping redirect\n"
         )
         return 0
 
@@ -574,16 +573,27 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(payload, dict):
         return 0
 
-    decision = decide_redirect(payload)
-    if decision.mode == "advise":
-        _emit_advice(decision.advice)
+    try:
+        decision = decide_redirect(payload)
+    except Exception:  # pragma: no cover - fail-open per ADR Decision 6
+        sys.stderr.write(
+            "git-prism-redirect: unexpected error classifying command; skipping redirect\n"
+        )
         return 0
-    if decision.mode == "block":
-        sys.stderr.write(decision.message)
-        sys.stderr.write("\n")
-        return 2
+
+    try:
+        if decision.mode == "advise":
+            _emit_advice(decision.advice)
+            return 0
+        if decision.mode == "block":
+            sys.stderr.write(decision.message)
+            sys.stderr.write("\n")
+            return 2
+    except Exception:  # pragma: no cover - BrokenPipeError or similar; never block the agent
+        return 0
+
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())

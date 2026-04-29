@@ -415,11 +415,11 @@ pub fn install_redirect_hook(
             other.as_str()
         )?;
         let mut buf = [0u8; 1];
-        let response = match stdin.read(&mut buf)? {
+        let user_confirmation_char = match stdin.read(&mut buf)? {
             0 => 'n',
             _ => buf[0] as char,
         };
-        if response != 'y' && response != 'Y' {
+        if user_confirmation_char != 'y' && user_confirmation_char != 'Y' {
             return Ok(0);
         }
     }
@@ -437,7 +437,7 @@ pub fn install_redirect_hook(
         Ok(InstallOutcome::Updated) => {
             writeln!(
                 stdout,
-                "git-prism redirect hook at {} scope updated (stale path replaced)",
+                "Updated git-prism redirect hook at {} scope (stale path replaced)",
                 options.scope.as_str()
             )?;
             Ok(0)
@@ -445,14 +445,14 @@ pub fn install_redirect_hook(
         Ok(InstallOutcome::Skipped) => {
             writeln!(
                 stdout,
-                "skipped: user-customised entry preserved; use --force to overwrite"
+                "skipped: user-customized entry preserved; use --force to overwrite"
             )?;
             Ok(0)
         }
         Ok(InstallOutcome::UpdatedForced) => {
             writeln!(
                 stdout,
-                "git-prism redirect hook at {} scope updated (forced)",
+                "Updated git-prism redirect hook at {} scope (--force overwrote user-edited entry)",
                 options.scope.as_str()
             )?;
             Ok(0)
@@ -462,7 +462,7 @@ pub fn install_redirect_hook(
             Ok(0)
         }
         Err(err) => {
-            writeln!(stderr, "{err}")?;
+            writeln!(stderr, "{err:#}")?;
             Ok(1)
         }
     }
@@ -472,18 +472,23 @@ pub fn install_redirect_hook(
 /// `git-prism-bash-redirect-`. Other entries are left untouched.
 pub fn uninstall_redirect_hook(scope: Scope, home: &Path, cwd: &Path) -> Result<()> {
     let paths = ScopePaths::resolve(scope, home, cwd);
-    let mut settings = read_settings(&paths.settings_file)?;
     if !paths.settings_file.exists() {
         return Ok(());
     }
-    {
+    let mut settings = read_settings(&paths.settings_file)?;
+    let entry_count_before_removal = {
         let entries = pretool_use_array_mut(&mut settings);
+        let len = entries.len();
         entries.retain(|entry| {
             let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
             !id.starts_with("git-prism-bash-redirect-")
         });
+        len
+    };
+    let entry_count_after_removal = pretool_use_array_mut(&mut settings).len();
+    if entry_count_after_removal < entry_count_before_removal {
+        write_settings(&paths.settings_file, &settings)?;
     }
-    write_settings(&paths.settings_file, &settings)?;
     Ok(())
 }
 
@@ -832,17 +837,28 @@ mod tests {
         .unwrap();
 
         let report = status_report(home, cwd, true).unwrap();
-        assert!(
-            report
-                .lines
-                .iter()
-                .any(|l| l == &format!("user: {SENTINEL_ID}"))
+        // Assert exact count so a bug that emits duplicates cannot pass.
+        assert_eq!(
+            report.lines.len(),
+            2,
+            "expected exactly 2 status lines, got: {:?}",
+            report.lines
         );
         assert!(
             report
                 .lines
                 .iter()
-                .any(|l| l == &format!("project: {SENTINEL_ID}"))
+                .any(|l| l == &format!("user: {SENTINEL_ID}")),
+            "user scope line missing from: {:?}",
+            report.lines
+        );
+        assert!(
+            report
+                .lines
+                .iter()
+                .any(|l| l == &format!("project: {SENTINEL_ID}")),
+            "project scope line missing from: {:?}",
+            report.lines
         );
     }
 
@@ -852,6 +868,27 @@ mod tests {
         assert_eq!(
             newer_sentinel_id(&entries),
             Some("git-prism-bash-redirect-v2".to_string())
+        );
+    }
+
+    #[test]
+    fn newer_sentinel_id_returns_v3_when_present() {
+        // Triangulates that the function parses the version digit rather than
+        // matching the literal string "v2". A hardcoded match would return None here.
+        let entries = vec![json!({"id": "git-prism-bash-redirect-v3", "command": "x"})];
+        assert_eq!(
+            newer_sentinel_id(&entries),
+            Some("git-prism-bash-redirect-v3".to_string())
+        );
+    }
+
+    #[test]
+    fn newer_sentinel_id_returns_v10_when_present() {
+        // Triangulates multi-digit version parsing: v10 > 1 but is not "v2".
+        let entries = vec![json!({"id": "git-prism-bash-redirect-v10", "command": "x"})];
+        assert_eq!(
+            newer_sentinel_id(&entries),
+            Some("git-prism-bash-redirect-v10".to_string())
         );
     }
 
