@@ -1171,10 +1171,11 @@ mod tests {
     }
 
     fn sha256_of_file(path: &Path) -> String {
+        use crate::treesitter::finalize_hex;
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(path).unwrap();
         let mut h = Sha256::new();
         h.update(&bytes);
-        format!("{:x}", h.finalize())
+        finalize_hex(h)
     }
 }
