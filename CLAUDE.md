@@ -66,7 +66,7 @@ Rules:
 ## Key Dependencies
 
 - **`rmcp` 1.3** — MCP SDK. Tools defined with `#[tool_router]` and `#[tool]` proc macros. Stdio transport.
-- **`gix` 0.81** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`, `status`). Do not use `git2` or shell out to `git`.
+- **`gix`** — Pure Rust git. Use minimal feature flags (`basic`, `blob-diff`, `sha1`, `status`). Do not use `git2` or shell out to `git`.
 - **`tree-sitter` 0.26** — Native Rust. Grammar crates cover 13 languages: `tree-sitter-c`, `tree-sitter-cpp`, `tree-sitter-c-sharp`, `tree-sitter-go`, `tree-sitter-java`, `tree-sitter-javascript`, `tree-sitter-php`, `tree-sitter-python`, `tree-sitter-ruby`, `tree-sitter-rust`, `tree-sitter-swift`, `tree-sitter-typescript`. Kotlin is vendored under `vendor/tree-sitter-kotlin` and built via `build.rs` + `cc` because no published crate tracks current grammars.
 - **`sha2` 0.10** — SHA-256 hashing for function body content (content-aware diffs) and repo path privacy.
 - **`clap` 4** — CLI with derive API. Subcommands: `serve`, `manifest`, `snapshot`, `history`, `context`, `languages`.
