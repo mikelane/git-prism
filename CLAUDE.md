@@ -10,7 +10,7 @@ Supports both commit-to-commit comparison (`main..HEAD`) and working tree compar
 
 ## Tool Discipline (for agents calling git-prism)
 
-The four read tools have very different cost profiles. Agents should call them in this order:
+The diff-analysis tools have very different cost profiles. Agents should call them in this order:
 
 1. **`get_change_manifest`** — cheapest, first resort. Default response is file-level metadata, line counts, and dependency updates — a few hundred tokens for typical PRs. Function-level diffs and import changes are opt-in via `include_function_analysis: true` (default: false, as of issue #212 PR 3). Responses are bounded by `max_response_tokens` (default 8192); when the budget is exceeded, function/import detail is trimmed per file and affected paths are listed in `metadata.function_analysis_truncated`. Pass `max_response_tokens: 0` to disable enforcement when you genuinely need the full payload.
 2. **`get_function_context`** — second call. Callers, callees, test references, and blast radius for each changed function. Combined with (1), answers "what changed and what might break". This tool reads the full manifest internally (bypassing the budget) so it always gets complete function data. The response itself is bounded: default page size is 25 entries (opaque `cursor` to page further) and `max_response_tokens` defaults to 8192. When an entry is clamped, its `truncated: true` flag and a mirrored name in `metadata.function_analysis_truncated` signal the clamp; re-query with `function_names: ["name"]` to get the full caller / callee lists for a specific entry.

@@ -70,7 +70,7 @@ Returns structured metadata about what changed between two git refs.
 | `repo_path` | string | cwd | Path to the git repository |
 | `include_patterns` | string[] | `[]` | Glob patterns to include (e.g. `["*.rs", "*.go"]`) |
 | `exclude_patterns` | string[] | `[]` | Glob patterns to exclude (e.g. `["*.lock"]`) |
-| `include_function_analysis` | bool | `true` | Enable tree-sitter function/import analysis |
+| `include_function_analysis` | bool | `false` | Enable tree-sitter function/import analysis (opt-in; default keeps the response compact) |
 | `cursor` | string | `null` | Opaque pagination cursor from a previous response |
 | `page_size` | int | `100` | Max file entries per page (1-500) |
 
@@ -275,6 +275,10 @@ large repos. Unsupported languages fall back to full-repo scanning.
 | `base_ref` | string | _(required)_ | Base git ref |
 | `head_ref` | string | _(required)_ | Head git ref |
 | `repo_path` | string | cwd | Path to the git repository |
+| `cursor` | string | `null` | Opaque pagination cursor from a previous response |
+| `page_size` | int | `25` | Max function entries per page (1-500). Lower default than the manifest tool because each entry carries caller/callee lists |
+| `function_names` | string[] | `null` | Restrict the response to functions with these names. Use this to re-query a function whose lists were clamped on a prior call |
+| `max_response_tokens` | int | `8192` | Response-size budget in estimated tokens. When exceeded, caller/callee lists are trimmed per entry. `0` disables the budget |
 
 **Example output:**
 
@@ -415,7 +419,23 @@ result. The `languages` command outputs plain text.
 
 ## Agent Workflow
 
-The typical agent pattern is three calls -- triage, blast radius, then deep dive:
+### One-call path: PR review and refactor audits
+
+For PR review, refactor audits, or any "what changed and what might break" question,
+use `review_change` instead of `git diff`:
+
+```
+review_change(base_ref="main", head_ref="HEAD")
+```
+
+This returns a combined `{ manifest, function_context }` payload in one call, splitting
+the token budget 40/60 between the two halves. It replaces the two-step manifest +
+function_context workflow when you need both in the same session.
+
+### Three-call path: targeted inspection
+
+When you need finer control -- different budgets per half, filtering by function name,
+or deep-diving into specific files -- use the individual tools in order:
 
 **Step 1: Triage with `get_change_manifest`**
 
@@ -441,9 +461,10 @@ highest-impact files. You get complete before/after content -- no reconstructing
 files from diff hunks. Use `line_range` to focus on specific sections and
 `include_before: false` when you only need the current state.
 
-This three-step approach keeps token usage low. The manifest is compact metadata;
-context identifies the blast radius without reading file content; snapshots are
-requested only for files that need inspection.
+Both paths keep token usage low. `review_change` is the most efficient starting
+point for most review tasks; the three-call path is worth it when you need
+targeted re-queries or want to page through a large manifest separately from
+a large function list.
 
 ## Pagination
 
