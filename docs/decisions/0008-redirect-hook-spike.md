@@ -212,11 +212,12 @@ Documented as a runtime prerequisite in the README `hooks` section: "Requires `p
 
 Each decision item shipped in v0.7.0:
 
-- Decision 1 (tokenizer): PR #248
-- Decision 2 (wrapper script behavior): PR #248
-- Decision 3 (install ceremony): PR #249
-- Decision 4 (tool description rewrites): PR #245
-- Decision 5 (review_change parity tool): PR #247
+- Decision 1 (tokenizer, shlex): PR #248
+- Decision 2 (--scope semantics): PR #249
+- Decision 3 (idempotency sentinel `id`): PR #249
+- Decision 4 (BDD testability): PR #248 (pytest suite), PR #249 (BDD scenarios)
+- Decision 5 (default --scope user): PR #249
+- Decision 6 (fail-open on missing python3): PR #248
 
 ## Consequences
 
