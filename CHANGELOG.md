@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.7.0] — 2026-04-29
+
 ### Breaking Changes
 
 - **`get_change_manifest` default for `include_function_analysis` flipped to `false`.** Function-level diffs are now opt-in, aligning the tool's default with its "cheap first-resort" contract. Pass `include_function_analysis: true` to restore the previous behavior. The CLI adds an `--include-function-analysis` flag with the same effect.
@@ -172,6 +180,7 @@ Function-level analysis now covers 13 languages (was 8). The selection targets w
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.7.0]: https://github.com/mikelane/git-prism/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mikelane/git-prism/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mikelane/git-prism/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/mikelane/git-prism/compare/v0.3.1...v0.4.0
