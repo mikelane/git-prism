@@ -39,7 +39,17 @@ mutants.out*
 .DS_Store
 Thumbs.db
 
-# Binary media (demo recordings, narration, asciinema)
+# Credentials and private keys (defense-in-depth: keep out of agent context)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+service-account.json
+*-credentials.json
+
+# Binary assets (recordings, images, documents, archives)
 *.mp4
 *.mp3
 *.gif
@@ -51,8 +61,11 @@ Thumbs.db
 *.zip
 *.tar.gz
 demo/recordings/
-demo/v0.2.0/
+demo/v*/
 recordings/
 
 # Other tooling state
 .opencode/
+
+# vendor/ is intentionally NOT ignored — vendor/tree-sitter-kotlin/ is a Kotlin
+# grammar built by build.rs at compile time and must remain readable.
