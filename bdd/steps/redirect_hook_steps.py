@@ -27,7 +27,11 @@ from typing import Any
 from behave import given, then, when
 from behave.runner import Context
 
-from repo_setup_steps import _commit, _init_repo, _write_file
+from repo_setup_steps import (
+    commit as _commit,
+    init_repo as _init_repo,
+    write_file as _write_file,
+)
 
 
 # A loose alias for "JSON-shaped object" — we accept any value type because
@@ -179,7 +183,8 @@ def _send_jsonrpc_to_server(
         timeout=20,
     )
     context.result = proc
-    # Find the response with id == 2
+    # Find the response with id == 2; collect malformed lines for diagnostics.
+    malformed_lines: list[str] = []
     for raw_line in proc.stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -187,13 +192,15 @@ def _send_jsonrpc_to_server(
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            malformed_lines.append(line)
             continue
         if obj.get("id") == 2:
             return obj
     raise AssertionError(
         f"No JSON-RPC response with id=2 found.\n"
-        f"stdout: {proc.stdout[:1000]}\n"
-        f"stderr: {proc.stderr[:1000]}"
+        f"stdout: {proc.stdout[:2000]}\n"
+        f"stderr: {proc.stderr[:1000]}\n"
+        f"malformed lines ({len(malformed_lines)}): {malformed_lines}"
     )
 
 
@@ -971,13 +978,24 @@ def step_install_project_with_answer(context: Context, answer: str) -> None:
 
 @given('the redirect hook install state is "{state}"')
 def step_redirect_hook_state(context: Context, state: str) -> None:
-    """Drive `hooks status` triangulation by setting up three different states.
+    """Drive `hooks status` triangulation by setting up four different states.
 
     `none` leaves both settings files absent; `user-only` runs the user
-    install; `user-and-project` runs both. The status command must
-    distinguish all three.
+    install; `project-only` runs only the project install; `user-and-project`
+    runs both. The status command must distinguish all four.
     """
     if state == "none":
+        return
+    if state == "project-only":
+        proc = _run_git_prism(
+            context,
+            ["hooks", "install", "--scope", "project"],
+            cwd=context.project_repo_path,
+        )
+        assert proc.returncode == 0, (
+            f"Setup failed for state={state!r}: project install failed. "
+            f"stdout: {proc.stdout!r} stderr: {proc.stderr!r}"
+        )
         return
     proc = _run_git_prism(context, ["hooks", "install", "--scope", "user"])
     assert proc.returncode == 0, (

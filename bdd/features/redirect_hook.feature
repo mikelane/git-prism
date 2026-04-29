@@ -189,7 +189,7 @@ Feature: Redirect hooks for raw git invocations
   # JSON) of the bundled hook is exercised against the same shapes from W3.
   # ------------------------------------------------------------------------
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "hooks install --scope user" writes the expected entry to ~/.claude/settings.json
     Given an isolated HOME with an empty .claude directory
     When I install the redirect hook at user scope
@@ -197,7 +197,7 @@ Feature: Redirect hooks for raw git invocations
     And the user settings file contains a PreToolUse entry with id "git-prism-bash-redirect-v1"
     And the user hooks directory contains a "git-prism-redirect.sh" script
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "hooks install --scope project" writes to <repo>/.claude/settings.json
     Given an isolated HOME with an empty .claude directory
     And a temporary git repository as the working directory
@@ -206,7 +206,7 @@ Feature: Redirect hooks for raw git invocations
     And the project settings file contains a PreToolUse entry with id "git-prism-bash-redirect-v1"
     And the project hooks directory contains a "git-prism-redirect.sh" script
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Re-running "hooks install --scope user" is idempotent
     # Triangulates the "no duplicate write" property two ways: the file
     # bytes are unchanged AND the PreToolUse array length is unchanged.
@@ -220,7 +220,7 @@ Feature: Redirect hooks for raw git invocations
     Then the user settings file sha256 is unchanged
     And the user settings PreToolUse length is unchanged
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "hooks uninstall --scope user" removes only this command's entries
     Given an isolated HOME with an empty .claude directory
     And the user settings file contains an unrelated PreToolUse entry with id "user-custom-hook"
@@ -230,7 +230,7 @@ Feature: Redirect hooks for raw git invocations
     And the user settings file contains a PreToolUse entry with id "user-custom-hook"
     And the user settings file does not contain a PreToolUse entry with id "git-prism-bash-redirect-v1"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario Outline: Bundled hook redirects on tokenizer-recognized shapes (end-to-end)
     Given an isolated HOME with the bundled hook installed at user scope
     And a hook input with bash command "<command>"
@@ -245,7 +245,7 @@ Feature: Redirect hooks for raw git invocations
       | (git log main..HEAD)             | 0    | get_commit_history                            |
       | git diff $BASE..HEAD             | 0    | get_change_manifest                           |
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Bundled hook hard-blocks "gh pr diff" with exit code 2 and advisory text
     # Decision logic lives in the bundled hook, not the tokenizer — `gh pr
     # diff` is a hard-block target because the redirect is not advisory:
@@ -256,7 +256,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stderr contains "git-prism"
     And the hook stderr contains "get_change_manifest"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Bundled hook hard-blocks "mcp__github__get_commit" with exit code 2
     # The MCP-shaped GitHub tools have the same structured-data overlap as
     # `gh pr diff` and are hard-blocked for the same reason. The hook must
@@ -266,7 +266,7 @@ Feature: Redirect hooks for raw git invocations
     Then the hook exit code is 2
     And the hook stderr contains "git-prism"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Empty stdin is a no-op (exit 0, no stdout, no stderr)
     # If Claude Code invokes the hook without sending a payload (a
     # non-Bash tool, for instance), it must be a silent no-op. Exit 0 so
@@ -276,7 +276,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is empty
     And the hook stderr is empty
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Whitespace-only stdin is treated as empty (silent exit 0)
     # Whitespace-only payloads (a stray newline, a tab, multiple newlines)
     # must NOT be treated as malformed JSON — they are functionally empty.
@@ -288,7 +288,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout is empty
     And the hook stderr is empty
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Malformed JSON on stdin fails open with a one-line warning
     # Per ADR Decision 6: the hook never blocks on its own malfunction.
     # A garbage payload triggers a single-line stderr warning, exit 0.
@@ -299,7 +299,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stderr contains "malformed JSON"
     And the hook stderr is at most 1 line
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Missing python3 fails open with a documented stderr line
     # Per ADR Decision 6: if the script can't find a python3 interpreter
     # on PATH, it must announce that on stderr and exit 0 — never block
@@ -317,7 +317,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stderr contains "python3 not found on PATH"
     And the hook stderr contains "skipping redirect"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Re-install with a stale script path updates the entry in place
     # Path 3 from the ADR: settings.json already has a v1 entry but its
     # `command` field points at an old absolute path (the user moved
@@ -331,7 +331,7 @@ Feature: Redirect hooks for raw git invocations
     And the user settings file PreToolUse entry "git-prism-bash-redirect-v1" command does not contain "/old/stale/path"
     And the install stdout or stderr mentions "updated"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: User-edited entry is preserved by default and install logs a skip
     # Path 4a from the ADR: respect user customization. We detect drift by
     # checking the canonical sentinel fields; if `command` differs, skip.
@@ -342,7 +342,7 @@ Feature: Redirect hooks for raw git invocations
     And the user settings file PreToolUse entry "git-prism-bash-redirect-v1" command equals "echo HAND-EDITED"
     And the install stdout or stderr mentions "skipped"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "--force" overwrites a user-edited entry with the canonical entry
     # Path 4b from the ADR: explicit opt-out of the safety check.
     Given an isolated HOME with an empty .claude directory
@@ -352,7 +352,7 @@ Feature: Redirect hooks for raw git invocations
     And the user settings file PreToolUse entry "git-prism-bash-redirect-v1" command does not equal "echo HAND-EDITED"
     And the user settings file PreToolUse entry "git-prism-bash-redirect-v1" command contains "git-prism-redirect.sh"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Mixed-version downgrade is refused
     # Per ADR Decision 3: never downgrade. If a v2 entry already exists
     # and this binary writes v1, we abort with a clear remediation
@@ -367,7 +367,7 @@ Feature: Redirect hooks for raw git invocations
     And the user settings file PreToolUse entry "git-prism-bash-redirect-v2" command equals "echo v2"
     And the user settings file does not contain a PreToolUse entry with id "git-prism-bash-redirect-v1"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "--scope local" writes to settings.local.json, not settings.json
     Given an isolated HOME with an empty .claude directory
     And a temporary git repository as the working directory
@@ -376,7 +376,7 @@ Feature: Redirect hooks for raw git invocations
     And the project local settings file contains a PreToolUse entry with id "git-prism-bash-redirect-v1"
     And the project settings file does not exist
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Cross-scope install warns about duplicate redirects and aborts on "n"
     # User has user-scope already; trying project-scope must prompt because
     # the result would be two redirect hooks firing on every Bash call.
@@ -390,7 +390,7 @@ Feature: Redirect hooks for raw git invocations
     And the hook stderr contains "duplicate redirects"
     And the project settings file does not exist
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: Cross-scope install proceeds when the user answers "y"
     # Triangulates the cross-scope prompt — "n" rejects, "y" must accept.
     # Without this branch an impl that ignored the prompt entirely (always
@@ -403,7 +403,7 @@ Feature: Redirect hooks for raw git invocations
     Then the hook exit code is 0
     And the project settings file contains a PreToolUse entry with id "git-prism-bash-redirect-v1"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario Outline: "hooks status" reports installed scopes and versions
     Given an isolated HOME with an empty .claude directory
     And a temporary git repository as the working directory
@@ -418,7 +418,7 @@ Feature: Redirect hooks for raw git invocations
       | user-only          | user: git-prism-bash-redirect-v1    |
       | project-only       | project: git-prism-bash-redirect-v1 |
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "hooks status" reports BOTH scopes when both are installed
     # The Scenario Outline above can pass for "user-and-project" with a
     # substring match on either user: or project: alone. This scenario
@@ -431,7 +431,7 @@ Feature: Redirect hooks for raw git invocations
     Then the hook exit code is 0
     And the hook stdout contains both "user: git-prism-bash-redirect-v1" and "project: git-prism-bash-redirect-v1"
 
-  @ISSUE-239 @not_implemented
+  @ISSUE-239
   Scenario: "--dry-run" prints a diff but does not write settings.json
     Given an isolated HOME with an empty .claude directory
     When I install the redirect hook at user scope with "--dry-run"
