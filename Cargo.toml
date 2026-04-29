@@ -54,7 +54,7 @@ tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["http-proto"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [build-dependencies]
 cc = "1"

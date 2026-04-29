@@ -13,6 +13,23 @@ pub mod typescript;
 
 use sha2::{Digest, Sha256};
 
+/// Hex-encode the finalized digest of a hasher.
+///
+/// sha2 0.11 returned `hybrid_array::Array<u8, _>` from `finalize()`, which —
+/// unlike the previous `generic_array::GenericArray` — does not implement
+/// `LowerHex`. So `format!("{:x}", hasher.finalize())` no longer compiles.
+/// This helper produces byte-equivalent output via a hand-rolled hex loop,
+/// avoiding a new dependency for ~6 lines of formatting.
+pub fn finalize_hex<D: Digest>(hasher: D) -> String {
+    use std::fmt::Write;
+    let bytes = hasher.finalize();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes.iter() {
+        write!(out, "{:02x}", b).expect("writing to String never fails");
+    }
+    out
+}
+
 /// Maximum recursion depth for tree-walking analyzers.
 ///
 /// Treesitter analyzers that recurse through nested declarations (nested
@@ -31,7 +48,7 @@ pub const MAX_RECURSION_DEPTH: usize = 256;
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    finalize_hex(hasher)
 }
 
 /// Hash a function node's body for content-aware diffing.
