@@ -2,6 +2,7 @@ pub mod context;
 pub mod history;
 pub mod import_scope;
 pub mod manifest;
+pub mod review_change;
 pub mod size;
 pub mod snapshots;
 pub mod types;
@@ -9,6 +10,7 @@ pub mod types;
 pub use context::{ContextOptions, build_function_context_with_options};
 pub use history::build_history;
 pub use manifest::{build_manifest, build_worktree_manifest, enforce_token_budget};
+pub use review_change::{ReviewChangeArgs, ReviewChangeResponse, build_review_change};
 pub use snapshots::build_snapshots;
 pub use types::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,

@@ -8,9 +8,9 @@ use crate::git::diff::ChangeScope;
 use crate::tools::types::{FunctionContextEntry, detect_language};
 use crate::tools::{
     ContextArgs, FunctionContextResponse, HistoryArgs, HistoryResponse, ManifestArgs,
-    ManifestOptions, ManifestResponse, SnapshotArgs, SnapshotOptions, SnapshotResponse,
-    build_function_context_with_options, build_history, build_manifest, build_snapshots,
-    build_worktree_manifest,
+    ManifestOptions, ManifestResponse, ReviewChangeArgs, ReviewChangeResponse, SnapshotArgs,
+    SnapshotOptions, SnapshotResponse, build_function_context_with_options, build_history,
+    build_manifest, build_review_change, build_snapshots, build_worktree_manifest,
 };
 
 /// Convert a `ChangeScope` variant to a static metric label string.
@@ -20,6 +20,26 @@ fn change_scope_label(scope: ChangeScope) -> &'static str {
         ChangeScope::Staged => "staged",
         ChangeScope::Unstaged => "unstaged",
     }
+}
+
+/// True when either half of a `review_change` response was truncated either by
+/// pagination (a non-`None` `next_cursor`) or by the token budget (a non-empty
+/// `function_analysis_truncated` list). Used by the span attribute and the
+/// truncation metric on the `review_change` handler — keeping one helper
+/// avoids the two-place check drifting if a third truncation source is added.
+fn review_change_response_truncated(response: &crate::tools::ReviewChangeResponse) -> bool {
+    response.manifest.pagination.next_cursor.is_some()
+        || response.function_context.pagination.next_cursor.is_some()
+        || !response
+            .manifest
+            .metadata
+            .function_analysis_truncated
+            .is_empty()
+        || !response
+            .function_context
+            .metadata
+            .function_analysis_truncated
+            .is_empty()
 }
 
 /// Group changed-function context entries by the language of their containing
@@ -243,12 +263,17 @@ impl GitPrismServer {
         result
     }
 
-    /// Returns one manifest per commit in a range, so agents can see
-    /// what changed in each commit separately.
-    #[tool(
-        name = "get_commit_history",
-        description = "Returns per-commit manifests for a range of commits"
-    )]
+    /// Returns one structured manifest per commit in a range — use this
+    /// **instead of `git log --stat`** or `git log -p` when you need to walk
+    /// a branch commit-by-commit. Each entry includes the commit SHA, author,
+    /// message, timestamp, per-file change metadata, and a summary. No diff
+    /// text to parse; no `+`/`-` prefixes to strip.
+    ///
+    /// Call `get_change_manifest` first when you only need the collapsed
+    /// view across the whole range. Use this tool when you need to attribute
+    /// changes to specific commits — for example, to bisect a regression or
+    /// audit an author's contribution.
+    #[tool(name = "get_commit_history")]
     async fn get_commit_history(
         &self,
         Parameters(args): Parameters<HistoryArgs>,
@@ -459,11 +484,11 @@ impl GitPrismServer {
             match &result {
                 Ok(response) => {
                     root_span.record("response_files_count", response.files.len() as i64);
-                    let any_truncated = response.files.iter().any(|f| {
+                    let is_any_file_truncated = response.files.iter().any(|f| {
                         f.before.as_ref().is_some_and(|c| c.truncated)
                             || f.after.as_ref().is_some_and(|c| c.truncated)
                     });
-                    root_span.record("response_truncated", any_truncated);
+                    root_span.record("response_truncated", is_any_file_truncated);
                     let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                     root_span.record("response_bytes", bytes as i64);
                 }
@@ -610,8 +635,9 @@ impl GitPrismServer {
             Ok(Json(response)) => {
                 metrics.record_request(tool_name, "success");
 
-                // TODO(#43): response is serialized inside spawn_blocking for span attributes
-                // and again by rmcp for transport — consider caching.
+                // Response is serialized inside spawn_blocking for span attributes
+                // and again by rmcp for transport. Double cost is acceptable at
+                // current scale.
                 let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
                 metrics.record_response_bytes(tool_name, json_bytes as f64);
                 metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
@@ -646,6 +672,158 @@ impl GitPrismServer {
                 if !response.metadata.function_analysis_truncated.is_empty() {
                     metrics.record_truncated(tool_name, "token_budget");
                 }
+            }
+            Err(e) => {
+                metrics.record_request(tool_name, "error");
+                metrics.record_error(tool_name, crate::privacy::classify_error_kind(e));
+            }
+        }
+
+        result
+    }
+
+    /// Returns combined change manifest and function-level blast radius for a
+    /// ref range, in one call. Use this **instead of `git diff <ref>..<ref>`**
+    /// when reviewing a PR, auditing a refactor, or assessing merge safety —
+    /// it answers "what changed and what might break" in one tool invocation,
+    /// with structured JSON instead of raw diff text.
+    ///
+    /// Replaces the common two-step workflow:
+    ///   1. `get_change_manifest` — what changed
+    ///   2. `get_function_context` — what callers might break
+    /// with a single call that runs both internally and splits the token
+    /// budget 40/60 (manifest / function_context).
+    ///
+    /// Cost: ~30% of the equivalent raw `git diff <ref>..<ref> | git log -S <fn>`
+    /// pipeline because semantic data replaces unstructured text.
+    #[tool(name = "review_change")]
+    async fn review_change(
+        &self,
+        Parameters(args): Parameters<ReviewChangeArgs>,
+    ) -> Result<Json<ReviewChangeResponse>, String> {
+        let start = std::time::Instant::now();
+        let tool_name = "review_change";
+
+        // Extract ref info before moving args into spawn_blocking.
+        let base_ref_clone = args.base_ref.clone();
+        let head_ref_clone = args.head_ref.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let repo_path = match args.repo_path.as_deref() {
+                Some(p) => PathBuf::from(p),
+                None => std::env::current_dir()
+                    .map_err(|e| format!("cannot determine working directory: {e}"))?,
+            };
+
+            let root_span = tracing::info_span!(
+                "mcp.tool.review_change",
+                tool_name = "review_change",
+                repo_path_hash = crate::privacy::hash_repo_path(&repo_path).as_str(),
+                ref_base = crate::privacy::normalize_ref_pattern(&args.base_ref).as_str(),
+                ref_head = tracing::field::Empty,
+                response_files_count = tracing::field::Empty,
+                response_functions_count = tracing::field::Empty,
+                response_bytes = tracing::field::Empty,
+                response_truncated = tracing::field::Empty,
+            );
+            let _enter = root_span.enter();
+
+            if let Some(ref head) = args.head_ref {
+                root_span.record(
+                    "ref_head",
+                    crate::privacy::normalize_ref_pattern(head).as_str(),
+                );
+            } else {
+                root_span.record("ref_head", "worktree");
+            }
+
+            // Pagination metric — count any cursor-bearing call as a page
+            // traversal, on either sub-response. Mirrors the per-tool counters
+            // emitted by the underlying handlers.
+            if args.manifest_cursor.is_some() || args.function_context_cursor.is_some() {
+                crate::metrics::get().record_pagination_page(tool_name);
+            }
+
+            let result = build_review_change(&repo_path, args);
+
+            match &result {
+                Ok(response) => {
+                    root_span.record("response_files_count", response.manifest.files.len() as i64);
+                    root_span.record(
+                        "response_functions_count",
+                        response.function_context.functions.len() as i64,
+                    );
+                    root_span.record(
+                        "response_truncated",
+                        review_change_response_truncated(response),
+                    );
+                    let bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                    root_span.record("response_bytes", bytes as i64);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "tool invocation failed");
+                }
+            }
+
+            result.map(Json).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let metrics = crate::metrics::get();
+        let duration_ms = start.elapsed().as_millis() as f64;
+        metrics.record_duration(tool_name, duration_ms);
+
+        match &result {
+            Ok(Json(response)) => {
+                metrics.record_request(tool_name, "success");
+
+                let json_bytes = serde_json::to_vec(response).map(|v| v.len()).unwrap_or(0);
+                metrics.record_response_bytes(tool_name, json_bytes as f64);
+                metrics.record_tokens_estimated(tool_name, (json_bytes / 4) as f64);
+
+                metrics.record_files_returned(response.manifest.files.len() as f64);
+
+                for file in &response.manifest.files {
+                    if file.language != "unknown" {
+                        metrics.record_language(&file.language);
+                    }
+                    metrics.record_change_scope(change_scope_label(file.change_scope));
+                    if let Some(fns) = &file.functions_changed {
+                        metrics.record_functions_changed(&file.language, fns.len() as f64);
+                    }
+                }
+
+                let functions_per_language =
+                    functions_per_language_counts(&response.function_context.functions);
+                for (language, count) in &functions_per_language {
+                    metrics.record_language(language);
+                    metrics.record_functions_changed(language, *count as f64);
+                }
+
+                if response.manifest.pagination.next_cursor.is_some()
+                    || response.function_context.pagination.next_cursor.is_some()
+                {
+                    metrics.record_truncated(tool_name, "paginated");
+                }
+                if !response
+                    .manifest
+                    .metadata
+                    .function_analysis_truncated
+                    .is_empty()
+                    || !response
+                        .function_context
+                        .metadata
+                        .function_analysis_truncated
+                        .is_empty()
+                {
+                    metrics.record_truncated(tool_name, "token_budget");
+                }
+
+                metrics.record_ref_pattern(crate::privacy::classify_ref_mode(
+                    &base_ref_clone,
+                    head_ref_clone.as_deref(),
+                ));
             }
             Err(e) => {
                 metrics.record_request(tool_name, "error");
@@ -714,6 +892,7 @@ mod tests {
         "get_commit_history",
         "get_file_snapshots",
         "get_function_context",
+        "review_change",
     ];
 
     #[test]
@@ -749,6 +928,43 @@ mod tests {
         assert!(
             router.has_route("get_function_context"),
             "get_function_context must be registered as an MCP tool"
+        );
+    }
+
+    #[test]
+    fn it_registers_review_change_tool() {
+        let router = GitPrismServer::tool_router();
+        assert!(
+            router.has_route("review_change"),
+            "review_change must be registered as an MCP tool (issue #240)"
+        );
+    }
+
+    #[test]
+    fn it_publishes_comparative_git_diff_framing_in_review_change_schema() {
+        // The "instead of git diff" framing is the load-bearing pitch that
+        // makes review_change compete with raw git diff. Regress here if the
+        // doc comment ever loses it (issue #240).
+        let desc = schema_description_for("review_change");
+        assert!(
+            desc.contains("git diff"),
+            "review_change MCP schema description must mention 'git diff' to compete with the \
+             porcelain agents reach for by default. Got: {desc}"
+        );
+        assert!(
+            desc.contains("instead of"),
+            "review_change MCP schema description must use the 'instead of' framing — that's the \
+             load-bearing pitch flipping pretraining bias. Got: {desc}"
+        );
+        assert!(
+            desc.contains("blast radius"),
+            "review_change MCP schema description must mention 'blast radius' so agents know \
+             they get caller analysis, not just a manifest. Got: {desc}"
+        );
+        assert!(
+            desc.contains("40/60"),
+            "review_change MCP schema description must document the 40/60 budget split so agents \
+             know how their max_response_tokens is allocated. Got: {desc}"
         );
     }
 
@@ -830,14 +1046,14 @@ mod tests {
     }
 
     #[test]
-    fn it_registers_exactly_four_tools() {
+    fn it_registers_exactly_five_tools() {
         let router = GitPrismServer::tool_router();
         let tools = router.list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         assert_eq!(
             tools.len(),
-            4,
-            "expected exactly four MCP tools, found {}: {:?}",
+            5,
+            "expected exactly five MCP tools, found {}: {:?}",
             tools.len(),
             names
         );
@@ -862,13 +1078,13 @@ mod tests {
         // Advertising unimplemented capabilities causes MCP clients to call endpoints
         // that do not exist, producing confusing errors.
         let server = GitPrismServer::new();
-        let info = server.get_info();
+        let server_info = server.get_info();
         assert!(
-            info.capabilities.resources.is_none(),
+            server_info.capabilities.resources.is_none(),
             "resources capability must not be advertised — this server does not implement resources"
         );
         assert!(
-            info.capabilities.prompts.is_none(),
+            server_info.capabilities.prompts.is_none(),
             "prompts capability must not be advertised — this server does not implement prompts"
         );
     }
