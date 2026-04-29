@@ -81,6 +81,14 @@ pub struct ManifestMetadata {
     /// stripped). Files stripped to bare entries are not listed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub function_analysis_truncated: Vec<String>,
+    /// Token budget that produced this response, when applicable. Set by the
+    /// `review_change` orchestration tool, which splits its `max_response_tokens`
+    /// 40/60 between the manifest and function-context sub-responses, so each
+    /// sub-response carries its share for downstream observability. Standalone
+    /// `get_change_manifest` calls leave this `None` (and serde skips the
+    /// field) — the standalone tool already records its budget elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -408,6 +416,13 @@ pub struct ContextMetadata {
     /// follow-up calls are required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// Token budget that produced this response, when applicable. Set by the
+    /// `review_change` orchestration tool, which splits its `max_response_tokens`
+    /// 40/60 between the manifest and function-context sub-responses. Mirrors
+    /// [`ManifestMetadata::budget_tokens`] so a single agent assertion path
+    /// covers both halves of a `review_change` payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -610,6 +625,7 @@ mod tests {
                 version: "0.1.0".into(),
                 token_estimate: 0,
                 function_analysis_truncated: vec![],
+                budget_tokens: None,
             },
             summary: ManifestSummary {
                 total_files_changed: 1,
@@ -913,6 +929,7 @@ mod tests {
                 token_estimate: 42,
                 function_analysis_truncated: vec![],
                 next_cursor: None,
+                budget_tokens: None,
             },
             functions: vec![],
             pagination: PaginationInfo {
@@ -950,6 +967,7 @@ mod tests {
             token_estimate: 0,
             function_analysis_truncated: vec!["some_fn".into()],
             next_cursor: Some("cursor_opaque_token".into()),
+            budget_tokens: None,
         };
         let json = serde_json::to_value(&metadata).unwrap();
         assert_eq!(json["next_cursor"], "cursor_opaque_token");

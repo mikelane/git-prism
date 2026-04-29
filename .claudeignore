@@ -1,0 +1,82 @@
+# Rust build artifacts
+target/
+*.rs.bk
+perf.data*
+flamegraph.svg
+
+# Python build artifacts & caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+bdd/.venv/
+
+# Mutation testing output
+mutants.out*
+
+# Worktrees (recursive duplicate trees — critical to ignore)
+.worktrees/
+.claude/worktrees/
+
+# Local Claude state (machine-specific)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# IDE / editor state
+.idea/
+.vscode/
+.vs/
+*.iml
+*.swp
+*.swo
+
+# OS state
+.DS_Store
+Thumbs.db
+
+# Credentials and private keys (defense-in-depth: keep out of agent context;
+# mirrors .gitignore coverage so adding a pattern to one means adding to both)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+id_rsa
+id_ecdsa
+id_ed25519
+credentials.json
+service-account.json
+google-credentials.json
+*-credentials.json
+
+# Binary assets (recordings, images, documents, archives)
+*.mp4
+*.mp3
+*.gif
+*.cast
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.zip
+*.tar.gz
+demo/recordings/
+demo/v*/
+recordings/
+
+# Other tooling state
+.opencode/
+
+# vendor/ is intentionally NOT ignored — vendor/tree-sitter-kotlin/ is a Kotlin
+# grammar built by build.rs at compile time and must remain readable.

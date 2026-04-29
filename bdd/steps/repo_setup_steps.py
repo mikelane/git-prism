@@ -341,3 +341,17 @@ def step_repo_with_three_commits(context: Context) -> None:
 
     _write_file(repo_dir, "file_a.txt", "updated version\n")
     _commit(repo_dir, "commit three", ["file_a.txt"])
+
+
+# ---------------------------------------------------------------------------
+# Public re-exports for callers that import these helpers directly.
+#
+# The underscore-prefixed originals are module-private by Python convention.
+# Sibling step modules that need these utilities should import the public
+# names below instead of the private ones so refactors inside this module
+# don't silently break distant callers.
+# ---------------------------------------------------------------------------
+
+init_repo = _init_repo
+write_file = _write_file
+commit = _commit
