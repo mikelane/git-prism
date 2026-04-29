@@ -1,23 +1,34 @@
-<!-- Capstone narration for git-prism v0.7.0 redirect-hook epic (issue #242).
-     Segment timings are estimates against the rendered demo cast. Format
-     mirrors demo/narration.md. -->
+<!-- Narration script for git-prism v0.7.0 redirect-hook capstone demo (issue #242).
+     Processed by scripts/build-demo.py — uses <!-- SEGMENT: name --> markers.
+     TTS-friendly: no markdown syntax, no shell special characters in segment bodies.
+     Segment names map 1-to-1 to sleep-calibrated sections in demo/redirect-demo.sh. -->
 
-## Segment 1: Before — the problem (estimated 0:30)
+<!-- SEGMENT: problem_intro -->
+Here is a git repository with a notes file containing research I want to keep. Under version control, tracked, committed. Now watch what happens when an agent runs an unguarded bash redirect.
 
-Bash redirections in agentic sessions can silently overwrite tracked files. Here's a notes file under version control with research I want to keep. An agent runs `echo "overwritten content" > notes.md` and the original is gone. No diff, no prompt, nothing for review to catch.
+<!-- SEGMENT: problem_clobber -->
+The file is gone. One bash redirect — no diff, no prompt, no recovery path. The original content is overwritten and git history can not help because the change never staged. This is the problem git-prism v 0.7.0 solves.
 
-## Segment 2: How the hook works (estimated 0:30)
+<!-- SEGMENT: hook_intro -->
+git-prism ships a Claude Code PreToolUse hook that intercepts every Bash tool call before it runs. It reads the command as JSON on stdin and returns one of three decisions: block it, advise against it, or pass through silently.
 
-git-prism v0.7.0 ships a Claude Code PreToolUse hook. It reads each Bash tool call as JSON on stdin and answers with an exit code. Two blocks. Zero with a JSON body lets it through with a redirect nudge. Zero by itself is silent. So `gh pr diff` blocks, `git diff main..HEAD` nudges toward `get_change_manifest`, and `echo hello world` passes through.
+<!-- SEGMENT: hook_block -->
+A command like g-h p-r diff gets blocked outright — exit code 2 stops the tool call cold. Raw patch text is not something an agent can act on reliably, so the hook prevents it entirely.
 
-Parsing is Python's `shlex`, so compound commands, subshells, pipelines, and variable expansion all tokenize structurally instead of by regex.
+<!-- SEGMENT: hook_advisory -->
+git diff between refs gets an advisory instead. The hook lets it through — exit code zero, no interruption — but injects a redirect suggestion: call get change manifest instead for structured output.
 
-`git-prism hooks install --scope user` copies the hook scripts into `~/.claude/hooks/` and writes a PreToolUse entry into Claude Code's `~/.claude/settings.json`. User scope is the default because Claude Code issue 13898 keeps subagents from calling project-scoped MCP servers correctly.
+<!-- SEGMENT: hook_silent -->
+A plain echo command passes through silently. No output, no delay. The tokenizer is Python's shlex, so compound commands, subshells, and pipelines all parse structurally instead of by fragile regex patterns.
 
-## Segment 3: review_change vs git diff (estimated 0:45)
+<!-- SEGMENT: hook_install -->
+Installing is one command: git-prism hooks install. It copies the hook scripts into your dot claude hooks directory and writes a PreToolUse entry into Claude Code's settings dot json. User scope is the default because it covers both top-level agents and subagents equally.
 
-`git diff HEAD~1..HEAD` returns hunk headers, plus-and-minus prefixes, and whitespace context. It was built for humans reading patches, and agents pay for every line of it.
+<!-- SEGMENT: git_diff_problem -->
+Now for the second half of the story. Here is git diff on a real commit in git-prism's own repo — hunk headers, plus and minus prefixes, whitespace context. A format built for humans reading patches in a terminal, not for agents trying to act on the data.
 
-`git-prism manifest` returns the same change as structured JSON: per-file change types, line counts, language, function-level diffs, import deltas, dependency updates. `git-prism context` adds callers, callees, test references, and a risk score per changed function. The MCP tool `review_change` runs both in one call and replaces `git diff <ref>..<ref>` for PR review and refactor audits.
+<!-- SEGMENT: review_change -->
+git-prism manifest returns the same information as structured JSON — per-file metadata, line counts, function-level changes, no at-sign-at noise. Add git-prism context and you get callers, callees, and a blast-radius risk score for every changed function. The MCP tool review change combines both in one call.
 
-Install via `brew install git-prism` or `cargo install git-prism`. Source at github.com/mikelane/git-prism.
+<!-- SEGMENT: closing -->
+git-prism v 0.7.0. Redirect protection for agentic bash sessions plus agent-native git data. Install with brew install git-prism or cargo install git-prism. Source and docs at github dot com slash mike lane slash git-prism.
