@@ -1,19 +1,16 @@
 """Tests for build-demo.py utility functions."""
-import subprocess
 from pathlib import Path
 
 import pytest
 
-# Add scripts/ to path so we can import build_demo
 import importlib.util
-import sys
 
 _spec = importlib.util.spec_from_file_location(
     "build_demo", Path(__file__).parent / "build-demo.py"
 )
 assert _spec is not None, "Could not locate build-demo.py next to test file"
-_mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
 concatenate_audio = _mod.concatenate_audio
 validate_demo_name = _mod.validate_demo_name
 parse_segments = _mod.parse_segments
@@ -176,7 +173,7 @@ def test_parse_segments_excludes_whitespace_only_bodies(tmp_path: Path) -> None:
 # lint_segments
 # ---------------------------------------------------------------------------
 
-def test_lint_segments_returns_zero_for_clean_text(capsys: pytest.CaptureFixture) -> None:
+def test_lint_segments_returns_zero_for_clean_text(capsys: pytest.CaptureFixture[str]) -> None:
     segments = [{"name": "intro", "text": "Welcome to the demo. This is clean text."}]
 
     warning_count = lint_segments(segments)
@@ -184,7 +181,7 @@ def test_lint_segments_returns_zero_for_clean_text(capsys: pytest.CaptureFixture
     assert warning_count == 0
 
 
-def test_lint_segments_warns_on_residual_html_comment(capsys: pytest.CaptureFixture) -> None:
+def test_lint_segments_warns_on_residual_html_comment(capsys: pytest.CaptureFixture[str]) -> None:
     segments = [{"name": "broken", "text": "Hello <!-- stray comment --> world."}]
 
     warning_count = lint_segments(segments)
@@ -195,7 +192,7 @@ def test_lint_segments_warns_on_residual_html_comment(capsys: pytest.CaptureFixt
     assert "HTML comment" in stderr
 
 
-def test_lint_segments_warns_on_markdown_heading_in_body(capsys: pytest.CaptureFixture) -> None:
+def test_lint_segments_warns_on_markdown_heading_in_body(capsys: pytest.CaptureFixture[str]) -> None:
     segments = [{"name": "bad", "text": "# This heading will be read aloud as 'hash'"}]
 
     warning_count = lint_segments(segments)
@@ -282,7 +279,7 @@ def test_concatenate_audio_cleans_up_concat_list_on_ffmpeg_failure(tmp_path: Pat
 # generate_playwright_skeleton
 # ---------------------------------------------------------------------------
 
-def _make_timing(names_and_durations: list[tuple[str, float]]) -> list[dict]:
+def _make_timing(names_and_durations: list[tuple[str, float]]) -> list[dict[str, float | str]]:
     return [
         {"name": name, "text": f"Text for {name}", "duration": duration}
         for name, duration in names_and_durations

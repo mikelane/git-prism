@@ -153,7 +153,7 @@ def generate_segment_audio(
     )
 
     try:
-        with urlopen(request) as response:  # noqa: S310
+        with urlopen(request, timeout=30) as response:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(response.read())
     except HTTPError as exc:
