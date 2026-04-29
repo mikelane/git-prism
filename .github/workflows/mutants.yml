@@ -97,7 +97,7 @@ jobs:
 
       - name: Upload mutants output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-incremental
           path: mutants.out/
@@ -145,7 +145,7 @@ jobs:
 
       - name: Upload shard results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-shard-${{ strategy.job-index }}
           path: mutants.out/
