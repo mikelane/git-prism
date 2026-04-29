@@ -2,17 +2,12 @@
 source: src/server.rs
 expression: "schema_description_for(\"get_commit_history\")"
 ---
-Returns one structured manifest per commit in a range, so agents can
-see what changed in each commit separately. Use this instead of
-`git log <base>..<head>` plus a per-commit `git show`, or
-`gh pr view --json commits` — those return either prose summaries
-or commit metadata without per-file change detail. This tool gives
-you both at once: the commit (sha, author, subject, body) AND the
-same structured per-file manifest `get_change_manifest` returns,
-for every commit in the range.
-Use this when you need to attribute a change to a specific commit —
-reverting a regression, writing a CHANGELOG, or reasoning about
-review feedback that calls out a specific sha. For "what is the
-total diff between two refs?" use `get_change_manifest` instead;
-it is cheaper and answers the same question without the per-commit
-breakdown. Page size is bounded by the standard pagination cursor.
+Returns one structured manifest per commit in a range — use this
+**instead of `git log --stat`** or `git log -p` when you need to walk
+a branch commit-by-commit. Each entry includes the commit SHA, author,
+message, timestamp, per-file change metadata, and a summary. No diff
+text to parse; no `+`/`-` prefixes to strip.
+Call `get_change_manifest` first when you only need the collapsed
+view across the whole range. Use this tool when you need to attribute
+changes to specific commits — for example, to bisect a regression or
+audit an author's contribution.
