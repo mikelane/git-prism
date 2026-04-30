@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn it_propagates_blob_errors_through_diff_commits() {
+    fn it_returns_nonzero_stats_for_a_valid_commit_diff() {
         // Verify that diff_commits returns Result and that successful blob fetches
         // produce correct data (not silent zeros from swallowed errors).
         let (_dir, path) = create_repo_with_two_commits();
