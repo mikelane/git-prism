@@ -8,6 +8,19 @@ bdd/.venv/
 __pycache__/
 *.pyc
 
+# Claude Code and other tool local state (machine-specific, never shared)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+.opencode/
+
+# Unversioned demo recordings (large binaries; versioned recordings live under demo/recordings/v*/ and are tracked)
+demo/recordings/clips/
+demo/recordings/*.mp3
+demo/recordings/*.mp4
+demo/recordings/*.gif
+demo/recordings/*.cast
+demo/recordings/*.json
+
 # Secret files — never commit credentials
 .env
 .env.*
