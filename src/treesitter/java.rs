@@ -320,4 +320,26 @@ public class Foo {}
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
     }
+
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 3, 4, 5
+    // distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"public class Example {
+    public void run() {
+        foo();
+        bar();
+        baz();
+    }
+}
+";
+        let analyzer = JavaAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let foo = calls.iter().find(|c| c.callee == "foo").expect("foo call");
+        let bar = calls.iter().find(|c| c.callee == "bar").expect("bar call");
+        let baz = calls.iter().find(|c| c.callee == "baz").expect("baz call");
+        assert_eq!(foo.line, 3);
+        assert_eq!(bar.line, 4);
+        assert_eq!(baz.line, 5);
+    }
 }

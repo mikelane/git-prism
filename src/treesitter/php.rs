@@ -409,4 +409,26 @@ function process() {
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
     }
+
+    // Kill extract_calls line-offset mutants (+ with - or *) for both
+    // function_call_expression (line 113) and member_call_expression (line 134).
+    // Calls on lines 3, 4 distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"<?php
+function process($obj) {
+    foo();
+    $obj->doWork();
+}
+";
+        let analyzer = PhpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let foo = calls.iter().find(|c| c.callee == "foo").expect("foo call");
+        let do_work = calls
+            .iter()
+            .find(|c| c.callee == "$obj.doWork")
+            .expect("$obj.doWork call");
+        assert_eq!(foo.line, 3);
+        assert_eq!(do_work.line, 4);
+    }
 }

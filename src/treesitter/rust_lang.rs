@@ -311,6 +311,31 @@ use anyhow::Result;
         assert!(callees.contains(&"vec!"));
     }
 
+    // Kill macro_invocation line-offset mutants (+ with - or *) at line 128.
+    // The existing `call_line_numbers_are_correct` test only exercises the
+    // `call_expression` arm. Macro invocations on lines 2, 3 distinguish
+    // `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_macro_invocation_lines_correctly() {
+        let source = br#"fn example() {
+    println!("a");
+    vec![1, 2];
+}
+"#;
+        let analyzer = RustAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let println_call = calls
+            .iter()
+            .find(|c| c.callee == "println!")
+            .expect("println! macro");
+        let vec_call = calls
+            .iter()
+            .find(|c| c.callee == "vec!")
+            .expect("vec! macro");
+        assert_eq!(println_call.line, 2);
+        assert_eq!(vec_call.line, 3);
+    }
+
     #[test]
     fn call_line_numbers_are_correct() {
         let source = br#"fn example() {

@@ -387,6 +387,53 @@ public class Foo {}
         assert!(callees.contains(&"helper.DoWork"));
     }
 
+    // Kill "delete match arm member_access_expression" mutant: assert that a
+    // method call expressed as `receiver.Method()` is flagged is_method_call=true
+    // with receiver populated. Without the member_access_expression arm, both
+    // would fall through to (false, None).
+    #[test]
+    fn it_reports_method_call_with_receiver_for_member_access() {
+        let source = br#"class Example {
+    void Run() {
+        helper.DoWork();
+    }
+}
+"#;
+        let analyzer = CSharpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let do_work = calls
+            .iter()
+            .find(|c| c.callee == "helper.DoWork")
+            .expect("helper.DoWork call must be present");
+        assert!(
+            do_work.is_method_call,
+            "member_access_expression call must be flagged as method call"
+        );
+        assert_eq!(do_work.receiver.as_deref(), Some("helper"));
+    }
+
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 3, 4, 5
+    // distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"class Example {
+    void Run() {
+        Foo();
+        Bar();
+        Baz();
+    }
+}
+";
+        let analyzer = CSharpAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let foo = calls.iter().find(|c| c.callee == "Foo").expect("Foo call");
+        let bar = calls.iter().find(|c| c.callee == "Bar").expect("Bar call");
+        let baz = calls.iter().find(|c| c.callee == "Baz").expect("Baz call");
+        assert_eq!(foo.line, 3);
+        assert_eq!(bar.line, 4);
+        assert_eq!(baz.line, 5);
+    }
+
     #[test]
     fn empty_file_returns_no_calls() {
         let source = b"";

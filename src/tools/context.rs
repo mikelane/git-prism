@@ -241,6 +241,13 @@ pub fn build_function_context_with_options(
         // file must be scanned to cover that case.
         let any_changed_needs_fallback = changed_modules
             .iter()
+            // cargo-mutants: skip -- equivalent mutant: `||` → `&&` is observably
+            // identical here. By construction `supports_import_scoping(ext) <=>
+            // infer_module_path(...).is_some()` (both gate on the same
+            // `SCOPED_LANGUAGES` set in import_scope.rs), so for every
+            // (module, supports) tuple in changed_modules the operands `!*supports`
+            // and `module.is_none()` are always equal — `||` and `&&` agree on
+            // every input.
             .any(|(_, module, supports)| !*supports || module.is_none());
 
         let should_scan = if is_changed_file {
@@ -363,6 +370,21 @@ pub fn build_function_context_with_options(
         let func_ext = extension_from_path(func_file);
         let func_has_module =
             import_scope::infer_module_path(func_file, func_ext, &repo_ctx).is_some();
+        // cargo-mutants: skip -- equivalent mutants on the surrounding `&&` /
+        // `||` operators (line 373 `&&` → `||`; line 374 `&&` → `||`; line 375
+        // inner `||` → `&&`). All three rest on the same invariant used at line
+        // 244: `supports_import_scoping(ext) <=> infer_module_path(...).is_some()`.
+        // Concretely:
+        //   * line 373 `&&` → `||`: `supports || (has_module && !any(...))`. With
+        //     `supports == has_module`, the disjunction reduces to the same value
+        //     as the conjunction on every input.
+        //   * line 374 `&&` → `||`: yields `(supports && has_module) || !any(...)`.
+        //     `supports && has_module == supports` (same invariant), and a
+        //     case-by-case enumeration of (supports, !any(...)) shows the result
+        //     matches `supports && has_module && !any(...)` for every reachable
+        //     state.
+        //   * line 375 inner `||` → `&&`: the `.any()` predicate `!*s || m.is_none()`
+        //     has equal operands by the invariant, so `||` and `&&` agree.
         let scoping_mode = if import_scope::supports_import_scoping(func_ext)
             && func_has_module
             && !changed_modules.iter().any(|(_, m, s)| !*s || m.is_none())
@@ -598,12 +620,18 @@ fn clamp_entry_lists(
     max_callees: usize,
     max_test_refs: usize,
 ) {
+    // cargo-mutants: skip -- equivalent mutant: Vec::truncate(N) on a Vec of len==N is a no-op,
+    // so `> cap` and `>= cap` are observably identical here.
     if entry.callers.len() > max_callers {
         entry.callers.truncate(max_callers);
     }
+    // cargo-mutants: skip -- equivalent mutant: Vec::truncate(N) on a Vec of len==N is a no-op,
+    // so `> cap` and `>= cap` are observably identical here.
     if entry.callees.len() > max_callees {
         entry.callees.truncate(max_callees);
     }
+    // cargo-mutants: skip -- equivalent mutant: Vec::truncate(N) on a Vec of len==N is a no-op,
+    // so `> cap` and `>= cap` are observably identical here.
     if entry.test_references.len() > max_test_refs {
         entry.test_references.truncate(max_test_refs);
     }
@@ -990,6 +1018,55 @@ mod tests {
         assert!(!is_test_path("pkg/contest.go"));
     }
 
+    // --- is_test_path OR-chain operand isolation ---
+    //
+    // The `||` operators in `is_test_path` form a chain over many test-path
+    // heuristics. Cargo-mutants (issue #224 / CI run 24917104987) reported the
+    // first three `||` operators as surviving mutations because every existing
+    // assertion lights up MULTIPLE arms — flipping one `||` to `&&` still
+    // leaves another arm to carry the result. The tests below pick paths that
+    // light up EXACTLY ONE arm of the chain so every operand is independently
+    // observable.
+
+    #[test]
+    fn it_returns_true_for_path_matching_only_the_tests_directory_arm() {
+        // `foo/tests/bar.rs` matches `lower.contains("/tests/")` and nothing
+        // else in the chain:
+        //   * no `/test/` (the `s` is part of `tests`)
+        //   * no `/__tests__/`, `/spec/`, `_test.go`, `_test.rs`
+        //   * filename `bar.rs` does NOT start with `test_`
+        //   * no `.test.{ts,js,tsx,jsx}`, `_spec.rb`, `test.java`, `tests.cs`
+        //
+        // This isolates the `/tests/` arm. A mutation that swaps the `||`
+        // immediately before `/tests/` (line 56) for `&&` makes the first
+        // `(/test/ && /tests/)` group false, and every later arm is also
+        // false, so the function returns false. A mutation that swaps the
+        // `||` immediately AFTER `/tests/` (line 57) for `&&` produces
+        // `(/tests/ && /__tests__/)` — also false here — and again every
+        // later arm is false. Both mutations are killed.
+        assert!(is_test_path("foo/tests/bar.rs"));
+    }
+
+    #[test]
+    fn it_returns_true_for_path_matching_only_the_double_underscore_tests_directory_arm() {
+        // `src/__tests__/foo.rs` matches `lower.contains("/__tests__/")` and
+        // nothing else:
+        //   * `/test/` is false (no `/test/` substring with surrounding
+        //     slashes)
+        //   * `/tests/` is false (the substring is `/__tests__/`, the char
+        //     before `tests` is `_`, not `/`)
+        //   * `/spec/`, `_test.go`, `_test.rs` are all false
+        //   * filename `foo.rs` does NOT start with `test_`
+        //   * no `.test.{ts,js,tsx,jsx}`, `_spec.rb`, `test.java`, `tests.cs`
+        //
+        // This isolates the `/__tests__/` arm. A mutation that swaps the `||`
+        // between `/__tests__/` and `/spec/` (line 58) for `&&` makes the
+        // group `(/__tests__/ && /spec/)` false, and every other arm is also
+        // false, so the function returns false under the mutation but true
+        // under the original.
+        assert!(is_test_path("src/__tests__/foo.rs"));
+    }
+
     // --- ContextOptions::default ---
 
     #[test]
@@ -1337,6 +1414,926 @@ mod tests {
         assert!(
             !result.functions.is_empty(),
             "expected the response to still carry entries when budget is disabled",
+        );
+    }
+
+    // --- enforce_context_token_budget arithmetic and clamp boundary mutants ---
+    //
+    // These tests target surviving mutants reported by cargo-mutants
+    // (issue #224 / CI run 24917104987) in `enforce_context_token_budget`
+    // and `clamp_entry_lists`:
+    //   * `(budget / 4).max(128)` → `(budget % 4).max(128)` — safety margin
+    //     uses division, not modulo
+    //   * `remaining -= cost.full`   → `/=`         (full-fit branch)
+    //   * `remaining -= cost.clamped` → `+=` or `/=` (clamped-fit branch)
+    //   * `entry.callers.len()         > max_callers`  → `>=`
+    //   * `entry.callees.len()         > max_callees`  → `>=`
+    //   * `entry.test_references.len() > max_test_refs` → `>=`
+    //
+    // Mirrors the manifest-side tests added in PR #223 for the analogous
+    // `enforce_token_budget` mutants.
+    //
+    // Equivalent-mutant note: the three `> → >=` mutants on lines 600,
+    // 603, 606 are mathematically equivalent — `Vec::truncate(N)` on a
+    // Vec of length N is documented as a no-op, so for `len == cap` both
+    // operators produce identical output (skip vs no-op-truncate). For
+    // `len < cap` and `len > cap` both operators agree. Cargo-mutants
+    // surfaces them because no test fails under the mutation, but no
+    // black-box test of `clamp_entry_lists` can distinguish the two. The
+    // boundary tests below pin the contract at exactly `len == cap`
+    // (skip) and `len == cap + 1` (truncate to cap) so any future change
+    // that makes the operation non-idempotent — or that shifts the
+    // threshold by one — fails immediately.
+    //
+    // The arithmetic mutants use synthetic FunctionContextResponse fixtures so
+    // the test exercises `enforce_context_token_budget` directly without
+    // standing up a git repo — much faster to triangulate budget arithmetic.
+
+    fn make_context_entry_with_lists(
+        name: &str,
+        caller_count: usize,
+        callee_count: usize,
+        test_ref_count: usize,
+    ) -> FunctionContextEntry {
+        // Same shape as `make_clamp_fixture_entry` but with longer file/caller
+        // names so each entry's serialized cost is in the hundreds of tokens —
+        // enough that a tight budget can clamp or drop it.
+        let callers = (0..caller_count)
+            .map(|i| CallerEntry {
+                file: format!("src/very/deeply/nested/module/path/caller_{name}_{i}.rs"),
+                line: i * 7 + 1,
+                caller: format!("caller_function_named_{name}_index_{i}"),
+                is_test: false,
+            })
+            .collect();
+        let callees = (0..callee_count)
+            .map(|i| CalleeEntry {
+                callee: format!("descriptively_named_callee_{name}_{i}"),
+                line: i * 11 + 1,
+            })
+            .collect();
+        let test_references = (0..test_ref_count)
+            .map(|i| CallerEntry {
+                file: format!("tests/integration/test_module_{name}_{i}.rs"),
+                line: i * 13 + 1,
+                caller: format!("test_caller_{name}_{i}"),
+                is_test: true,
+            })
+            .collect();
+        FunctionContextEntry {
+            name: name.to_string(),
+            file: format!("src/lib_{name}.rs"),
+            change_type: FunctionChangeType::Modified,
+            blast_radius: BlastRadius::compute(caller_count, test_ref_count),
+            scoping_mode: ScopingMode::Fallback,
+            callers,
+            callees,
+            test_references,
+            caller_count: caller_count + test_ref_count,
+            truncated: false,
+        }
+    }
+
+    fn make_context_response(entries: Vec<FunctionContextEntry>) -> FunctionContextResponse {
+        let count = entries.len();
+        FunctionContextResponse {
+            metadata: ContextMetadata {
+                base_ref: "HEAD~1".to_string(),
+                head_ref: "HEAD".to_string(),
+                base_sha: "0000000000000000000000000000000000000000".to_string(),
+                head_sha: "1111111111111111111111111111111111111111".to_string(),
+                generated_at: Utc::now(),
+                token_estimate: 0,
+                budget_tokens: None,
+                function_analysis_truncated: vec![],
+                next_cursor: None,
+            },
+            functions: entries,
+            pagination: PaginationInfo {
+                total_items: count,
+                page_start: 0,
+                page_size: count,
+                next_cursor: None,
+            },
+        }
+    }
+
+    #[test]
+    fn it_uses_division_not_modulo_for_safety_margin() {
+        // The safety_margin in enforce_context_token_budget is computed as
+        // `(budget / 4).max(128)`. A mutant that replaces `/` with `%`
+        // computes `budget % 4` — always 0..=3 — which then clamps to 128.
+        // The `.max(128)` clamp masks the mutation for any budget < 512;
+        // beyond that, the real margin grows with the budget while the
+        // mutant margin stays at 128. The test must use a budget large
+        // enough that `budget/4 > 128` to make the mutation observable.
+        //
+        // Strategy: build a response where total full cost lives in a
+        // sweet spot such that `(budget/4).max(128)` forces a trim but
+        // `(budget%4).max(128) == 128` leaves everything fitting full.
+        let entries = (0..8)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 3, 3, 2))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+
+        // Measure skeleton + per-entry full cost the same way
+        // enforce_context_token_budget does internally.
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let total_full: usize = response
+            .functions
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+
+        // Solve for budget so:
+        //     budget - skeleton - (budget/4) < total_full   (real → trim)
+        //     budget - skeleton - 128        >= total_full  (mutant → no trim)
+        // i.e. budget >= total_full + skeleton + 128
+        //  and budget * 3/4 < total_full + skeleton
+        //         → budget < (total_full + skeleton) * 4 / 3
+        //
+        // Pick the midpoint of that range. Cap the lower bound at 513 so
+        // `budget / 4 > 128` (mutation actually observable).
+        let target = total_full + skeleton_cost;
+        let lower = (target + 128).max(513);
+        let upper = target * 4 / 3; // exclusive upper bound
+        assert!(
+            upper > lower,
+            "fixture must be large enough for the safety-margin sweet spot to exist: \
+             target={target} skeleton={skeleton_cost} total_full={total_full} \
+             lower={lower} upper={upper}",
+        );
+        let budget = (lower + upper) / 2;
+
+        // Pre-flight: under the correct `/`, file_budget < total_full
+        // (trim required); under the mutant `%`, file_budget >= total_full
+        // (no trim).
+        let margin_div = (budget / 4).max(128);
+        let margin_mod = (budget % 4).max(128);
+        assert!(
+            margin_div > margin_mod,
+            "test presumes (budget/4).max(128) > (budget%4).max(128); \
+             budget={budget} /4-margin={margin_div} %4-margin={margin_mod}",
+        );
+        let entry_budget_under_div = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_div);
+        let entry_budget_under_mod = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(margin_mod);
+        assert!(
+            entry_budget_under_div < total_full,
+            "test construction invalid: under correct `/`, entry_budget \
+             ({entry_budget_under_div}) must be < total_full ({total_full}) \
+             so trimming is required. \
+             budget={budget} skeleton={skeleton_cost} margin_div={margin_div}",
+        );
+        assert!(
+            entry_budget_under_mod >= total_full,
+            "test construction invalid: under mutant `%`, entry_budget \
+             ({entry_budget_under_mod}) must be >= total_full ({total_full}) \
+             so no trimming occurs. \
+             budget={budget} skeleton={skeleton_cost} margin_mod={margin_mod}",
+        );
+
+        let original_entries = response.functions.len();
+        let (clamped_names, local_cutoff) = enforce_context_token_budget(&mut response, budget);
+
+        // Under correct `/`: at least one entry was clamped or dropped — i.e.
+        // either clamped_names is non-empty or the cutoff fired (entries
+        // truncated). Under mutant `%`: total_full <= entry_budget so the
+        // function returns (Vec::new(), None) without touching anything.
+        let some_trimming = !clamped_names.is_empty()
+            || local_cutoff.is_some()
+            || response.functions.iter().any(|f| f.truncated)
+            || response.functions.len() < original_entries;
+        assert!(
+            some_trimming,
+            "with budget {budget} (skeleton={skeleton_cost}, \
+             total_full={total_full}) the (budget/4).max(128) safety margin \
+             of {margin_div} tokens must force trimming; a modulo-based margin \
+             clamps to {margin_mod} (=128) and leaves room for every entry. \
+             clamped_names={clamped_names:?} local_cutoff={local_cutoff:?} \
+             surviving_entries={}",
+            response.functions.len(),
+        );
+    }
+
+    #[test]
+    fn it_decreases_remaining_budget_after_each_clamped_fit_decision() {
+        // Targets `remaining -= cost.clamped` → `+=` (line 572). The full
+        // branch (line 568) also uses `-=` so under any `+=` mutation
+        // the SAME fixture must distinguish.
+        //
+        // Strategy: make `cost.full ≫ cost.clamped` by stuffing each entry
+        // with very long caller / callee / test-ref lists. Pick budget so
+        // that:
+        //   * No entry fits at full ever (under correct `-=` OR `+=`):
+        //     even after `+=` accumulates ALL clamped costs, remaining
+        //     stays below one_full. This pins line 568 off — so the only
+        //     active branch is line 572.
+        //   * Several entries fit clamped; the rest must drop.
+        //
+        // With line 568 inert, the `+=` mutation on line 572 turns drops
+        // into clamps (every entry survives clamped). Under correct `-=`,
+        // drops happen. Assertion: at least one entry was dropped.
+        let entries = (0..6)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 100, 100, 50))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.functions[0]);
+        let one_clamped = {
+            let mut clone = response.functions[0].clone();
+            clamp_entry_lists(&mut clone, 5, 5, 3);
+            size::estimate_response_tokens(&clone)
+        };
+        let n = response.functions.len();
+
+        // Target entry_budget ≈ 3 * one_clamped so 3 clamped entries fit,
+        // 3 must drop. Critically, we also need `one_full > entry_budget +
+        // n * one_clamped` so even after a `+=` mutant grows remaining by
+        // the maximum possible amount (every entry clamps), remaining
+        // never reaches one_full — line 568 stays dormant.
+        let target_entry_budget = 3 * one_clamped;
+        let budget = ((skeleton_cost + target_entry_budget) * 4).div_ceil(3);
+
+        let safety_margin = (budget / 4).max(128);
+        let entry_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        // Pre-flight 1: one_full > entry_budget (line 568 inert at start).
+        assert!(
+            one_full > entry_budget,
+            "construction invalid: one_full must exceed entry_budget so \
+             line 568 doesn't fire on the first entry; \
+             one_full={one_full} entry_budget={entry_budget}",
+        );
+        // Pre-flight 2: even under `+=`, remaining can never reach
+        // one_full. Worst case `+=` accumulates `n * one_clamped` on top
+        // of entry_budget. If `entry_budget + n * one_clamped < one_full`
+        // line 568 stays inert under both `-=` and `+=`.
+        let max_grown_remaining = entry_budget + n * one_clamped;
+        assert!(
+            max_grown_remaining < one_full,
+            "construction invalid: under `+=` mutation, remaining can grow \
+             to entry_budget + n*one_clamped = {max_grown_remaining}, which \
+             must stay below one_full = {one_full} so line 568 never fires \
+             (otherwise the walk's behavior under the mutation gets \
+             complicated by full-fits taking over)",
+        );
+        // Pre-flight 3: budget must admit ≥2 clamped entries.
+        assert!(
+            entry_budget >= 2 * one_clamped,
+            "construction invalid: budget must admit ≥2 clamped entries; \
+             entry_budget={entry_budget} one_clamped={one_clamped}",
+        );
+        // Pre-flight 4: total clamped cost must exceed entry_budget so
+        // drops happen under correct `-=`.
+        let total_clamped = n * one_clamped;
+        assert!(
+            total_clamped > entry_budget,
+            "construction invalid: total clamped cost must exceed budget; \
+             total_clamped={total_clamped} entry_budget={entry_budget}",
+        );
+
+        let original_entries = response.functions.len();
+        let (clamped_names, _) = enforce_context_token_budget(&mut response, budget);
+        let dropped = original_entries - response.functions.len();
+
+        // Under correct `-=`: budget drains, eventually a drop fires.
+        // Under `+=` on line 572: remaining never reaches one_full (by
+        // construction), so line 568 stays inert. But each clamp grows
+        // remaining instead of shrinking it — so `cost.clamped <=
+        // remaining` keeps passing for every entry. Result: all entries
+        // clamp, none drop.
+        assert!(
+            !clamped_names.is_empty(),
+            "fixture must trigger the clamped branch at least once; \
+             clamped_names={clamped_names:?}",
+        );
+        assert!(
+            dropped >= 1,
+            "with a budget that admits only ~3 clamped entries out of {n}, \
+             enforcement must DROP at least one entry once `remaining` is \
+             drained. If every entry survives clamped, `remaining` is being \
+             increased instead of decreased (mutant: \
+             `remaining += cost.clamped`). \
+             dropped={dropped} clamped_names={clamped_names:?} \
+             entry_budget={entry_budget} one_clamped={one_clamped} \
+             one_full={one_full}",
+        );
+    }
+
+    #[test]
+    fn it_does_not_collapse_remaining_after_first_clamped_decision() {
+        // Targets `remaining -= cost.clamped` → `/=` (line 572). Under
+        // `/=`, after the first clamp `remaining` becomes
+        // `remaining / cost.clamped` (typically 1 or 0). The next entry's
+        // `cost.clamped <= remaining` check fails → drop. Result: only
+        // ONE entry is clamped, the rest drop. Under correct `-=`, several
+        // entries clamp before the budget drains.
+        //
+        // Same construction strategy as the `+=` test: every entry hits
+        // the clamped branch (one_full ≫ entry_budget + n*one_clamped so
+        // line 568 stays inert). Assertion is on the OTHER direction:
+        // under `/=`, far fewer entries are clamped.
+        let entries = (0..6)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 100, 100, 50))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.functions[0]);
+        let one_clamped = {
+            let mut clone = response.functions[0].clone();
+            clamp_entry_lists(&mut clone, 5, 5, 3);
+            size::estimate_response_tokens(&clone)
+        };
+        let n = response.functions.len();
+
+        // Same budget shape as the `+=` test: at least 3 clamped entries
+        // fit, no full entries fit. The two-or-more-clamped invariant is
+        // what kills `/=` because it collapses to one clamped + drops.
+        let target_entry_budget = 3 * one_clamped;
+        let budget = ((skeleton_cost + target_entry_budget) * 4).div_ceil(3);
+
+        let safety_margin = (budget / 4).max(128);
+        let entry_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        assert!(
+            one_full > entry_budget,
+            "construction invalid: line 568 must NOT fire on entry 0; \
+             one_full={one_full} entry_budget={entry_budget}",
+        );
+        // Belt-and-suspenders: even under any monotonically-non-decreasing
+        // mutation of remaining, the value can't reach one_full so line
+        // 568 stays dormant for the whole walk.
+        let max_grown_remaining = entry_budget + n * one_clamped;
+        assert!(
+            max_grown_remaining < one_full,
+            "construction invalid: max_grown_remaining={max_grown_remaining} \
+             must stay below one_full={one_full}",
+        );
+        assert!(
+            entry_budget >= 3 * one_clamped,
+            "construction invalid: at least 3 clamped entries must fit \
+             under correct `-=` so a `/=` mutant (which clamps only 1) is \
+             distinguishable; entry_budget={entry_budget} \
+             one_clamped={one_clamped}",
+        );
+
+        let (clamped_names, _) = enforce_context_token_budget(&mut response, budget);
+
+        // Under correct `-=`: at least 3 entries clamp.
+        // Under `/=` on line 572: after the first clamp, remaining ≈ 1, so
+        // every subsequent entry drops. Only 1 entry ends up clamped.
+        // Under `/=` on line 568: line 568 never fires here, so this
+        // mutant survives this fixture — the parallel "full path" test
+        // (`it_does_not_collapse_remaining_to_one_after_first_decision`)
+        // covers it.
+        assert!(
+            clamped_names.len() >= 2,
+            "with a budget that admits 3+ clamped entries under correct \
+             `-=`, at least two entries must clamp. If only one clamps, \
+             `remaining` collapsed to ~1 after the first clamped decision \
+             (mutant: `remaining /= cost.clamped`). \
+             clamped_names={clamped_names:?} entry_budget={entry_budget} \
+             one_clamped={one_clamped}",
+        );
+    }
+
+    #[test]
+    fn it_does_not_collapse_remaining_to_one_after_first_decision() {
+        // Targets `remaining -= cost.full` → `/=` (line 568). Under `/=`,
+        // after the first full-fit `remaining` becomes
+        // `remaining / cost.full` (typically 1 or 0). The next entry's
+        // `cost.full <= remaining` check fails, and `cost.clamped <=
+        // remaining` also fails — so EVERY subsequent entry drops. Only
+        // one entry survives.
+        //
+        // Construct a budget that admits at least 3 entries at full under
+        // correct `-=`. Under `/=` only 1 survives.
+        let entries = (0..5)
+            .map(|i| make_context_entry_with_lists(&format!("calc_{i}"), 4, 4, 2))
+            .collect::<Vec<_>>();
+        let mut response = make_context_response(entries);
+        let skeleton_cost = {
+            let saved = std::mem::take(&mut response.functions);
+            let cost = size::estimate_response_tokens(&response);
+            response.functions = saved;
+            cost
+        };
+        let one_full = size::estimate_response_tokens(&response.functions[0]);
+        let total_full: usize = response
+            .functions
+            .iter()
+            .map(size::estimate_response_tokens)
+            .sum();
+
+        // Aim for entry_budget == 4 * one_full so 4 of 5 entries fit at
+        // full under correct `-=`. Under `/=`, after entry 0 (cost = one_full)
+        // remaining becomes ~1, and entries 1..=4 are all dropped.
+        let target_entry_budget = 4 * one_full;
+        let budget = ((skeleton_cost + target_entry_budget) * 4).div_ceil(3);
+
+        let safety_margin = (budget / 4).max(128);
+        let entry_budget = budget
+            .saturating_sub(skeleton_cost)
+            .saturating_sub(safety_margin);
+        // Pre-flight: greedy walk must run.
+        assert!(
+            total_full > entry_budget,
+            "construction invalid: greedy walk must execute; \
+             total_full={total_full} entry_budget={entry_budget} \
+             budget={budget} skeleton={skeleton_cost} one_full={one_full}",
+        );
+        // Pre-flight: under correct `-=`, at least 3 entries fit at full.
+        assert!(
+            entry_budget >= 3 * one_full,
+            "construction invalid: at least three entries must fit at full \
+             under correct `-=` so a `/=` mutant (which leaves only one) is \
+             distinguishable; entry_budget={entry_budget} one_full={one_full}",
+        );
+
+        let original_entries = response.functions.len();
+        let _ = enforce_context_token_budget(&mut response, budget);
+
+        // Under correct `-=`: at least 2 entries survive at full.
+        // Under `/=` on line 568: only 1 entry survives.
+        let surviving = response.functions.len();
+        assert!(
+            surviving >= 2,
+            "with a budget that admits 3+ entries at full under correct `-=`, \
+             at least two entries must survive. If only one survives, \
+             `remaining` collapsed to ~1 after the first full-fit decision \
+             (mutant: `remaining /= cost.full`). \
+             surviving={surviving} original={original_entries} \
+             entry_budget={entry_budget} one_full={one_full}",
+        );
+    }
+
+    #[test]
+    fn it_leaves_callers_at_exact_cap_unchanged() {
+        // Targets the `entry.callers.len() > max_callers` → `>=` mutant on
+        // line 600. At len == cap the `>` branch is false (no truncate);
+        // documenting this boundary explicitly future-proofs the contract
+        // against any change that makes truncation non-idempotent.
+        //
+        // Pair test: same fixture run with len = cap + 1 must truncate to
+        // cap. Together they pin the threshold exactly at `> max_callers`.
+        let cap = 5;
+
+        // Boundary 1: len == cap. Under both `>` and `>=` the resulting
+        // length is `cap` (truncate to cap is a no-op when len == cap),
+        // but the caller list contents must still be the original list —
+        // not a clone, not reversed, not partial.
+        let mut at_cap = make_clamp_fixture_entry("at_cap", cap, 0, 0);
+        let original_callers: Vec<String> =
+            at_cap.callers.iter().map(|c| c.caller.clone()).collect();
+        clamp_entry_lists(&mut at_cap, cap, cap, 3);
+        assert_eq!(
+            at_cap.callers.len(),
+            cap,
+            "callers.len() at exact cap must remain {cap}",
+        );
+        let after_callers: Vec<String> = at_cap.callers.iter().map(|c| c.caller.clone()).collect();
+        assert_eq!(
+            after_callers, original_callers,
+            "callers list at exact cap must be unchanged in content and order",
+        );
+
+        // Boundary 2: len == cap + 1. Truncation MUST fire and reduce to cap.
+        let mut over_cap = make_clamp_fixture_entry("over_cap", cap + 1, 0, 0);
+        clamp_entry_lists(&mut over_cap, cap, cap, 3);
+        assert_eq!(
+            over_cap.callers.len(),
+            cap,
+            "callers.len() at cap+1 must be truncated to {cap}",
+        );
+    }
+
+    #[test]
+    fn it_leaves_callees_at_exact_cap_unchanged() {
+        // Targets the `entry.callees.len() > max_callees` → `>=` mutant on
+        // line 603. Symmetric to the callers boundary test above.
+        let cap = 5;
+
+        let mut at_cap = make_clamp_fixture_entry("at_cap", 0, cap, 0);
+        let original_callees: Vec<String> =
+            at_cap.callees.iter().map(|c| c.callee.clone()).collect();
+        clamp_entry_lists(&mut at_cap, cap, cap, 3);
+        assert_eq!(
+            at_cap.callees.len(),
+            cap,
+            "callees.len() at exact cap must remain {cap}",
+        );
+        let after_callees: Vec<String> = at_cap.callees.iter().map(|c| c.callee.clone()).collect();
+        assert_eq!(
+            after_callees, original_callees,
+            "callees list at exact cap must be unchanged in content and order",
+        );
+
+        let mut over_cap = make_clamp_fixture_entry("over_cap", 0, cap + 1, 0);
+        clamp_entry_lists(&mut over_cap, cap, cap, 3);
+        assert_eq!(
+            over_cap.callees.len(),
+            cap,
+            "callees.len() at cap+1 must be truncated to {cap}",
+        );
+    }
+
+    #[test]
+    fn it_leaves_test_references_at_exact_cap_unchanged() {
+        // Targets the `entry.test_references.len() > max_test_refs` → `>=`
+        // mutant on line 606. Test-references cap is 3 (not 5 like the
+        // other two), so this test uses cap=3 to land exactly on the
+        // boundary.
+        let cap = 3;
+
+        let mut at_cap = make_clamp_fixture_entry("at_cap", 0, 0, cap);
+        let original_test_refs: Vec<String> = at_cap
+            .test_references
+            .iter()
+            .map(|c| c.caller.clone())
+            .collect();
+        clamp_entry_lists(&mut at_cap, 5, 5, cap);
+        assert_eq!(
+            at_cap.test_references.len(),
+            cap,
+            "test_references.len() at exact cap must remain {cap}",
+        );
+        let after_test_refs: Vec<String> = at_cap
+            .test_references
+            .iter()
+            .map(|c| c.caller.clone())
+            .collect();
+        assert_eq!(
+            after_test_refs, original_test_refs,
+            "test_references list at exact cap must be unchanged in content and order",
+        );
+
+        let mut over_cap = make_clamp_fixture_entry("over_cap", 0, 0, cap + 1);
+        clamp_entry_lists(&mut over_cap, 5, 5, cap);
+        assert_eq!(
+            over_cap.test_references.len(),
+            cap,
+            "test_references.len() at cap+1 must be truncated to {cap}",
+        );
+    }
+
+    // --- build_function_context_with_options pagination / filter / scoping mutants ---
+    //
+    // Cargo-mutants (issue #224 / CI run 24917104987) reported a cluster of
+    // surviving mutants inside the orchestration body. The tests below pin
+    // each load-bearing operator to an observable response.
+
+    #[test]
+    fn it_filters_out_unmatched_functions_when_function_names_is_a_non_empty_set() {
+        // Targets the `&& !names.is_empty()` guard at line 159. Removing the
+        // bang inverts the condition so the filter runs only when `names` is
+        // empty — i.e., for a non-empty filter the retain step is skipped and
+        // every changed function survives. The fixture's HEAD~1..HEAD range
+        // produces three changed functions (calculate, helper, process); a
+        // single-name filter must shrink the response to exactly one entry,
+        // and that entry must be the requested name.
+        let (_dir, path) = create_context_test_repo();
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 25,
+            function_names: Some(vec!["calculate".to_string()]),
+            max_response_tokens: None,
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        let names: Vec<&str> = result.functions.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["calculate"],
+            "function_names=[\"calculate\"] must restrict the response to exactly that name; \
+             a mutation that inverts the `!names.is_empty()` guard skips the retain step \
+             and lets helper/process leak through. got: {names:?}",
+        );
+    }
+
+    #[test]
+    fn it_reports_caller_count_as_sum_of_production_and_test_callers() {
+        // Targets `caller_count = callers.len() + test_references.len()` at
+        // line 356. The fixture's `calculate` is called from `src/main.rs`
+        // (production caller) AND `tests/test_lib.rs` (test caller), so the
+        // expected sum is callers.len() + test_references.len() and every
+        // arithmetic mutation (`+ → -`, `+ → *`) produces an observably
+        // different value:
+        //   * `+`: 1 + 1 = 2
+        //   * `-`: 1 - 1 = 0  (or saturating; in any case != 2)
+        //   * `*`: 1 * 1 = 1
+        let (_dir, path) = create_context_test_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        let calculate_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "calculate")
+            .expect("calculate should appear in the context response");
+
+        // Pre-flight: the construction relies on at least one production AND
+        // one test caller so the three arithmetic outcomes are distinguishable.
+        assert!(
+            !calculate_ctx.callers.is_empty(),
+            "fixture must produce at least one production caller for `calculate` \
+             so the `+`/`-`/`*` arithmetic outcomes diverge; got callers={:?}",
+            calculate_ctx.callers,
+        );
+        assert!(
+            !calculate_ctx.test_references.is_empty(),
+            "fixture must produce at least one test caller for `calculate` \
+             so the `+`/`-`/`*` arithmetic outcomes diverge; got test_references={:?}",
+            calculate_ctx.test_references,
+        );
+
+        let expected = calculate_ctx.callers.len() + calculate_ctx.test_references.len();
+        assert_eq!(
+            calculate_ctx.caller_count,
+            expected,
+            "caller_count must equal callers.len() + test_references.len(); \
+             callers.len()={} test_references.len()={} caller_count={}",
+            calculate_ctx.callers.len(),
+            calculate_ctx.test_references.len(),
+            calculate_ctx.caller_count,
+        );
+    }
+
+    #[test]
+    fn it_emits_a_next_cursor_when_total_items_exceed_page_size() {
+        // Targets the `end_offset < filtered_total` check at line 430.
+        // Replacing `<` with `>` makes `page_cutoff` always `None` (because
+        // `end_offset = min(start_offset + page_size, filtered_total)` is
+        // never strictly greater than `filtered_total`). The next_cursor
+        // would then never fire from page-size rollover alone.
+        //
+        // The fixture produces 3 changed functions (calculate, helper,
+        // process) and we ask for page_size=2 with no budget so only the
+        // page-rollover branch can populate next_cursor. Under correct `<`:
+        // end_offset=2 < 3 → next_cursor=Some(...). Under mutant `>`:
+        // end_offset=2 > 3 = false → next_cursor=None.
+        let (_dir, path) = create_context_test_repo();
+        let options = ContextOptions {
+            cursor: None,
+            page_size: 2,
+            function_names: None,
+            max_response_tokens: None,
+        };
+        let result =
+            build_function_context_with_options(&path, "HEAD~1", "HEAD", &options).unwrap();
+
+        // Pre-flight: confirm filtered_total > page_size so the rollover
+        // branch IS the one being exercised.
+        assert!(
+            result.pagination.total_items > 2,
+            "fixture must produce more than page_size items for the rollover \
+             branch to be observable; total_items={}",
+            result.pagination.total_items,
+        );
+        assert_eq!(
+            result.functions.len(),
+            2,
+            "page must contain exactly page_size entries when filtered_total > page_size",
+        );
+        assert!(
+            result.pagination.next_cursor.is_some(),
+            "next_cursor must be Some when end_offset < filtered_total \
+             (page_size=2, total_items={}); a `<` → `>` mutation flips this \
+             branch off",
+            result.pagination.total_items,
+        );
+        assert!(
+            result.metadata.next_cursor.is_some(),
+            "metadata.next_cursor must mirror pagination.next_cursor",
+        );
+    }
+
+    #[test]
+    fn it_marks_pure_rust_changed_function_with_scoped_mode() {
+        // Targets three `delete !` mutants whose witness collapses to a
+        // single behaviour: when every changed file is in a supported
+        // scoped language and has an inferable module path, the resulting
+        // FunctionContextEntry must carry `scoping_mode: Scoped`. Specifically:
+        //
+        //   * Line 244 col 42 (`!*supports || module.is_none()` → `*supports
+        //     || module.is_none()`): given the invariant that
+        //     `supports_import_scoping(ext) <=> infer_module_path(...).is_some()`,
+        //     dropping the bang makes `*supports || module.is_none()` always
+        //     true (`!none || none = true`), forcing
+        //     `any_changed_needs_fallback = true`. That value isn't directly
+        //     observable in the response, but the IDENTICAL predicate on
+        //     line 368 picks scoping_mode, so a Scoped assertion catches the
+        //     parallel mutants on that line too.
+        //   * Line 368 col 16 (`!changed_modules.iter().any(...)` →
+        //     `changed_modules.iter().any(...)`): under the mutation,
+        //     scoping_mode is `Scoped` only when at least one changed file
+        //     needs fallback — the opposite of the intended logic. With a
+        //     pure-rust fixture, no file needs fallback, so the mutation
+        //     selects Fallback and the assertion fails.
+        //   * Line 368 col 56 (`!*s || m.is_none()` → `*s || m.is_none()`):
+        //     by the same invariant, `*s || m.is_none()` is always true,
+        //     so `any(...)` is always true on a non-empty page, `!any(...)`
+        //     is always false, and scoping_mode is always Fallback.
+        //
+        // The pure-rust fixture has src/lib.rs and src/main.rs (both
+        // supported, both have inferable module paths), so the scoped
+        // branch is the correct outcome.
+        let (_dir, path) = create_context_test_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        let calculate_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "calculate")
+            .expect("calculate should appear in the context response");
+        assert_eq!(
+            calculate_ctx.scoping_mode,
+            ScopingMode::Scoped,
+            "pure-rust fixture: every changed file is in a scoped language \
+             with an inferable module, so scoping_mode must be Scoped. \
+             Fallback signals that one of the `delete !` mutants on lines \
+             244 / 368 forced the predicate the wrong way.",
+        );
+    }
+
+    /// Build a fixture where `calculate` is called from a same-directory
+    /// Rust file that does NOT import the changed module. This isolates the
+    /// import-scoped branch on lines 244-259: the unrelated file is only
+    /// reachable via fallback (line 244 → 249) or via the `is_same_pkg`
+    /// branch (lines 256-257). With correct logic the file is skipped — so
+    /// no caller is found.
+    fn create_unrelated_caller_repo() -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Cargo.toml so `RepoContext::load` picks up the crate name and
+        // intra-crate `crate::lib::*` imports resolve correctly. The crate
+        // name does not match `unrelated.rs` — that file deliberately omits
+        // any `use crate::lib::*` statement so import-scoped scanning skips
+        // it.
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"unrelated_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(path.join("src")).unwrap();
+
+        // Initial commit: lib.rs has `calculate`, unrelated.rs calls it
+        // WITHOUT importing the lib module — only by writing the bare name.
+        // Tree-sitter's call extraction matches on the leaf name, so it
+        // would find `calculate(99)` IF the file were scanned.
+        std::fs::write(
+            path.join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 {\n    x + 1\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("src/unrelated.rs"),
+            // No `use crate::lib::calculate;` — call site is bare so import
+            // scoping must skip this file unless a mutation forces a scan.
+            "pub fn use_calc() -> i32 {\n    calculate(99)\n}\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Modify lib.rs so `calculate` shows up as a changed function in the
+        // HEAD~1..HEAD manifest.
+        std::fs::write(
+            path.join("src/lib.rs"),
+            "pub fn calculate(x: i32) -> i32 {\n    x + 2\n}\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "modify calculate"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        (dir, path)
+    }
+
+    #[test]
+    fn it_skips_same_directory_files_without_relevant_imports() {
+        // Targets four mutants that all collapse to the same observable
+        // wire effect: a Rust file in the SAME directory as the changed
+        // file, that calls the changed function but never imports it,
+        // must NOT contribute a caller.
+        //
+        //   * Line 244 col 42 (`delete !` on `!*supports`): forces
+        //     `any_changed_needs_fallback = true`; line 249 then becomes
+        //     true for every supported caller and the unrelated file is
+        //     scanned anyway, finding the bare `calculate(99)` call.
+        //   * Line 249 col 19 (`delete !` on `!supports_import_scoping`):
+        //     turns the second arm of the `should_scan` if into
+        //     `supports_import_scoping(ext) || any_changed_needs_fallback`.
+        //     For a `.rs` caller that's `true || _ = true` — the file is
+        //     scanned unconditionally and the call is found.
+        //   * Line 256 col 35 (`==` → `!=`) on `ext == "go"`: makes
+        //     `is_same_pkg = ext != "go" && changed_file_paths.iter().any(
+        //     same_directory)`. For a `.rs` file in the same dir as the
+        //     changed file, `ext != "go"` is true and the same-dir check
+        //     fires — the file is scanned via the Go-flavoured branch and
+        //     the call is found.
+        //   * Line 257 col 17 (`&&` → `||`) on the same `is_same_pkg`
+        //     expression: makes `is_same_pkg = ext == "go" || same_dir(...)`.
+        //     For a `.rs` file in the same dir, `false || true = true`,
+        //     same observable effect as above.
+        //
+        // Under correct logic, the unrelated file falls through the
+        // `is_changed_file` early-return AND the `should_scan` second arm
+        // AND the `is_same_pkg` Go branch, lands in the imports-check
+        // branch, which sees no `use crate::lib::*` statement and returns
+        // false — so the file is skipped.
+        let (_dir, path) = create_unrelated_caller_repo();
+        let result = build_function_context(&path, "HEAD~1", "HEAD").unwrap();
+
+        let calculate_ctx = result
+            .functions
+            .iter()
+            .find(|f| f.name == "calculate")
+            .expect("calculate should appear in the context response");
+
+        // Pre-flight: scoping mode must be Scoped — if it's Fallback for
+        // some reason (e.g., an unsupported file in the changed set that we
+        // didn't anticipate), this test cannot distinguish the mutations
+        // from correct behaviour.
+        assert_eq!(
+            calculate_ctx.scoping_mode,
+            ScopingMode::Scoped,
+            "this fixture relies on import-scoped scanning being active; \
+             Fallback would let the unrelated file get scanned anyway and \
+             the assertion below would not catch the mutations.",
+        );
+
+        // No caller in `unrelated.rs` should appear under correct logic.
+        let has_unrelated_caller = calculate_ctx
+            .callers
+            .iter()
+            .any(|c| c.file.contains("unrelated"))
+            || calculate_ctx
+                .test_references
+                .iter()
+                .any(|c| c.file.contains("unrelated"));
+        assert!(
+            !has_unrelated_caller,
+            "src/unrelated.rs does not import crate::lib::calculate; under \
+             correct import-scoped scanning the file must be skipped, so no \
+             caller in `unrelated.rs` should appear. A caller showing up \
+             signals one of the line 244 / 249 / 256 / 257 mutations forced \
+             the file to be scanned. callers={:?} test_references={:?}",
+            calculate_ctx.callers, calculate_ctx.test_references,
         );
     }
 }

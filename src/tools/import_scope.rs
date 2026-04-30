@@ -345,6 +345,10 @@ fn python_module_matches(source: &str, imported_names: &str, module_path: &str) 
         return true;
     }
     // Parentheses and trailing commas can appear in multi-line imports.
+    // cargo-mutants: skip -- equivalent under current pipeline. The chained
+    // `.replace([')', '('], "")` strips parens regardless of trim_matches, and
+    // the per-name `.trim()` below removes any whitespace these alternations
+    // would have caught at the edges.
     let cleaned = imported_names
         .trim_matches(|c: char| c == '(' || c == ')' || c.is_whitespace())
         .replace([')', '('], "");
@@ -352,6 +356,10 @@ fn python_module_matches(source: &str, imported_names: &str, module_path: &str) 
         let name = name.trim();
         // Strip ` as alias`
         let name = name.split_whitespace().next().unwrap_or("");
+        // cargo-mutants: skip -- equivalent. The candidate `format!("{source}.{name}")`
+        // produced when this `continue` is bypassed (`name == ""` -> "src." or
+        // `name == "*"` -> "src.*") cannot match a real dotted module path,
+        // so the loop returns the same overall result either way.
         if name.is_empty() || name == "*" {
             continue;
         }
@@ -933,5 +941,246 @@ mod tests {
         .unwrap();
         let ctx = RepoContext::load(dir.path());
         assert_eq!(ctx.rust_crate_name.as_deref(), Some("real_crate"));
+    }
+
+    // --- imports_reference_module dispatcher ---
+    //
+    // Each language extension must route to its own matcher. The mutants below
+    // delete individual match arms from the dispatcher (or replace its entire
+    // body with `true`); each test asserts a positive match for one extension
+    // PLUS a negative for an unsupported extension, so a deleted arm or a
+    // blanket `true` falls back to the catch-all `false` and the test fails.
+
+    // Kill mutant: line 115 replace imports_reference_module -> bool with true.
+    // An unsupported extension must return false; if the body is replaced with
+    // `true` this assertion fires.
+    #[test]
+    fn dispatcher_returns_false_for_unsupported_extension() {
+        let imports = vec!["use crate::foo;".to_string()];
+        assert!(!imports_reference_module(
+            &imports,
+            "crate::foo",
+            "src/x.rb",
+            "rb",
+            &empty_ctx()
+        ));
+    }
+
+    // Kill mutant: line 117 delete match arm "py".
+    // If the `"py"` arm is deleted, the dispatcher falls through to `_ => false`
+    // and a real Python import is missed.
+    #[test]
+    fn dispatcher_routes_py_extension_to_python_matcher() {
+        let imports = vec!["from lib import compute".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.py",
+            "py",
+            &empty_ctx()
+        ));
+    }
+
+    // Kill mutant: line 118 delete match arm "go".
+    #[test]
+    fn dispatcher_routes_go_extension_to_go_matcher() {
+        let imports = vec!["example.com/foo/internal/parser".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "example.com/foo/internal/parser",
+            "internal/caller/caller.go",
+            "go",
+            &go_ctx()
+        ));
+    }
+
+    // Kill mutant: line 119 delete match arm "ts" | "tsx" | "js" | "jsx".
+    // Each of the four extensions in the alternation must reach the TS matcher.
+    // Listing them all defends against future single-extension splits as well
+    // as the reported full-arm deletion.
+    #[test]
+    fn it_dispatches_ts_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.ts",
+            "ts",
+            &empty_ctx()
+        ));
+    }
+
+    #[test]
+    fn it_dispatches_tsx_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.tsx",
+            "tsx",
+            &empty_ctx()
+        ));
+    }
+
+    #[test]
+    fn it_dispatches_js_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.js",
+            "js",
+            &empty_ctx()
+        ));
+    }
+
+    #[test]
+    fn it_dispatches_jsx_extension_to_typescript_matcher() {
+        let imports = vec!["import { x } from './lib';".to_string()];
+        assert!(imports_reference_module(
+            &imports,
+            "lib",
+            "importer.jsx",
+            "jsx",
+            &empty_ctx()
+        ));
+    }
+
+    // --- rust_imports_reference (line 198, 203) ---
+
+    // Kill mutant: line 198 replace == with != in rust_imports_reference
+    // (`raw == crate_name`). The bare `use git_prism;` form has no `::` segment,
+    // so the only way to recognize it as referencing the crate root is the
+    // direct equality check — `starts_with(ext_prefix)` would NOT match because
+    // `ext_prefix` is `"git_prism::"`.
+    #[test]
+    fn rust_bare_extern_crate_name_matches_crate_root() {
+        let imports = vec!["use git_prism;".to_string()];
+        assert!(rust_imports_reference(
+            &imports,
+            "crate",
+            "tests/integration.rs",
+            &rust_ctx()
+        ));
+    }
+
+    // Kill mutant: line 203 replace == with != in rust_imports_reference
+    // (`path == module_tail`). The import `use git_prism::foo::bar;` strips the
+    // crate prefix to leave `path = "foo::bar"`, which equals `module_tail`
+    // exactly. Without the `==` branch, the matcher would only catch
+    // `starts_with("foo::bar::")` and miss the bare-equal case.
+    #[test]
+    fn rust_extern_crate_path_equals_module_tail() {
+        let imports = vec!["use git_prism::foo::bar;".to_string()];
+        assert!(rust_imports_reference(
+            &imports,
+            "crate::foo::bar",
+            "tests/integration.rs",
+            &rust_ctx()
+        ));
+    }
+
+    // --- rust_path_matches (line 245) ---
+
+    // Kill mutants: line 245:25 replace == with != AND line 245:36 replace || with &&.
+    //
+    // When `module_path == "crate"` the function should match any path under
+    // `crate::`. With `!=`, the if-branch is skipped for `module_path == "crate"`
+    // and the function falls through to the tail logic which never matches.
+    // With `&&` (resolved == "crate" && resolved.starts_with("crate::")), both
+    // operands cannot be true simultaneously, so the branch always returns false.
+    //
+    // Setup: importer at `src/foo.rs` (module `crate::foo`), `use super::bar;`
+    // resolves to `crate::bar`. Asking whether that import references the crate
+    // root (`module_path = "crate"`) must return true.
+    #[test]
+    fn rust_super_import_matches_crate_root() {
+        let imports = vec!["use super::bar;".to_string()];
+        assert!(rust_imports_reference(
+            &imports,
+            "crate",
+            "src/foo.rs",
+            &empty_ctx()
+        ));
+    }
+
+    // Triangulation for line 245:36 || with &&: a `self::` import where the
+    // importer IS the crate root (`src/lib.rs`). Resolved becomes
+    // `crate::helper`, module_path is `crate`. The right operand of the OR
+    // (`resolved.starts_with("crate::")`) is the deciding factor; with `&&`
+    // the branch returns false because `resolved != "crate"`.
+    #[test]
+    fn rust_self_import_from_lib_root_matches_crate_root() {
+        let imports = vec!["use self::helper;".to_string()];
+        assert!(rust_imports_reference(
+            &imports,
+            "crate",
+            "src/lib.rs",
+            &empty_ctx()
+        ));
+    }
+
+    // --- python_imports_reference (line 325) ---
+
+    // Kill mutant: line 325 replace || with && in python_imports_reference
+    // (the `import X` form, third operand
+    //  `module_path.starts_with(&format!("{module}."))`).
+    //
+    // `import lib` referencing module `lib.compute` requires the third operand
+    // (parent-module match): `"lib.compute".starts_with("lib.")` is true while
+    // `module == module_path` and `module.starts_with("lib.compute.")` are
+    // both false. Replacing this `||` with `&&` makes the conjunction false
+    // because the first two operands are false.
+    #[test]
+    fn python_bare_import_matches_submodule_changed_path() {
+        let imports = vec!["import lib".to_string()];
+        assert!(python_imports_reference(
+            &imports,
+            "lib.compute",
+            "importer.py"
+        ));
+    }
+
+    // --- python_module_matches (lines 349, 355) ---
+    //
+    // The mutants on line 349 (`||` -> `&&` in the `trim_matches` callback's
+    // paren / whitespace alternation) and line 355 (`name.is_empty() || name
+    // == "*"`) are equivalent under the current implementation: the chained
+    // `.replace([')', '('], "")` and per-name `.trim()` make the `trim_matches`
+    // outcome irrelevant, and the only candidates produced when the `*`/empty
+    // continue is skipped are `format!("{source}.*")` or `format!("{source}.")`
+    // which can never match a real dotted module path. We document this in
+    // skip-annotations on the function rather than writing artificial-looking
+    // tests that assert against impossible inputs.
+
+    // --- go_imports_reference (line 391) ---
+
+    // Kill mutant: line 391 replace == with != in go_imports_reference (the
+    // no-go.mod fallback `imp == module_path`). Without go.mod, an exact
+    // single-segment match (`imports = ["lib"]`, `module_path = "lib"`) is the
+    // only way the equality path can fire — `ends_with("/lib")` is false for a
+    // string that has no slash at all.
+    #[test]
+    fn go_bare_import_exact_match_without_go_mod() {
+        let imports = vec!["lib".to_string()];
+        assert!(go_imports_reference(&imports, "lib", &empty_ctx()));
+    }
+
+    // --- extract_ts_module_specifier (line 435) ---
+
+    // Kill mutant: line 435 replace + with - in extract_ts_module_specifier
+    // (`&import_stmt[from_idx + 4..]`). The `+ 4` skips past the literal
+    // `from ` keyword so the subsequent quote-search lands on the module
+    // specifier's quotes. `- 4` slices from before `from`, picking up any
+    // earlier quote in the statement.
+    //
+    // A destructured default value `{ x = 'default' }` introduces single
+    // quotes BEFORE `from`. With `+ 4` the function correctly finds `./lib`;
+    // with `- 4` the search anchors on the `'default'` quotes and returns
+    // `default` instead.
+    #[test]
+    fn extract_ts_specifier_ignores_quotes_before_from_keyword() {
+        let stmt = "import { x = 'default' } from './lib';";
+        assert_eq!(extract_ts_module_specifier(stmt), Some("./lib".to_string()));
     }
 }

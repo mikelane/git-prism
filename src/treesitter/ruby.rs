@@ -376,6 +376,29 @@ end
         assert!(calls.is_empty());
     }
 
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 2, 3
+    // distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"def run
+  obj.do_work
+  helper.compute
+end
+";
+        let analyzer = RubyAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        let do_work = calls
+            .iter()
+            .find(|c| c.callee == "obj.do_work")
+            .expect("obj.do_work call");
+        let compute = calls
+            .iter()
+            .find(|c| c.callee == "helper.compute")
+            .expect("helper.compute call");
+        assert_eq!(do_work.line, 2);
+        assert_eq!(compute.line, 3);
+    }
+
     /// Depth-guard warning: when `extract_functions_from_node` hits MAX_RECURSION_DEPTH
     /// it must emit a tracing::warn! so operators can observe truncation in logs/OTLP.
     ///

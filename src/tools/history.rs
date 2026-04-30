@@ -20,7 +20,10 @@ pub fn build_history(
     let total_commits = commit_infos.len();
 
     let page_end = (offset + page_size).min(total_commits);
-    // offset == total_commits produces empty slice either way.
+    // cargo-mutants: skip -- equivalent mutant: when offset == total_commits,
+    // page_end clamps to total_commits, so &commit_infos[total_commits..total_commits]
+    // is an empty slice — observably identical to the explicit `&[]` branch.
+    // No black-box test can distinguish `<` from `<=` at this boundary.
     #[rustfmt::skip]
     let page_commits = if offset < total_commits { &commit_infos[offset..page_end] } else { &[] };
 

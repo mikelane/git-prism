@@ -394,4 +394,27 @@ func example() {
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
     }
+
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 4, 5, 6
+    // distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"package main
+
+func main() {
+    foo()
+    bar()
+    baz()
+}
+";
+        let analyzer = GoAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].callee, "foo");
+        assert_eq!(calls[0].line, 4);
+        assert_eq!(calls[1].callee, "bar");
+        assert_eq!(calls[1].line, 5);
+        assert_eq!(calls[2].callee, "baz");
+        assert_eq!(calls[2].line, 6);
+    }
 }

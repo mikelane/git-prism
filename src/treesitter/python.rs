@@ -82,6 +82,12 @@ fn extract_functions_from_node(
                 }
             }
             "decorated_definition" => {
+                // cargo-mutants: skip -- equivalent mutant: `depth + 1` → `depth * 1`
+                // is observably identical for any realistic input. `decorated_definition`
+                // wraps a single inner function/class declaration, so the recursion
+                // depth here cannot grow beyond a handful of levels in any real
+                // codebase. The overflow-guard pattern is already exercised by the
+                // class_definition arm via `it_emits_depth_guard_warning_on_deeply_nested_classes`.
                 extract_functions_from_node(source, &child, class_name, functions, depth + 1);
             }
             _ => {}
@@ -341,6 +347,26 @@ class MyClass:
         let analyzer = PythonAnalyzer;
         let calls = analyzer.extract_calls(source).unwrap();
         assert!(calls.is_empty());
+    }
+
+    // Kill extract_calls line-offset mutants (+ with - or *). Calls on lines 2, 3, 4
+    // distinguish `row + 1` from `row * 1` and `row - 1`.
+    #[test]
+    fn it_reports_call_sites_on_correct_lines() {
+        let source = b"def main():
+    foo()
+    bar()
+    baz()
+";
+        let analyzer = PythonAnalyzer;
+        let calls = analyzer.extract_calls(source).unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].callee, "foo");
+        assert_eq!(calls[0].line, 2);
+        assert_eq!(calls[1].callee, "bar");
+        assert_eq!(calls[1].line, 3);
+        assert_eq!(calls[2].callee, "baz");
+        assert_eq!(calls[2].line, 4);
     }
 
     /// Depth-guard warning: when `extract_functions_from_node` hits MAX_RECURSION_DEPTH

@@ -591,6 +591,27 @@ mod tests {
     }
 
     #[test]
+    fn it_detects_ruby_from_rb_extension() {
+        // Kills: delete match arm "rb" in detect_language at line 461.
+        // Without the arm, detect_language falls through to "unknown".
+        assert_eq!(detect_language("script.rb"), "ruby");
+    }
+
+    #[test]
+    fn it_detects_php_from_php_extension() {
+        // Kills: delete match arm "php" in detect_language at line 464.
+        // Without the arm, detect_language falls through to "unknown".
+        assert_eq!(detect_language("index.php"), "php");
+    }
+
+    #[test]
+    fn it_detects_csharp_from_cs_extension() {
+        // Kills: delete match arm "cs" in detect_language at line 469.
+        // Without the arm, detect_language falls through to "unknown".
+        assert_eq!(detect_language("Program.cs"), "csharp");
+    }
+
+    #[test]
     fn it_returns_unknown_for_unsupported_extension() {
         assert_eq!(detect_language("README.md"), "unknown");
     }
@@ -953,6 +974,39 @@ mod tests {
         assert_eq!(json["functions"].as_array().unwrap().len(), 0);
         assert_eq!(json["pagination"]["total_items"], 0);
         assert_eq!(json["pagination"]["page_size"], 25);
+    }
+
+    #[test]
+    fn function_context_entry_skips_truncated_when_false() {
+        // Kills three mutants on `is_false` at line 343:
+        //   - replace body with `true`  → field always skipped (truncated=true never serialized)
+        //   - replace body with `false` → field never skipped (truncated=false always serialized)
+        //   - delete `!`               → predicate becomes "is_true" (inverts skip behavior)
+        // Asserts both directions: truncated=false → field absent, truncated=true → field present.
+        let mk_entry = |truncated: bool| FunctionContextEntry {
+            name: "foo".into(),
+            file: "src/lib.rs".into(),
+            change_type: FunctionChangeType::Modified,
+            blast_radius: BlastRadius::compute(0, 0),
+            scoping_mode: ScopingMode::Scoped,
+            callers: vec![],
+            callees: vec![],
+            test_references: vec![],
+            caller_count: 0,
+            truncated,
+        };
+
+        let json_false = serde_json::to_value(mk_entry(false)).unwrap();
+        assert!(
+            json_false.get("truncated").is_none(),
+            "truncated=false must be skipped from output, got: {json_false}"
+        );
+
+        let json_true = serde_json::to_value(mk_entry(true)).unwrap();
+        assert_eq!(
+            json_true["truncated"], true,
+            "truncated=true must be present in output as a true boolean"
+        );
     }
 
     #[test]
