@@ -1504,6 +1504,7 @@ mod tests {
                 head_sha: "1111111111111111111111111111111111111111".to_string(),
                 generated_at: Utc::now(),
                 token_estimate: 0,
+                budget_tokens: None,
                 function_analysis_truncated: vec![],
                 next_cursor: None,
             },
