@@ -253,7 +253,7 @@ impl RepoReader {
         let is_bare_branch = !refspec.contains('~')
             && !refspec.contains('^')
             && !refspec.contains(':')
-            && !refspec.contains('@')
+            && !refspec.contains("@{")
             && !refspec.starts_with("refs/");
 
         if is_bare_branch {
@@ -261,7 +261,7 @@ impl RepoReader {
             if self.repo.rev_parse_single(remote_ref.as_str()).is_ok() {
                 return GitError::ResolveRef(ResolveRefError {
                     refspec: refspec.to_string(),
-                    resolution: Some(format!("git fetch origin {refspec}")),
+                    resolution: Some(format!("git checkout {refspec}")),
                 });
             }
         }
@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn it_suggests_fetch_when_branch_exists_on_origin() {
+    fn it_suggests_checkout_when_branch_exists_on_origin() {
         let (local_dir, local_path) = create_test_repo();
 
         // Create a bare remote repo with branch "feature/foo"
@@ -642,13 +642,6 @@ mod tests {
             .output()
             .unwrap();
 
-        // The remote tracking ref refs/remotes/origin/feature/foo should still exist
-        // DEBUG: check remote tracking ref directly
-        let repo = gix::open(&local_path).unwrap();
-        match repo.rev_parse_single("refs/remotes/origin/feature/foo") {
-            Ok(_) => eprintln!("DEBUG: remote tracking ref exists"),
-            Err(e) => eprintln!("DEBUG: remote tracking ref missing: {}", e),
-        }
         let reader = RepoReader::open(&local_path).unwrap();
         let err = reader.resolve_commit("feature/foo").unwrap_err();
         let msg = err.to_string();
@@ -657,8 +650,90 @@ mod tests {
             "expected JSON resolution field in: {msg}"
         );
         assert!(
-            msg.contains("git fetch origin feature/foo"),
-            "expected fetch suggestion in: {msg}"
+            msg.contains("git checkout feature/foo"),
+            "expected checkout suggestion in: {msg}"
+        );
+
+        drop(local_dir);
+        drop(remote_dir);
+    }
+
+    #[test]
+    fn it_resolves_branch_with_at_symbol_when_remote_tracking_exists() {
+        let (local_dir, local_path) = create_test_repo();
+
+        // Create a bare remote repo
+        let remote_dir = TempDir::new().unwrap();
+        let remote_path = remote_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote_path)
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["remote", "add", "origin", remote_path.to_str().unwrap()])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Create branch with @ in name
+        Command::new("git")
+            .args(["checkout", "-b", "feature@team"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        std::fs::write(local_path.join("feature.txt"), "feature content\n").unwrap();
+        Command::new("git")
+            .args(["add", "feature.txt"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add feature"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "-u", "origin", "feature@team"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Fetch to ensure remote tracking ref exists locally
+        Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Go back to main and delete the local branch
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "-D", "feature@team"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&local_path).unwrap();
+        let err = reader.resolve_commit("feature@team").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"resolution\""),
+            "expected JSON resolution field in: {msg}"
+        );
+        assert!(
+            msg.contains("git checkout feature@team"),
+            "expected checkout suggestion in: {msg}"
         );
 
         drop(local_dir);
