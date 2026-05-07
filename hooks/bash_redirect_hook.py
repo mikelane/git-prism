@@ -74,7 +74,7 @@ def _tokenize_line(line: str) -> list[str]:
     contents would confuse a single-pass lexer (mismatched quotes that
     only close inside the body, for instance) cannot poison the parse
     of the surrounding code. On lex failure the offending line is
-    represented by an empty list — the heredoc walker still sees the
+    represented by an empty list -- the heredoc walker still sees the
     surrounding ``\n`` markers and the matcher safely no-ops on the
     blank slice.
     """
@@ -213,7 +213,7 @@ def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
                 _heredoc_tag(tokens[index + 1]) if index + 1 < len(tokens) else None
             )
             if tag_info is None:
-                # ``<<`` followed by an invalid/empty tag — skip the
+                # ``<<`` followed by an invalid/empty tag -- skip the
                 # malformed operator and continue.
                 index += 1
                 continue
@@ -222,7 +222,7 @@ def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
             index += 2
             # Drop everything on the same line as the operator (it's
             # part of the heredoc opening, e.g. ``cat <<EOF; echo hi``
-            # has ``; echo hi`` after the tag — bash treats it as the
+            # has ``; echo hi`` after the tag -- bash treats it as the
             # rest of the command line, not the heredoc body).
             while index < len(tokens) and tokens[index] != _NEWLINE_MARKER:
                 index += 1
@@ -230,7 +230,7 @@ def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
             # only the closing tag.
             while index < len(tokens):
                 if tokens[index] != _NEWLINE_MARKER:
-                    # Inside body content — keep walking.
+                    # Inside body content -- keep walking.
                     index += 1
                     continue
                 # Just consumed a ``\n``. Peek at the next line.
@@ -264,7 +264,7 @@ def tokenize_command(command: str) -> list[list[str]]:
 
     The outer list represents pipeline / compound boundaries; each inner
     list is the tokens of a single candidate command. Empty inner lists
-    are dropped — for example, ``(git status)`` produces ``['git',
+    are dropped -- for example, ``(git status)`` produces ``['git',
     'status']`` after the ``(`` and ``)`` are consumed as separators.
     """
     flat = _tokenize_raw(command)
@@ -313,7 +313,7 @@ ADVICE_GET_FUNCTION_CONTEXT = (
     "git log -S/-G (pickaxe) returns raw text. git-prism alternative:\n"
     "  get_function_context(repo_path, base_ref, head_ref)\n"
     "Returns callers, definitions, and test references for every changed "
-    "function — structured and cross-referenced."
+    "function -- structured and cross-referenced."
 )
 ADVICE_GET_FILE_SNAPSHOTS_BLAME = (
     "git blame returns raw line-by-line text. git-prism alternative:\n"
@@ -341,7 +341,7 @@ BLOCK_MCP_GITHUB_GET_COMMIT = (
     "git-prism instead:\n"
     "  get_file_snapshots(repo_path, base_ref='<sha>^', head_ref='<sha>', "
     "paths=[...], include_before=true, include_after=true)\n"
-    "Structured before/after content per file — no raw patch format."
+    "Structured before/after content per file -- no raw patch format."
 )
 BLOCK_MCP_GITHUB_LIST_COMMITS = (
     "git-prism: mcp__github__list_commits returns a raw list. Use "
@@ -355,7 +355,7 @@ ADVICE_GET_FILE_SNAPSHOTS_GH_API = (
     "git-prism alternative:\n"
     "  get_file_snapshots(repo_path, base_ref='<ref>^', head_ref='<ref>', "
     "paths=[...], include_before=true, include_after=true)\n"
-    "Returns structured before/after file content at the commit boundary — "
+    "Returns structured before/after file content at the commit boundary -- "
     "no raw API response to parse."
 )
 
@@ -409,7 +409,7 @@ def _has_pickaxe_flag(tokens: Iterable[str]) -> bool:
         if tok in ("-S", "-G"):
             return True
         if tok.startswith("-S") or tok.startswith("-G"):
-            # ``-Sterm`` / ``-Gterm`` — a single-token concatenation.
+            # ``-Sterm`` / ``-Gterm`` -- a single-token concatenation.
             if len(tok) > 2:
                 return True
     return False
@@ -427,7 +427,7 @@ def _classify_git_command(tokens: list[str]) -> str | None:
     git_subcommand = tokens[1]
     rest = tokens[2:]
 
-    # ``git log -S/-G`` is pickaxe — distinct redirect target. Check
+    # ``git log -S/-G`` is pickaxe -- distinct redirect target. Check
     # before the generic ``git log a..b`` rule, which would otherwise
     # claim the same call.
     if git_subcommand == "log" and _has_pickaxe_flag(rest):
@@ -447,7 +447,7 @@ def _advice_for_tool(tool_name: str, git_subcommand: str | None = None) -> str:
     """Return the ``additionalContext`` payload for a redirect target.
 
     ``git_subcommand`` distinguishes ``git blame`` from ``git show`` when both
-    map to ``get_file_snapshots`` — the agent benefits from seeing the form
+    map to ``get_file_snapshots`` -- the agent benefits from seeing the form
     that matches its original intent.
     """
     if tool_name == "get_change_manifest":
@@ -533,7 +533,7 @@ def decide_redirect(hook_event_payload: dict[str, Any]) -> Decision:
 
 def _decide_redirect_for_bash_command(command: str) -> Decision:
     """Dispatch a bash command string to the right Decision."""
-    # ``gh pr diff`` is a hard block — don't even let the bash tokenizer
+    # ``gh pr diff`` is a hard block -- don't even let the bash tokenizer
     # claim it, because we want exit 2 not exit 0.
     if _matches_gh_pr_diff(command):
         return Decision("block", message=BLOCK_GH_PR_DIFF, tool_name="Bash")
@@ -592,7 +592,7 @@ def _advice_with_echo(base_advice: str, tokens: list[str]) -> str:
     surface verbatim in the advice payload, never as the value of the
     surrounding env var. Including the literal command in the advice
     proves the tokenizer kept the raw form AND gives the agent a clear
-    "you typed X — try Y instead" framing.
+    "you typed X -- try Y instead" framing.
     """
     echoed = " ".join(tokens)
     return f"{base_advice}\n\nYou ran: {echoed}"
@@ -655,7 +655,7 @@ def _read_payload(stdin: IO[str]) -> dict[str, Any] | None:
         return parsed
     except json.JSONDecodeError:
         sys.stderr.write(
-            "git-prism-redirect: malformed JSON on stdin — skipping redirect\n"
+            "git-prism-redirect: malformed JSON on stdin -- skipping redirect\n"
         )
         return None
 
@@ -688,7 +688,7 @@ def main() -> int:
         payload = _read_payload(sys.stdin)
     except Exception:  # pragma: no cover - last-resort safety net
         sys.stderr.write(
-            "git-prism-redirect: unexpected stdin error — skipping redirect\n"
+            "git-prism-redirect: unexpected stdin error -- skipping redirect\n"
         )
         return 0
 

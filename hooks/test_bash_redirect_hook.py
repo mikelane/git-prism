@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from bash_redirect_hook import (
     BLOCK_GH_PR_DIFF,
+    BLOCK_MCP_GITHUB_GET_COMMIT,
     _advice_with_echo,
     _matches_gh_api_contents,
     _classify_git_command,
@@ -30,7 +31,9 @@ from bash_redirect_hook import (
     _is_functionally_empty,
     _matches_gh_pr_diff,
     _emit_advice,
+    _read_payload,
     decide_redirect,
+    main,
     tokenize_command,
 )
 
@@ -655,6 +658,82 @@ class TestUnicodeEncoding(unittest.TestCase):
             )
         finally:
             sys.stderr = old_stderr
+
+    def test_block_mcp_github_get_commit_is_ascii_safe(self):
+        """BLOCK_MCP_GITHUB_GET_COMMIT must contain only ASCII characters."""
+        for i, ch in enumerate(BLOCK_MCP_GITHUB_GET_COMMIT):
+            self.assertLess(
+                ord(ch),
+                128,
+                f"Non-ASCII char {ch!r} (U+{ord(ch):04X}) at index {i} in "
+                f"BLOCK_MCP_GITHUB_GET_COMMIT",
+            )
+
+    def test_block_mcp_github_get_commit_stderr_survives_ascii_locale(self):
+        """Block path for mcp__github__get_commit must survive ASCII-only stderr."""
+        import io
+        raw = io.BytesIO()
+        ascii_stderr = io.TextIOWrapper(raw, encoding="ascii")
+        old_stderr = sys.stderr
+        sys.stderr = ascii_stderr
+        try:
+            sys.stderr.write(BLOCK_MCP_GITHUB_GET_COMMIT)
+            sys.stderr.write("\n")
+            ascii_stderr.flush()
+        except UnicodeEncodeError:
+            self.fail(
+                "BLOCK_MCP_GITHUB_GET_COMMIT raised UnicodeEncodeError on ASCII stderr; "
+                "main() would silently downgrade a hard block to allow"
+            )
+        finally:
+            sys.stderr = old_stderr
+
+    def test_malformed_json_warning_survives_ascii_locale(self):
+        """Malformed JSON warning must survive ASCII-only stderr without crashing."""
+        import io
+        raw = io.BytesIO()
+        ascii_stderr = io.TextIOWrapper(raw, encoding="ascii")
+        old_stderr = sys.stderr
+        sys.stderr = ascii_stderr
+        fake_stdin = io.StringIO("this is not json {")
+        try:
+            result = _read_payload(fake_stdin)
+            self.assertIsNone(result)
+        except UnicodeEncodeError:
+            self.fail(
+                "_read_payload raised UnicodeEncodeError on ASCII stderr when "
+                "emitting malformed JSON warning; main() would crash instead of "
+                "returning fail-open exit 0"
+            )
+        finally:
+            sys.stderr = old_stderr
+
+    def test_main_unexpected_error_handler_survives_ascii_locale(self):
+        """main()'s outer exception handler must survive ASCII-only stderr."""
+        import io
+        raw = io.BytesIO()
+        ascii_stderr = io.TextIOWrapper(raw, encoding="ascii")
+        old_stderr = sys.stderr
+        old_stdin = sys.stdin
+        sys.stderr = ascii_stderr
+
+        class BrokenStdin:
+            def read(self):
+                raise RuntimeError("boom")
+
+        sys.stdin = BrokenStdin()
+        try:
+            result = main()
+            # main() should return 0 (fail-open) even when stdin read fails.
+            self.assertEqual(result, 0)
+        except UnicodeEncodeError:
+            self.fail(
+                "main() raised UnicodeEncodeError on ASCII stderr when handling "
+                "unexpected error; hook would crash instead of fail-open"
+            )
+        finally:
+            sys.stderr = old_stderr
+            sys.stdin = old_stdin
 
 
 if __name__ == "__main__":
