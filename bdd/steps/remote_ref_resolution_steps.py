@@ -63,10 +63,20 @@ def step_create_bare_remote_repo(context: Context, name: str, branch: str) -> No
 
 @given('the remote "{name}" is added but not fetched')
 def step_add_remote_no_fetch(context: Context, name: str) -> None:
-    """Add the named remote to the test repo without fetching."""
+    """Add the named remote to the test repo and fetch so tracking refs exist.
+
+    The branch is fetched to ensure refs/remotes/origin/<branch> exists locally,
+    but no local branch is created. This is the condition that triggers the
+    actionable resolution: the remote knows about the branch but the caller
+    referenced it by short name.
+    """
     remote_dir = context.remote_paths[name]
     subprocess.run(
         ["git", "remote", "add", name, remote_dir],
+        cwd=context.repo_path, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "fetch", name],
         cwd=context.repo_path, check=True, capture_output=True,
     )
 

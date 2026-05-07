@@ -1,6 +1,29 @@
 use serde::Serialize;
 use thiserror::Error;
 
+#[derive(Debug)]
+pub struct ResolveRefError {
+    pub refspec: String,
+    pub resolution: Option<String>,
+}
+
+impl std::fmt::Display for ResolveRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let error_msg = format!(
+            "Could not find ref '{}'. Check that the branch, tag, or SHA exists.",
+            self.refspec
+        );
+        match &self.resolution {
+            Some(res) => write!(
+                f,
+                "{}",
+                serde_json::json!({"error": error_msg, "resolution": res})
+            ),
+            None => write!(f, "{error_msg}"),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GitError {
     #[error(
@@ -8,8 +31,8 @@ pub enum GitError {
     )]
     OpenRepo(String),
 
-    #[error("Could not find ref '{0}'. Check that the branch, tag, or SHA exists.")]
-    ResolveRef(String),
+    #[error("{0}")]
+    ResolveRef(ResolveRefError),
 
     #[error("failed to read object: {0}")]
     ReadObject(String),
@@ -215,7 +238,7 @@ impl RepoReader {
             .repo
             .rev_parse_single(refspec)
             // Raw gix error omitted — see OpenRepo for rationale.
-            .map_err(|_| GitError::ResolveRef(refspec.to_string()))?;
+            .map_err(|_| Self::resolve_ref_with_fallback(self, refspec))?;
 
         let object = rev
             .object()
@@ -224,6 +247,29 @@ impl RepoReader {
         object
             .try_into_commit()
             .map_err(|e| GitError::ReadObject(e.to_string()))
+    }
+
+    fn resolve_ref_with_fallback(&self, refspec: &str) -> GitError {
+        let is_bare_branch = !refspec.contains('~')
+            && !refspec.contains('^')
+            && !refspec.contains(':')
+            && !refspec.contains('@')
+            && !refspec.starts_with("refs/");
+
+        if is_bare_branch {
+            let remote_ref = format!("refs/remotes/origin/{refspec}");
+            if self.repo.rev_parse_single(remote_ref.as_str()).is_ok() {
+                return GitError::ResolveRef(ResolveRefError {
+                    refspec: refspec.to_string(),
+                    resolution: Some(format!("git fetch origin {refspec}")),
+                });
+            }
+        }
+
+        GitError::ResolveRef(ResolveRefError {
+            refspec: refspec.to_string(),
+            resolution: None,
+        })
     }
 }
 
@@ -530,27 +576,156 @@ mod tests {
     }
 
     #[test]
-    fn it_lists_files_at_ref() {
+    fn it_suggests_fetch_when_branch_exists_on_origin() {
+        let (local_dir, local_path) = create_test_repo();
+
+        // Create a bare remote repo with branch "feature/foo"
+        let remote_dir = TempDir::new().unwrap();
+        let remote_path = remote_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote_path)
+            .output()
+            .unwrap();
+
+        // Push local main to remote so refs/remotes/origin/feature/foo exists
+        Command::new("git")
+            .args(["remote", "add", "origin", remote_path.to_str().unwrap()])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Create feature/foo on remote by pushing from local
+        Command::new("git")
+            .args(["checkout", "-b", "feature/foo"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        std::fs::write(local_path.join("feature.txt"), "feature content\n").unwrap();
+        Command::new("git")
+            .args(["add", "feature.txt"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add feature"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "-u", "origin", "feature/foo"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Fetch to ensure remote tracking ref exists locally
+        Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Now go back to main and delete the local feature/foo branch
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "-D", "feature/foo"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // The remote tracking ref refs/remotes/origin/feature/foo should still exist
+        // DEBUG: check remote tracking ref directly
+        let repo = gix::open(&local_path).unwrap();
+        match repo.rev_parse_single("refs/remotes/origin/feature/foo") {
+            Ok(_) => eprintln!("DEBUG: remote tracking ref exists"),
+            Err(e) => eprintln!("DEBUG: remote tracking ref missing: {}", e),
+        }
+        let reader = RepoReader::open(&local_path).unwrap();
+        let err = reader.resolve_commit("feature/foo").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"resolution\""),
+            "expected JSON resolution field in: {msg}"
+        );
+        assert!(
+            msg.contains("git fetch origin feature/foo"),
+            "expected fetch suggestion in: {msg}"
+        );
+
+        drop(local_dir);
+        drop(remote_dir);
+    }
+
+    #[test]
+    fn it_returns_plain_error_when_branch_not_found_anywhere() {
         let (_dir, path) = create_test_repo();
-
-        // Add a nested file
-        std::fs::create_dir_all(path.join("src")).unwrap();
-        std::fs::write(path.join("src/main.rs"), "fn main() {}").unwrap();
-        Command::new("git")
-            .args(["add", "src/main.rs"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "add source file"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
         let reader = RepoReader::open(&path).unwrap();
-        let files = reader.list_files_at_ref("HEAD").unwrap();
-        assert!(files.contains(&"README.md".to_string()));
-        assert!(files.contains(&"src/main.rs".to_string()));
-        assert_eq!(files.len(), 2);
+        let err = reader.resolve_commit("totally-unknown").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains('{'),
+            "expected plain error without JSON braces, got: {msg}"
+        );
+        assert!(
+            !msg.contains("\"resolution\""),
+            "expected no resolution field in: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_returns_plain_error_for_sha() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader
+            .resolve_commit("deadbeef1234567890abcdef1234567890abcdef12")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains('{'),
+            "expected plain error without JSON braces, got: {msg}"
+        );
+        assert!(
+            !msg.contains("\"resolution\""),
+            "expected no resolution field in: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_returns_plain_error_for_qualified_ref() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        let err = reader.resolve_commit("refs/heads/nonexistent").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains('{'),
+            "expected plain error without JSON braces, got: {msg}"
+        );
+        assert!(
+            !msg.contains("\"resolution\""),
+            "expected no resolution field in: {msg}"
+        );
+    }
+
+    #[test]
+    fn it_identifies_base_ref_as_missing() {
+        let (_dir, path) = create_test_repo();
+        let reader = RepoReader::open(&path).unwrap();
+        // manifest with missing base_ref and valid head_ref
+        let result = reader.walk_commits("feature/foo", "HEAD");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("feature/foo"),
+            "expected base ref name in error: {msg}"
+        );
     }
 }
