@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from bash_redirect_hook import (
+    BLOCK_GH_PR_DIFF,
     _advice_with_echo,
     _matches_gh_api_contents,
     _classify_git_command,
@@ -28,6 +29,7 @@ from bash_redirect_hook import (
     _has_ref_range,
     _is_functionally_empty,
     _matches_gh_pr_diff,
+    _emit_advice,
     decide_redirect,
     tokenize_command,
 )
@@ -598,6 +600,61 @@ class TestDecideRedirect(unittest.TestCase):
         decision = decide_redirect(self._bash_payload(command))
         self.assertEqual(decision.mode, "advise")
         self.assertIn("get_change_manifest", decision.advice)
+
+
+# ---------------------------------------------------------------------------
+# Unicode encoding edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestUnicodeEncoding(unittest.TestCase):
+    """The hook messages added in #265 contain the Unicode arrow '←'.
+
+    The advisory path JSON-encodes the text (json.dumps defaults to
+    ensure_ascii=True), so Unicode is escaped to ← and is safe.
+    The block path writes the message directly to sys.stderr, which
+    raises UnicodeEncodeError in ASCII-only locales and silently
+    downgrades a hard block to a silent allow.
+    """
+
+    def test_advisory_path_is_ascii_safe(self):
+        """Advisory output must be ASCII-safe after json.dumps."""
+        import io
+        fake_stdout = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = fake_stdout
+        try:
+            _emit_advice(BLOCK_GH_PR_DIFF)
+        finally:
+            sys.stdout = old_stdout
+        output = fake_stdout.getvalue()
+        # No literal Unicode arrows; json.dumps would escape them anyway.
+        self.assertNotIn("←", output)
+        # Verify the message was emitted and contains ASCII-only arrows.
+        self.assertIn("-->", output)
+
+    def test_block_path_stderr_fails_on_ascii_locale(self):
+        """Block path must survive ASCII-only stderr without crashing."""
+        import io
+        # Create a TextIOWrapper that enforces ASCII encoding.
+        raw = io.BytesIO()
+        ascii_stderr = io.TextIOWrapper(raw, encoding="ascii")
+        old_stderr = sys.stderr
+        sys.stderr = ascii_stderr
+        try:
+            # This is exactly what main() does for a block decision.
+            sys.stderr.write(BLOCK_GH_PR_DIFF)
+            sys.stderr.write("\n")
+            ascii_stderr.flush()
+        except UnicodeEncodeError:
+            # This exception is the bug: the block is lost and the
+            # outer except in main() returns 0 (silent allow).
+            self.fail(
+                "BLOCK_GH_PR_DIFF raised UnicodeEncodeError on ASCII stderr; "
+                "main() would silently downgrade a hard block to allow"
+            )
+        finally:
+            sys.stderr = old_stderr
 
 
 if __name__ == "__main__":
