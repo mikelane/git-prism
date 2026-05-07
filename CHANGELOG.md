@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Actionable resolution field for missing remote branches.** When `get_change_manifest` is called with a branch name that exists as a remote tracking ref (`refs/remotes/origin/{branch}`) but not as a local branch, the `ResolveRef` error now includes a JSON payload with a `resolution` field suggesting `git fetch origin {branch}`. Plain text errors are preserved for SHAs, qualified refs, and branches that do not exist anywhere. (#263)
+
 ### Changed
 
 ### Fixed
