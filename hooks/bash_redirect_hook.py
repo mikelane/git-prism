@@ -296,9 +296,11 @@ def tokenize_command(command: str) -> list[list[str]]:
 # instead. The text below is what Claude Code surfaces back to the model
 # via the ``additionalContext`` field on the hook's stdout JSON.
 ADVICE_GET_CHANGE_MANIFEST = (
-    "git diff between refs returns raw text. git-prism alternative:\n"
-    "  get_change_manifest(repo_path, base_ref, head_ref, "
-    "include_function_analysis=true)\n"
+    "git diff between refs returns raw text. git-prism alternatives:\n"
+    "  review_change(repo_path, base_ref, head_ref)       "
+    "← full PR review (manifest + function context)\n"
+    "  get_change_manifest(repo_path, base_ref, head_ref)  "
+    "← quick file-level scan\n"
     "Returns structured per-file change data with function-level semantic "
     "analysis."
 )
@@ -328,8 +330,10 @@ ADVICE_GET_FILE_SNAPSHOTS_SHOW = (
 
 BLOCK_GH_PR_DIFF = (
     "git-prism: gh pr diff returns raw text. Use git-prism instead:\n"
-    "  get_change_manifest(repo_path, base_ref, head_ref, "
-    "include_function_analysis=true)\n"
+    "  review_change(repo_path, base_ref, head_ref)       "
+    "← full PR review (manifest + function context)\n"
+    "  get_change_manifest(repo_path, base_ref, head_ref)  "
+    "← quick file-level scan\n"
     "Structured per-function change data — same info, no diff noise."
 )
 BLOCK_MCP_GITHUB_GET_COMMIT = (
