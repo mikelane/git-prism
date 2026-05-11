@@ -1,0 +1,10 @@
+gh issue create --repo owner/repo \
+  --title "Some title" \
+  --body "$(cat <<'EOF'
+Running:
+
+ gh pr diff 123 --repo owner/repo
+
+produces X behavior.
+EOF
+)"

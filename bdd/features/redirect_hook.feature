@@ -180,6 +180,54 @@ Feature: Redirect hooks for raw git invocations
     And the hook stdout does not contain redirect advice for "get_commit_history"
 
   # ------------------------------------------------------------------------
+  # W3.1: Heredoc tokenizer gaps (#270)
+  #
+  # Bug 1: A heredoc inside a multi-line double-quoted string (e.g.,
+  # `"$(cat <<'EOF'` spanning several lines) cannot be tokenized by shlex
+  # because it throws ValueError on the unterminated quote. The `<<` operator
+  # is lost and the heredoc body leaks into candidate commands, causing a
+  # false positive hard block when `gh pr diff` text appears verbatim inside
+  # the heredoc body.
+  #
+  # Bug 2: `gh api repos/.../contents/...?ref=<sha>` fetches raw file content
+  # from a specific ref via the GitHub API, completely bypassing git-prism.
+  # The hook must intercept this and redirect to `get_file_snapshots`.
+  # ------------------------------------------------------------------------
+
+  @ISSUE-270
+  Scenario: "gh pr diff" inside a quoted heredoc body is NOT blocked
+    # The heredoc body contains `gh pr diff 123 --repo owner/repo` verbatim,
+    # but it's inside a quoted heredoc in a command-substitution. The hook
+    # must not hard-block this — it must recognize the heredoc body is opaque
+    # and skip it, even when shlex cannot tokenize the enclosing line.
+    Given a hook input with the bash command from "heredoc_gh_pr_diff_inside.txt"
+    When I run the bundled redirect hook with that input
+    Then the hook exit code is 0
+    And the hook stdout is empty
+    And the hook stderr is empty
+
+  @ISSUE-270
+  Scenario: "gh api repos/.../contents/...?ref=<sha>" is redirected to get_file_snapshots
+    # `gh api` with a `/contents/` path containing a `ref=` query parameter
+    # fetches file content at a specific ref — semantically equivalent to
+    # `git show <sha>:<path>`. Redirect advisably (not hard block).
+    Given a hook input with bash command "gh api repos/owner/repo/contents/src/main.rs?ref=abc123 --jq .content"
+    When I run the bundled redirect hook with that input
+    Then the hook exit code is 0
+    And the hook stdout is JSON containing redirect advice for "get_file_snapshots"
+
+  @ISSUE-270
+  Scenario: "gh api repos/.../contents/..." without ref parameter is NOT intercepted
+    # Triangulates the ref= detection: a bare `/contents/` path without a
+    # `ref=` query parameter is a metadata or directory-listing call, not a
+    # file-content-at-sha call. No redirect.
+    Given a hook input with bash command "gh api repos/owner/repo/contents/src/main.rs"
+    When I run the bundled redirect hook with that input
+    Then the hook exit code is 0
+    And the hook stdout is empty
+    And the hook stderr is empty
+
+  # ------------------------------------------------------------------------
   # W4: Install-hooks subcommand + bundled hook script (#239)
   #
   # `git-prism hooks install --scope <user|project|local>` writes a
