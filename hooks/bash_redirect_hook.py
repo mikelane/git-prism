@@ -113,6 +113,7 @@ def _heredoc_tag(token: str) -> tuple[str, bool] | None:
         return None
     return tag, is_dash
 
+
 _HEREDOC_START_PATTERN = re.compile(r"<<(-?)\s*['\"]?([A-Za-z0-9_]\w*)['\"]?")
 
 
@@ -708,7 +709,9 @@ def main() -> int:
             sys.stderr.write(decision.message)
             sys.stderr.write("\n")
             return 2
-    except Exception:  # pragma: no cover - BrokenPipeError or similar; never block the agent
+    except (
+        Exception
+    ):  # pragma: no cover - BrokenPipeError or similar; never block the agent
         return 0
 
     return 0

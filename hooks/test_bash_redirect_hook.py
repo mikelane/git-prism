@@ -78,6 +78,7 @@ class TestHasRefRange(unittest.TestCase):
     def test_bare_double_dot_is_excluded(self) -> None:
         # ".." is the parent-directory shorthand, not a ref range.
         self.assertFalse(_has_ref_range([".."]))
+
     def test_bare_triple_dot_is_excluded(self) -> None:
         self.assertFalse(_has_ref_range(["..."]))
 
@@ -237,21 +238,14 @@ class TestTokenizeCommand(unittest.TestCase):
 
     def test_heredoc_indented_delimiter_in_body_is_not_terminated(self) -> None:
         """Indented EOF inside a heredoc body must NOT terminate the heredoc."""
-        command = (
-            "cat <<EOF\n"
-            "  EOF\n"
-            "git diff main..HEAD\n"
-            "EOF\n"
-        )
+        command = "cat <<EOF\n  EOF\ngit diff main..HEAD\nEOF\n"
         result = tokenize_command(command)
         git_diff_candidates = [
-            c for c in result
-            if c and c[0] == "git" and len(c) > 1 and c[1] == "diff"
+            c for c in result if c and c[0] == "git" and len(c) > 1 and c[1] == "diff"
         ]
         self.assertFalse(
             git_diff_candidates,
-            f"git diff inside heredoc body leaked after indented faux-tag: "
-            f"{result}",
+            f"git diff inside heredoc body leaked after indented faux-tag: {result}",
         )
 
     def test_tokenizer_resumes_after_heredoc_terminator(self) -> None:
@@ -275,20 +269,65 @@ class TestTokenizeCommand(unittest.TestCase):
         multi-line quoted string must still be recognized by the _strip_heredocs
         pre-pass, and its body skipped, preventing ``gh pr diff`` (or any git
         command) from leaking into candidates."""
-        command = (
-            'echo "$(cat <<\'1\'\n'
-            'gh pr diff 123 --repo owner/repo\n'
-            '1\n'
-            ') done"\n'
-        )
+        command = "echo \"$(cat <<'1'\ngh pr diff 123 --repo owner/repo\n1\n) done\"\n"
         result = tokenize_command(command)
         gh_pr_diff = [
-            c for c in result
-            if c and len(c) >= 2 and c[0] == "gh" and c[1] == "pr"
+            c for c in result if c and len(c) >= 2 and c[0] == "gh" and c[1] == "pr"
         ]
         self.assertFalse(
             gh_pr_diff,
             f"gh pr diff inside digit-tag quoted-heredoc body leaked: {result}",
+        )
+
+    def test_two_heredocs_same_line_second_body_leaks(self) -> None:
+        """Two ``<<TAG`` operators on the same line: only the first is found by
+        the pre-pass. The second heredoc's body and closing tag leak into the
+        token stream, causing false-positive hard blocks."""
+        command = (
+            "cat <<EOF1 <<EOF2\nEOF1 body\nEOF1\ngh pr diff 123\nEOF2\necho done\n"
+        )
+        result = tokenize_command(command)
+        gh_pr_candidates = [
+            c for c in result if c and len(c) >= 2 and c[0] == "gh" and c[1] == "pr"
+        ]
+        self.assertFalse(
+            gh_pr_candidates,
+            f"gh pr diff inside second heredoc body on same-line << leaked: {result}",
+        )
+
+    def test_two_heredocs_same_line_git_diff_leaks(self) -> None:
+        """Triangulates same-line bug: git diff in second heredoc body also
+        leaks. Tests a different watch-list command to confirm the bug isn't
+        specific to ``gh pr diff``."""
+        command = (
+            "cat <<EOF1 <<EOF2\nEOF1 body\nEOF1\ngit diff main..HEAD\nEOF2\necho done\n"
+        )
+        result = tokenize_command(command)
+        git_diff_candidates = [
+            c for c in result if c and len(c) >= 2 and c[0] == "git" and c[1] == "diff"
+        ]
+        self.assertFalse(
+            git_diff_candidates,
+            f"git diff inside second heredoc body on same-line << leaked: {result}",
+        )
+
+    def test_two_heredocs_same_line_gh_api_contents_leaks(self) -> None:
+        """Triangulates same-line bug for the gh api contents?ref= matcher."""
+        from bash_redirect_hook import _matches_gh_api_contents
+
+        command = (
+            "cat <<EOF1 <<EOF2\n"
+            "EOF1 body\n"
+            "EOF1\n"
+            "gh api repos/owner/repo/contents/path?ref=abc123\n"
+            "EOF2\n"
+            "echo done\n"
+        )
+        result = _matches_gh_api_contents(command)
+        self.assertFalse(
+            result,
+            f"gh api contents?ref= inside second heredoc body on same-line << "
+            f"triggered false match: {result}",
         )
 
 
@@ -325,6 +364,20 @@ class TestDropHeredocBodies(unittest.TestCase):
     def test_no_heredoc_passes_through_unchanged(self) -> None:
         tokens = ["git", "diff", "main..HEAD"]
         self.assertEqual(_drop_heredoc_bodies(tokens), tokens)
+
+    def test_invalid_heredoc_tag_drops_all_remaining_tokens(self) -> None:
+        """``<<`` followed by an empty/invalid tag token (e.g., ``''``
+        or ``-`` alone) causes ``_heredoc_tag`` to return ``None``,
+        which triggers a ``break`` that drops all remaining tokens
+        instead of just skipping the malformed ``<<``."""
+        tokens = ["echo", "hi", "<<", "''", "\n", "git", "diff", "main..HEAD"]
+        result = _drop_heredoc_bodies(tokens)
+        self.assertIn(
+            "git", result, f"git diff after malformed << was dropped: {result}"
+        )
+        self.assertNotIn(
+            "<<", result, f"<< operator was preserved after malformed tag: {result}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +431,6 @@ class TestMatchesGhPrDiff(unittest.TestCase):
         self.assertFalse(_matches_gh_pr_diff(""))
 
 
-
 # ---------------------------------------------------------------------------
 # _matches_gh_api_contents
 # ---------------------------------------------------------------------------
@@ -387,9 +439,7 @@ class TestMatchesGhPrDiff(unittest.TestCase):
 class TestMatchesGhApiContents(unittest.TestCase):
     def test_gh_api_contents_with_ref_is_matched(self) -> None:
         self.assertTrue(
-            _matches_gh_api_contents(
-                "gh api repos/owner/repo/contents/path?ref=abc123"
-            )
+            _matches_gh_api_contents("gh api repos/owner/repo/contents/path?ref=abc123")
         )
 
     def test_gh_api_contents_with_multiple_params_is_matched(self) -> None:
@@ -401,24 +451,18 @@ class TestMatchesGhApiContents(unittest.TestCase):
 
     def test_gh_api_contents_without_ref_is_not_matched(self) -> None:
         self.assertFalse(
-            _matches_gh_api_contents(
-                "gh api repos/owner/repo/contents/path"
-            )
+            _matches_gh_api_contents("gh api repos/owner/repo/contents/path")
         )
 
     def test_gh_api_other_endpoint_is_not_matched(self) -> None:
-        self.assertFalse(
-            _matches_gh_api_contents("gh api repos/owner/repo/issues")
-        )
+        self.assertFalse(_matches_gh_api_contents("gh api repos/owner/repo/issues"))
 
     def test_gh_api_contents_no_path_before_ref_is_matched(self) -> None:
         """``contents/?ref=sha`` with no path segment before the query must
         still match — the old ``.+`` regex required at least one char between
         ``contents/`` and ``?ref=``."""
         self.assertTrue(
-            _matches_gh_api_contents(
-                "gh api repos/owner/repo/contents/?ref=abc123"
-            )
+            _matches_gh_api_contents("gh api repos/owner/repo/contents/?ref=abc123")
         )
 
     def test_empty_command_is_not_matched(self) -> None:
@@ -517,18 +561,14 @@ class TestDecideRedirect(unittest.TestCase):
 
     def test_gh_api_contents_with_ref_returns_advise(self) -> None:
         decision = decide_redirect(
-            self._bash_payload(
-                "gh api repos/owner/repo/contents/path?ref=abc123"
-            )
+            self._bash_payload("gh api repos/owner/repo/contents/path?ref=abc123")
         )
         self.assertEqual(decision.mode, "advise")
         self.assertIn("get_file_snapshots", decision.advice)
 
     def test_gh_api_contents_without_ref_returns_silent(self) -> None:
         decision = decide_redirect(
-            self._bash_payload(
-                "gh api repos/owner/repo/contents/path"
-            )
+            self._bash_payload("gh api repos/owner/repo/contents/path")
         )
         self.assertEqual(decision.mode, "silent")
 
