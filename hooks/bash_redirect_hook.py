@@ -113,7 +113,7 @@ def _heredoc_tag(token: str) -> tuple[str, bool] | None:
         return None
     return tag, is_dash
 
-_HEREDOC_START_PATTERN = re.compile(r"<<(-?)\s*['\"]?([A-Za-z_]\w*)['\"]?")
+_HEREDOC_START_PATTERN = re.compile(r"<<(-?)\s*['\"]?([A-Za-z0-9_]\w*)['\"]?")
 
 
 def _strip_heredocs_from_raw(command: str) -> str:
@@ -151,7 +151,10 @@ def _strip_heredocs_from_raw(command: str) -> str:
         # Skip body lines until the closing tag (the tag alone on its own
         # line, modulo ``<<-`` tab stripping).
         while i < len(lines):
-            stripped = lines[i].lstrip("\t ") if is_dash else lines[i].strip()
+            if is_dash:
+                stripped = lines[i].rstrip().lstrip("\t")
+            else:
+                stripped = lines[i].rstrip()
             if stripped == tag:
                 # Replace the closing tag line with an empty line.
                 result.append("")
@@ -208,7 +211,7 @@ def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
             if tag_info is None:
                 # ``<<`` at end of input — drop the operator and stop.
                 break
-            tag, _is_dash = tag_info
+            tag, _ = tag_info
             # Step past ``<<`` and the tag word; both are dropped.
             index += 2
             # Drop everything on the same line as the operator (it's
@@ -347,7 +350,7 @@ ADVICE_GET_FILE_SNAPSHOTS_GH_API = (
 )
 
 
-_GH_API_CONTENTS_PATTERN = re.compile(r"repos/[^/]+/[^/]+/contents/.+[?&]ref=")
+_GH_API_CONTENTS_PATTERN = re.compile(r"repos/[^/]+/[^/]+/contents/.*[?&]ref=")
 
 
 def _matches_gh_api_contents(command: str) -> bool:
@@ -464,6 +467,10 @@ class Decision:
     """
 
     __slots__ = ("mode", "advice", "message", "tool_name")
+    mode: str
+    advice: str
+    message: str
+    tool_name: str
 
     def __init__(
         self,
