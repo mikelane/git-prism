@@ -136,32 +136,35 @@ def _strip_heredocs_from_raw(command: str) -> str:
     i = 0
     while i < len(lines):
         line = lines[i]
-        match = _HEREDOC_START_PATTERN.search(line)
-        if not match:
+        matches = list(_HEREDOC_START_PATTERN.finditer(line))
+        if not matches:
             result.append(line)
             i += 1
             continue
 
-        is_dash = bool(match.group(1))  # ``<<-`` strips leading tabs
-        tag = match.group(2)
         # Replace the heredoc opening line with an empty line.
         result.append("")
         i += 1
 
-        # Skip body lines until the closing tag (the tag alone on its own
-        # line, modulo ``<<-`` tab stripping).
-        while i < len(lines):
-            if is_dash:
-                stripped = lines[i].rstrip().lstrip("\t")
-            else:
-                stripped = lines[i].rstrip()
-            if stripped == tag:
-                # Replace the closing tag line with an empty line.
+        # Process each heredoc tag found on the line in order.
+        for match in matches:
+            is_dash = bool(match.group(1))  # ``<<-`` strips leading tabs
+            tag = match.group(2)
+
+            # Skip body lines until the closing tag (the tag alone on its own
+            # line, modulo ``<<-`` tab stripping).
+            while i < len(lines):
+                if is_dash:
+                    stripped = lines[i].rstrip().lstrip("\t")
+                else:
+                    stripped = lines[i].rstrip()
+                if stripped == tag:
+                    # Replace the closing tag line with an empty line.
+                    result.append("")
+                    i += 1
+                    break
                 result.append("")
                 i += 1
-                break
-            result.append("")
-            i += 1
     return "\n".join(result)
 
 
@@ -209,8 +212,10 @@ def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
                 _heredoc_tag(tokens[index + 1]) if index + 1 < len(tokens) else None
             )
             if tag_info is None:
-                # ``<<`` at end of input — drop the operator and stop.
-                break
+                # ``<<`` followed by an invalid/empty tag — skip the
+                # malformed operator and continue.
+                index += 1
+                continue
             tag, _ = tag_info
             # Step past ``<<`` and the tag word; both are dropped.
             index += 2
