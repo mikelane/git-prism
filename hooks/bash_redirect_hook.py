@@ -361,8 +361,14 @@ def _matches_gh_api_contents(command: str) -> bool:
     Only matches when a ``ref=`` query parameter is present; bare
     ``/contents/`` paths without ``ref=`` are metadata or directory-listing
     calls and pass through silently.
+
+    The heredoc pre-pass is applied to the raw command before regex matching
+    so ``gh api .../contents/...?ref=...`` text inside a heredoc body does
+    not trigger a false-positive redirect.
     """
-    return bool(_GH_API_CONTENTS_PATTERN.search(command))
+    # Strip heredoc bodies first to avoid matching inside opaque body text.
+    cleaned = _strip_heredocs_from_raw(_strip_backticks(command))
+    return bool(_GH_API_CONTENTS_PATTERN.search(cleaned))
 
 
 def _has_ref_range(tokens: Iterable[str]) -> bool:
