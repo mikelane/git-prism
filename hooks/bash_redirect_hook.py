@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shlex
 import sys
 from collections.abc import Iterable
@@ -105,6 +106,54 @@ def _heredoc_tag(token: str) -> tuple[str, bool] | None:
         return None
     return tag, is_dash
 
+_HEREDOC_START_PATTERN = re.compile(r"<<(-?)\s*['\"]?([A-Za-z_]\w*)['\"]?")
+
+
+def _strip_heredocs_from_raw(command: str) -> str:
+    r"""Pre-pass: strip heredoc bodies from raw command text before tokenization.
+
+    Handles heredocs whose ``<<`` operator appears inside a quoted context
+    that ``shlex`` cannot tokenize (e.g., a multi-line double-quoted string
+    containing ``"$(cat <<'EOF'``). In those cases ``_tokenize_line`` raises
+    ``ValueError`` and returns ``[]``, so the ``<<`` operator is lost and
+    ``_drop_heredoc_bodies`` never sees it. The heredoc body leaks into
+    candidate commands, causing false-positive matches.
+
+    This pre-pass regex-scans each line for the ``<<TAG`` pattern and, when
+    found, replaces the heredoc opening line and every body line through the
+    closing tag with empty strings, preserving the surrounding command
+    structure for subsequent tokenization.
+    """
+    lines = command.split("\n")
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = _HEREDOC_START_PATTERN.search(line)
+        if not match:
+            result.append(line)
+            i += 1
+            continue
+
+        is_dash = bool(match.group(1))  # ``<<-`` strips leading tabs
+        tag = match.group(2)
+        # Replace the heredoc opening line with an empty line.
+        result.append("")
+        i += 1
+
+        # Skip body lines until the closing tag (the tag alone on its own
+        # line, modulo ``<<-`` tab stripping).
+        while i < len(lines):
+            stripped = lines[i].lstrip("\t ") if is_dash else lines[i].strip()
+            if stripped == tag:
+                # Replace the closing tag line with an empty line.
+                result.append("")
+                i += 1
+                break
+            result.append("")
+            i += 1
+    return "\n".join(result)
+
 
 def _tokenize_raw(command: str) -> list[str]:
     r"""Produce a flat token list with explicit ``\n`` separator tokens.
@@ -116,6 +165,9 @@ def _tokenize_raw(command: str) -> list[str]:
     cleaned = _strip_backticks(command)
     if not cleaned:
         return []
+    # Pre-pass: regex-strip heredoc bodies that shlex cannot tokenize,
+    # preventing false-positive matches from leaked body text.
+    cleaned = _strip_heredocs_from_raw(cleaned)
     tokens: list[str] = []
     lines = cleaned.split("\n")
     for index, line in enumerate(lines):
@@ -277,6 +329,33 @@ BLOCK_MCP_GITHUB_LIST_COMMITS = (
     "  get_commit_history(repo_path, base_ref, head_ref)\n"
     "Structured commits with per-commit semantic change analysis."
 )
+ADVICE_GET_FILE_SNAPSHOTS_GH_API = (
+    "gh api repos/.../contents/...?ref=<sha> fetches raw file content from a "
+    "specific ref via the GitHub API, bypassing git-prism entirely. "
+    "git-prism alternative:\n"
+    "  get_file_snapshots(repo_path, base_ref='<ref>^', head_ref='<ref>', "
+    "paths=[...], include_before=true, include_after=true)\n"
+    "Returns structured before/after file content at the commit boundary — "
+    "no raw API response to parse."
+)
+
+
+_GH_API_CONTENTS_PATTERN = re.compile(r"repos/[^/]+/[^/]+/contents/.+[?&]ref=")
+
+
+def _matches_gh_api_contents(command: str) -> bool:
+    """Return True if the command is ``gh api .../contents/...?ref=...``.
+
+    ``gh api repos/<owner>/<repo>/contents/<path>?ref=<sha>`` fetches raw
+    file content at a specific ref, semantically equivalent to
+    ``git show <sha>:<path>``. The hook redirects to ``get_file_snapshots``
+    as an advisory nudge (not a hard block).
+
+    Only matches when a ``ref=`` query parameter is present; bare
+    ``/contents/`` paths without ``ref=`` are metadata or directory-listing
+    calls and pass through silently.
+    """
+    return bool(_GH_API_CONTENTS_PATTERN.search(command))
 
 
 def _has_ref_range(tokens: Iterable[str]) -> bool:
@@ -428,6 +507,17 @@ def _decide_redirect_for_bash_command(command: str) -> Decision:
     # claim it, because we want exit 2 not exit 0.
     if _matches_gh_pr_diff(command):
         return Decision("block", message=BLOCK_GH_PR_DIFF, tool_name="Bash")
+
+    # ``gh api .../contents/...?ref=<sha>`` fetches raw file content from
+    # a specific ref, bypassing git-prism. Advisory redirect (not block).
+    if _matches_gh_api_contents(command):
+        return Decision(
+            "advise",
+            advice=_advice_with_echo(
+                ADVICE_GET_FILE_SNAPSHOTS_GH_API, ["gh", "api", "contents"]
+            ),
+            tool_name="Bash",
+        )
 
     candidates = tokenize_command(command)
     if not candidates:
