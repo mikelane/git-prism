@@ -274,7 +274,12 @@ async fn main() -> anyhow::Result<()> {
                 collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
             println!("{}", serde_json::to_string_pretty(&history)?);
         }
-        Commands::Snapshot { range, paths, repo, include_diff_hunks } => {
+        Commands::Snapshot {
+            range,
+            paths,
+            repo,
+            include_diff_hunks,
+        } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
             });

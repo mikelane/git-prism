@@ -968,7 +968,10 @@ mod tests {
 
         let file = &result.files[0];
         assert!(file.before.is_none(), "before should be excluded");
-        let hunks = file.diff_hunks.as_ref().expect("diff_hunks should exist even when include_before is false");
+        let hunks = file
+            .diff_hunks
+            .as_ref()
+            .expect("diff_hunks should exist even when include_before is false");
         assert!(!hunks.is_empty(), "should have at least one hunk");
     }
 
@@ -1031,7 +1034,10 @@ mod tests {
 
         let file = &result.files[0];
         assert!(file.is_binary, "file should be detected as binary");
-        assert!(file.diff_hunks.is_none(), "binary files should have no diff_hunks");
+        assert!(
+            file.diff_hunks.is_none(),
+            "binary files should have no diff_hunks"
+        );
     }
 
     #[test]
@@ -1064,9 +1070,18 @@ mod tests {
             build_snapshots(&path, "HEAD~1", "HEAD", &["new.py".into()], &options).unwrap();
 
         let file = &result.files[0];
-        assert!(file.before.is_some(), "deleted file should have before content");
-        assert!(file.after.is_none(), "deleted file should have no after content");
-        assert!(file.diff_hunks.is_none(), "deleted file should have no diff_hunks");
+        assert!(
+            file.before.is_some(),
+            "deleted file should have before content"
+        );
+        assert!(
+            file.after.is_none(),
+            "deleted file should have no after content"
+        );
+        assert!(
+            file.diff_hunks.is_none(),
+            "deleted file should have no diff_hunks"
+        );
     }
 
     #[test]
