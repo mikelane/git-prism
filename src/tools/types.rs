@@ -148,6 +148,19 @@ pub struct FileContent {
     pub truncated: bool,
 }
 
+/// Unified diff hunk boundaries, mirroring the `@@ -old_start,old_lines +new_start,new_lines @@` header.
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct DiffHunk {
+    /// 1-based starting line number in the old (before) file.
+    pub old_start: usize,
+    /// Number of context+removed lines shown for the old side.
+    pub old_lines: usize,
+    /// 1-based starting line number in the new (after) file.
+    pub new_start: usize,
+    /// Number of context+added lines shown for the new side.
+    pub new_lines: usize,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SnapshotFileEntry {
     pub path: String,
@@ -155,6 +168,10 @@ pub struct SnapshotFileEntry {
     pub is_binary: bool,
     pub before: Option<FileContent>,
     pub after: Option<FileContent>,
+    /// Diff hunk metadata. Present only when `include_diff_hunks` is true
+    /// and the file was modified (both before and after exist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_hunks: Option<Vec<DiffHunk>>,
     pub error: Option<String>,
 }
 
@@ -203,6 +220,9 @@ pub struct SnapshotArgs {
     #[serde(default = "default_max_file_size")]
     pub max_file_size_bytes: usize,
     pub line_range: Option<(usize, usize)>,
+    /// When true, include diff hunk metadata for modified files.
+    #[serde(default)]
+    pub include_diff_hunks: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -451,6 +471,7 @@ pub struct SnapshotOptions {
     pub include_after: bool,
     pub max_file_size_bytes: usize,
     pub line_range: Option<(usize, usize)>,
+    pub include_diff_hunks: bool,
 }
 
 // --- ToolError ---
@@ -698,6 +719,7 @@ mod tests {
                     size_bytes: 12,
                     truncated: false,
                 }),
+                diff_hunks: None,
                 error: None,
             }],
             token_estimate: 3,

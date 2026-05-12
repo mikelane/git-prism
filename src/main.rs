@@ -286,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
                 include_after: true,
                 max_file_size_bytes: 100_000,
                 line_range: None,
+                include_diff_hunks: false,
             };
             let snapshots = build_snapshots(&repo_path, base_ref, head_ref, &paths, &options)?;
             println!("{}", serde_json::to_string_pretty(&snapshots)?);

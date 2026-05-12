@@ -257,6 +257,52 @@ pub(crate) fn count_lines(data: &[u8]) -> usize {
     newline_count + if data[data.len() - 1] != b'\n' { 1 } else { 0 }
 }
 
+/// Hunk boundaries mirroring unified diff `@@` headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HunkBoundary {
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
+}
+
+/// Extract unified diff hunk boundaries from old and new file content.
+///
+/// Uses `gix::diff::blob` to compute a line-level diff and extracts the hunk
+/// ranges. The returned boundaries are 1-based line numbers suitable for
+/// consumers that need to compute diff-relative positions (e.g., GitHub inline
+/// review comments).
+///
+/// Returns `None` if either input is empty or the content is binary.
+pub(crate) fn extract_hunks(old_data: &[u8], new_data: &[u8]) -> Vec<HunkBoundary> {
+    use std::borrow::Cow;
+
+    if old_data.is_empty() || new_data.is_empty() {
+        return Vec::new();
+    }
+    if old_data.contains(&0) || new_data.contains(&0) {
+        return Vec::new();
+    }
+
+    let old_text: Cow<'_, str> = String::from_utf8_lossy(old_data);
+    let new_text: Cow<'_, str> = String::from_utf8_lossy(new_data);
+
+    let input = gix::diff::blob::InternedInput::new(old_text.as_ref(), new_text.as_ref());
+    let mut diff = gix::diff::blob::Diff::compute(gix::diff::blob::Algorithm::Myers, &input);
+    diff.postprocess_lines(&input);
+
+    let mut hunks = Vec::new();
+    for hunk in diff.hunks() {
+        hunks.push(HunkBoundary {
+            old_start: hunk.before.start as usize + 1,
+            old_lines: (hunk.before.end - hunk.before.start) as usize,
+            new_start: hunk.after.start as usize + 1,
+            new_lines: (hunk.after.end - hunk.after.start) as usize,
+        });
+    }
+    hunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,5 +784,75 @@ mod tests {
         // b,c,d removed (3), x,y,z added (3)
         assert_eq!(added, 3);
         assert_eq!(removed, 3);
+    }
+
+    #[test]
+    fn it_extracts_hunk_boundaries_for_single_modification() {
+        let old = b"line1\nline2\nline3\n";
+        let new = b"line1\nmodified\nline3\n";
+        let hunks = extract_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        // The hunk covers lines 2-2 in old and 2-2 in new
+        // (1-based: old_start=2, old_lines=1, new_start=2, new_lines=1)
+        assert_eq!(h.old_start, 2);
+        assert_eq!(h.old_lines, 1);
+        assert_eq!(h.new_start, 2);
+        assert_eq!(h.new_lines, 1);
+    }
+
+    #[test]
+    fn it_extracts_hunk_boundaries_for_appended_line() {
+        let old = b"line1\nline2\n";
+        let new = b"line1\nline2\nline3\n";
+        let hunks = extract_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        // When appending a line at end, the slider heuristic may place the hunk
+        // with old_start just past the last old line (indicating pure insertion).
+        // The key invariant is that new covers more lines than old.
+        assert!(
+            h.new_lines > h.old_lines,
+            "new should cover more lines than old"
+        );
+    }
+
+    #[test]
+    fn it_extracts_hunk_boundaries_for_multi_hunk() {
+        let old = b"a\nb\nc\nd\ne\n";
+        let new = b"a\nx\ny\nz\ne\n";
+        let hunks = extract_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        // old: lines 2-4 removed (b,c,d = 3 lines), new: lines 2-4 added (x,y,z = 3 lines)
+        assert_eq!(h.old_start, 2);
+        assert_eq!(h.old_lines, 3);
+        assert_eq!(h.new_start, 2);
+        assert_eq!(h.new_lines, 3);
+    }
+
+    #[test]
+    fn it_returns_empty_for_identical_content() {
+        let data = b"same\ncontent\n";
+        let hunks = extract_hunks(data, data);
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn it_returns_empty_for_empty_old() {
+        let hunks = extract_hunks(b"", b"something\n");
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn it_returns_empty_for_empty_new() {
+        let hunks = extract_hunks(b"something\n", b"");
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn it_returns_empty_for_binary_content() {
+        let hunks = extract_hunks(b"text\x00binary", b"text\n");
+        assert!(hunks.is_empty());
     }
 }
