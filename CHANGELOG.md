@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Redirect hook: heredoc false positive for `gh pr diff`.** The bash command tokenizer now applies a regex-based pre-pass to strip heredoc bodies from raw text before the line-by-line shlex tokenizer runs. This prevents false-positive hard-blocks when `gh pr diff` text appears verbatim inside a heredoc body that shlex cannot tokenize (e.g., inside a multi-line double-quoted string). (#270)
+- **Redirect hook: `gh api .../contents/...?ref=<sha>` bypass interception.** The hook now detects `gh api repos/<owner>/<repo>/contents/<path>?ref=<sha>` calls and redirects to `get_file_snapshots` with advisory JSON on stdout, closing a gap where agents could fetch raw file content via the GitHub API and bypass git-prism entirely. (#270)
+
 ## [0.7.0] — 2026-04-29
 
 ### Breaking Changes

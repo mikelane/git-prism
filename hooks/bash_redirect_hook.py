@@ -13,12 +13,20 @@ The hook MUST be hermetic and stdlib-only (per ADR-0008): no third-party
 imports, no shelling out for parsing, no environment-variable expansion.
 
 The tokenizer uses ``shlex.shlex(posix=True, punctuation_chars=True)``
-with two wrappers:
+with three wrappers:
+
+  * Heredoc raw-text stripping: a regex-based pre-pass scans the raw
+    command for ``<<TAG`` patterns and replaces heredoc opening, body,
+    and closing lines with empty strings. This catches heredocs whose
+    ``<<`` operator appears inside a quoted context that shlex cannot
+    tokenize (e.g., multi-line double-quoted strings). After this
+    pre-pass, any remaining heredocs are handled by the token-level
+    walker below.
 
   * Heredoc body skipping: ``<<TAG`` (and ``<<-TAG`` / ``<<'TAG'`` /
-    ``<<"TAG"``) trigger a state machine that drops every token until the
-    closing ``TAG`` line. Inline ``TAG`` text inside the body is ignored
-    because we require a preceding newline token.
+    ``<<"TAG"``) trigger a state machine that drops every token until
+    the closing ``TAG`` line. Inline ``TAG`` text inside the body is
+    ignored because we require a preceding newline token.
 
   * Backtick normalization: stray backticks are converted to whitespace
     in a pre-pass so ``cmd`` substitutions split cleanly into candidate
