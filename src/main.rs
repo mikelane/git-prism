@@ -60,6 +60,9 @@ enum Commands {
         /// Path to the git repository (defaults to current directory)
         #[arg(long)]
         repo: Option<String>,
+        /// Include diff hunk boundaries for modified files
+        #[arg(long)]
+        include_diff_hunks: bool,
     },
     /// Output per-commit history manifests as JSON (CLI mode, no MCP)
     History {
@@ -271,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
                 collect_all_history_pages(&repo_path, base_ref, head_ref, &options, page_size)?;
             println!("{}", serde_json::to_string_pretty(&history)?);
         }
-        Commands::Snapshot { range, paths, repo } => {
+        Commands::Snapshot { range, paths, repo, include_diff_hunks } => {
             let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
                 std::env::current_dir().expect("cannot determine current directory")
             });
@@ -286,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                 include_after: true,
                 max_file_size_bytes: 100_000,
                 line_range: None,
-                include_diff_hunks: false,
+                include_diff_hunks,
             };
             let snapshots = build_snapshots(&repo_path, base_ref, head_ref, &paths, &options)?;
             println!("{}", serde_json::to_string_pretty(&snapshots)?);

@@ -146,9 +146,9 @@ fn build_file_content(content: String, options: &SnapshotOptions) -> Option<File
     }
 
     let size_bytes = content.len();
-    let truncated = size_bytes > options.max_file_size_bytes;
+    let is_truncated = size_bytes > options.max_file_size_bytes;
 
-    let mut final_content = if truncated {
+    let mut final_content = if is_truncated {
         let safe_len = content.floor_char_boundary(options.max_file_size_bytes);
         content[..safe_len].to_string()
     } else {
@@ -174,7 +174,7 @@ fn build_file_content(content: String, options: &SnapshotOptions) -> Option<File
         content: final_content,
         line_count,
         size_bytes,
-        truncated,
+        truncated: is_truncated,
     })
 }
 
@@ -948,6 +948,125 @@ mod tests {
             "new_start should be 2 (second line inserted)"
         );
         assert_eq!(h.new_lines, 1, "new_lines should be 1 (one line inserted)");
+    }
+
+    #[test]
+    fn it_includes_diff_hunks_when_include_before_is_false() {
+        // diff_hunks are computed from blob reads that happen regardless of
+        // include_before/include_after. Even when before content is excluded
+        // from the response, hunks should still be available.
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.before.is_none(), "before should be excluded");
+        let hunks = file.diff_hunks.as_ref().expect("diff_hunks should exist even when include_before is false");
+        assert!(!hunks.is_empty(), "should have at least one hunk");
+    }
+
+    #[test]
+    fn it_excludes_diff_hunks_for_binary_file() {
+        // Binary files should not produce diff hunks even when requested,
+        // because extract_hunks returns empty for binary content.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("data.bin"), "text\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "text"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("data.bin"), b"bin\x00data").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["data.bin".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.is_binary, "file should be detected as binary");
+        assert!(file.diff_hunks.is_none(), "binary files should have no diff_hunks");
+    }
+
+    #[test]
+    fn it_excludes_diff_hunks_for_deleted_file() {
+        // Deleted files have no new content, so extract_hunks returns empty
+        // and diff_hunks should be None.
+        let (_dir, path) = create_snapshot_test_repo();
+
+        // Delete new.py (added in second commit)
+        std::fs::remove_file(path.join("new.py")).unwrap();
+        Command::new("git")
+            .args(["add", "new.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete new.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["new.py".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.before.is_some(), "deleted file should have before content");
+        assert!(file.after.is_none(), "deleted file should have no after content");
+        assert!(file.diff_hunks.is_none(), "deleted file should have no diff_hunks");
     }
 
     #[test]

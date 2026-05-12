@@ -277,9 +277,6 @@ pub(crate) struct HunkBoundary {
 pub(crate) fn extract_hunks(old_data: &[u8], new_data: &[u8]) -> Vec<HunkBoundary> {
     use std::borrow::Cow;
 
-    if old_data.is_empty() || new_data.is_empty() {
-        return Vec::new();
-    }
     if old_data.contains(&0) || new_data.contains(&0) {
         return Vec::new();
     }
@@ -809,16 +806,18 @@ mod tests {
         assert_eq!(hunks.len(), 1);
         let h = &hunks[0];
         // When appending a line at end, the slider heuristic may place the hunk
-        // with old_start just past the last old line (indicating pure insertion).
-        // The key invariant is that new covers more lines than old.
-        assert!(
-            h.new_lines > h.old_lines,
-            "new should cover more lines than old"
+        // with old_start just past the last old line (indicating pure insertion),
+        // so we don't assert the exact start. But we can verify exactly one line
+        // was added.
+        assert_eq!(
+            h.new_lines,
+            h.old_lines + 1,
+            "appending one line should increase new_lines by exactly 1"
         );
     }
 
     #[test]
-    fn it_extracts_hunk_boundaries_for_multi_hunk() {
+    fn it_extracts_hunk_boundaries_for_bulk_line_changes() {
         let old = b"a\nb\nc\nd\ne\n";
         let new = b"a\nx\ny\nz\ne\n";
         let hunks = extract_hunks(old, new);
@@ -839,20 +838,88 @@ mod tests {
     }
 
     #[test]
-    fn it_returns_empty_for_empty_old() {
+    fn it_extracts_hunk_for_added_content_from_empty_old() {
         let hunks = extract_hunks(b"", b"something\n");
-        assert!(hunks.is_empty());
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        assert_eq!(h.old_start, 1);
+        assert_eq!(h.old_lines, 0);
+        assert_eq!(h.new_start, 1);
+        assert_eq!(h.new_lines, 1);
     }
 
     #[test]
-    fn it_returns_empty_for_empty_new() {
+    fn it_extracts_hunk_for_emptied_file() {
         let hunks = extract_hunks(b"something\n", b"");
-        assert!(hunks.is_empty());
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        assert_eq!(h.old_start, 1);
+        assert_eq!(h.old_lines, 1);
+        assert_eq!(h.new_start, 1);
+        assert_eq!(h.new_lines, 0);
     }
 
     #[test]
     fn it_returns_empty_for_binary_content() {
         let hunks = extract_hunks(b"text\x00binary", b"text\n");
         assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn it_extracts_hunk_boundaries_for_prepended_line() {
+        let old = b"line2\nline3\n";
+        let new = b"line1\nline2\nline3\n";
+        let hunks = extract_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        // When prepending a line at start, new should have exactly one more
+        // context line than old, reflecting the inserted first line.
+        assert_eq!(
+            h.new_lines,
+            h.old_lines + 1,
+            "prepending one line should increase new_lines by exactly 1"
+        );
+    }
+
+    #[test]
+    fn it_extracts_hunk_boundaries_for_single_line_change() {
+        let old = b"hello\n";
+        let new = b"world\n";
+        let hunks = extract_hunks(old, new);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        // Single line replaced: old_start=1, old_lines=1, new_start=1, new_lines=1
+        assert_eq!(h.old_start, 1);
+        assert_eq!(h.old_lines, 1);
+        assert_eq!(h.new_start, 1);
+        assert_eq!(h.new_lines, 1);
+    }
+
+    #[test]
+    fn it_extracts_hunk_boundaries_with_unicode_content() {
+        // "cafe" (4 ASCII bytes) vs "café" (5 bytes with e-acute)
+        let old: &[u8] = b"cafe\n";
+        let new: &[u8] = b"caf\xc3\xa9\n";
+        let hunks = extract_hunks(old, new);
+        // The two strings differ line-by-line (different line content),
+        // so the diff should produce one hunk.
+        assert_eq!(
+            hunks.len(),
+            1,
+            "unicode content change should produce one hunk"
+        );
+        let h = &hunks[0];
+        assert_eq!(h.old_lines, 1);
+        assert_eq!(h.new_lines, 1);
+    }
+
+    #[test]
+    fn it_returns_empty_hunks_for_unchanged_single_line() {
+        let data = b"hello\n";
+        let hunks = extract_hunks(data, data);
+        assert!(
+            hunks.is_empty(),
+            "identical single line should produce no hunks"
+        );
     }
 }
