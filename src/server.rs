@@ -434,6 +434,11 @@ impl GitPrismServer {
     ///    - Pass `line_range: [start, end]` to narrow the response
     ///    - Pass `include_before: false` if you only need the current state
     ///    - Call with one path at a time; token cost scales linearly
+    ///    - Pass `include_diff_hunks: true` to get unified-diff hunk boundaries
+    ///      (old_start, old_lines, new_start, new_lines) for each file, useful
+    ///      for computing diff-relative line positions (e.g., GitHub inline
+    ///      review comments). Only emitted for modified files where both before
+    ///      and after exist. Default false.
     ///
     /// Returns complete before/after file content at two git refs for
     /// specified file paths.
@@ -484,6 +489,7 @@ impl GitPrismServer {
                 include_after: args.include_after,
                 max_file_size_bytes: args.max_file_size_bytes,
                 line_range: args.line_range,
+                include_diff_hunks: args.include_diff_hunks,
             };
             let result =
                 build_snapshots(&repo_path, &args.base_ref, head_ref, &args.paths, &options);

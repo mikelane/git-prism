@@ -2,11 +2,12 @@ use std::path::Path;
 
 use chrono::Utc;
 
+use crate::git::diff;
 use crate::git::reader::RepoReader;
 use crate::tools::size;
 use crate::tools::types::{
-    FileContent, SnapshotFileEntry, SnapshotMetadata, SnapshotOptions, SnapshotResponse, ToolError,
-    detect_language,
+    DiffHunk, FileContent, SnapshotFileEntry, SnapshotMetadata, SnapshotOptions, SnapshotResponse,
+    ToolError, detect_language,
 };
 
 const MAX_SNAPSHOT_FILES: usize = 20;
@@ -65,8 +66,8 @@ fn build_snapshot_entry(
     let head_result = reader.read_file_at_ref(head_ref, file_path);
 
     let before = if options.include_before {
-        match base_result {
-            Ok(content) => build_file_content(content, options),
+        match &base_result {
+            Ok(content) => build_file_content(content.clone(), options),
             Err(_) => None,
         }
     } else {
@@ -74,8 +75,8 @@ fn build_snapshot_entry(
     };
 
     let after = if options.include_after {
-        match head_result {
-            Ok(content) => build_file_content(content, options),
+        match &head_result {
+            Ok(content) => build_file_content(content.clone(), options),
             Err(_) => None,
         }
     } else {
@@ -91,13 +92,45 @@ fn build_snapshot_entry(
             .map(|c| c.content.is_empty() && c.size_bytes > 0)
             .unwrap_or(false);
 
+    let diff_hunks = if options.include_diff_hunks && !is_binary {
+        compute_diff_hunks(&base_result, &head_result)
+    } else {
+        None
+    };
+
     SnapshotFileEntry {
         path: file_path.to_string(),
         language: language.to_string(),
         is_binary,
         before,
         after,
+        diff_hunks,
         error: None,
+    }
+}
+
+fn compute_diff_hunks(
+    base_result: &Result<String, crate::git::reader::GitError>,
+    head_result: &Result<String, crate::git::reader::GitError>,
+) -> Option<Vec<DiffHunk>> {
+    let (Ok(old), Ok(new)) = (base_result, head_result) else {
+        return None;
+    };
+    let raw_hunks = diff::extract_hunks(old.as_bytes(), new.as_bytes());
+    if raw_hunks.is_empty() {
+        None
+    } else {
+        Some(
+            raw_hunks
+                .into_iter()
+                .map(|h| DiffHunk {
+                    old_start: h.old_start,
+                    old_lines: h.old_lines,
+                    new_start: h.new_start,
+                    new_lines: h.new_lines,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -113,9 +146,9 @@ fn build_file_content(content: String, options: &SnapshotOptions) -> Option<File
     }
 
     let size_bytes = content.len();
-    let truncated = size_bytes > options.max_file_size_bytes;
+    let is_truncated = size_bytes > options.max_file_size_bytes;
 
-    let mut final_content = if truncated {
+    let mut final_content = if is_truncated {
         let safe_len = content.floor_char_boundary(options.max_file_size_bytes);
         content[..safe_len].to_string()
     } else {
@@ -141,7 +174,7 @@ fn build_file_content(content: String, options: &SnapshotOptions) -> Option<File
         content: final_content,
         line_count,
         size_bytes,
-        truncated,
+        truncated: is_truncated,
     })
 }
 
@@ -216,6 +249,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -237,6 +271,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["new.py".into()], &options).unwrap();
@@ -254,6 +289,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -270,6 +306,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 10, // very small limit
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -288,6 +325,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -350,6 +388,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["data.bin".into()], &options).unwrap();
@@ -369,6 +408,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: Some((2, 2)),
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -388,6 +428,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let paths: Vec<String> = (0..25).map(|i| format!("file{i}.rs")).collect();
         let result = build_snapshots(&path, "HEAD~1", "HEAD", &paths, &options).unwrap();
@@ -406,6 +447,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         // Request exactly MAX_SNAPSHOT_FILES (20) paths
         let paths: Vec<String> = (0..MAX_SNAPSHOT_FILES)
@@ -429,6 +471,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let paths: Vec<String> = (0..MAX_SNAPSHOT_FILES + 1)
             .map(|i| format!("file{i}.rs"))
@@ -496,6 +539,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["img.bin".into()], &options).unwrap();
@@ -571,6 +615,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["data.bin".into()], &options).unwrap();
@@ -651,6 +696,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["empty.txt".into()], &options).unwrap();
@@ -676,6 +722,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 39,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result = build_snapshots(
             &path,
@@ -699,6 +746,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 38,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result = build_snapshots(
             &path,
@@ -726,6 +774,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: Some((1, 1)),
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -754,6 +803,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
@@ -833,6 +883,7 @@ mod tests {
             include_after: true,
             max_file_size_bytes: 100_000,
             line_range: None,
+            include_diff_hunks: false,
         };
         let result =
             build_snapshots(&path, "HEAD~1", "HEAD", &["zero.txt".into()], &options).unwrap();
@@ -851,5 +902,203 @@ mod tests {
             !file.is_binary,
             "0-byte before with empty content should NOT be detected as binary"
         );
+    }
+
+    #[test]
+    fn it_excludes_diff_hunks_when_include_diff_hunks_is_false() {
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: false,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.diff_hunks.is_none());
+    }
+
+    #[test]
+    fn it_includes_diff_hunks_for_modified_file_when_requested() {
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        let hunks = file.diff_hunks.as_ref().expect("should have diff_hunks");
+        assert!(!hunks.is_empty(), "should have at least one hunk");
+        let h = &hunks[0];
+        assert_eq!(
+            h.old_start, 2,
+            "old_start should be 2 (second line changed)"
+        );
+        assert_eq!(h.old_lines, 1, "old_lines should be 1 (one line removed)");
+        assert_eq!(
+            h.new_start, 2,
+            "new_start should be 2 (second line inserted)"
+        );
+        assert_eq!(h.new_lines, 1, "new_lines should be 1 (one line inserted)");
+    }
+
+    #[test]
+    fn it_includes_diff_hunks_when_include_before_is_false() {
+        // diff_hunks are computed from blob reads that happen regardless of
+        // include_before/include_after. Even when before content is excluded
+        // from the response, hunks should still be available.
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: false,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["hello.rs".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.before.is_none(), "before should be excluded");
+        let hunks = file
+            .diff_hunks
+            .as_ref()
+            .expect("diff_hunks should exist even when include_before is false");
+        assert!(!hunks.is_empty(), "should have at least one hunk");
+    }
+
+    #[test]
+    fn it_excludes_diff_hunks_for_binary_file() {
+        // Binary files should not produce diff hunks even when requested,
+        // because extract_hunks returns empty for binary content.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("data.bin"), "text\n").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "text"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("data.bin"), b"bin\x00data").unwrap();
+        Command::new("git")
+            .args(["add", "data.bin"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "binary"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["data.bin".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.is_binary, "file should be detected as binary");
+        assert!(
+            file.diff_hunks.is_none(),
+            "binary files should have no diff_hunks"
+        );
+    }
+
+    #[test]
+    fn it_excludes_diff_hunks_for_deleted_file() {
+        // Deleted files have no new content, so extract_hunks returns empty
+        // and diff_hunks should be None.
+        let (_dir, path) = create_snapshot_test_repo();
+
+        // Delete new.py (added in second commit)
+        std::fs::remove_file(path.join("new.py")).unwrap();
+        Command::new("git")
+            .args(["add", "new.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete new.py"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["new.py".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(
+            file.before.is_some(),
+            "deleted file should have before content"
+        );
+        assert!(
+            file.after.is_none(),
+            "deleted file should have no after content"
+        );
+        assert!(
+            file.diff_hunks.is_none(),
+            "deleted file should have no diff_hunks"
+        );
+    }
+
+    #[test]
+    fn it_excludes_diff_hunks_for_added_file() {
+        let (_dir, path) = create_snapshot_test_repo();
+        let options = SnapshotOptions {
+            include_before: true,
+            include_after: true,
+            max_file_size_bytes: 100_000,
+            line_range: None,
+            include_diff_hunks: true,
+        };
+        let result =
+            build_snapshots(&path, "HEAD~1", "HEAD", &["new.py".into()], &options).unwrap();
+
+        let file = &result.files[0];
+        assert!(file.before.is_none());
+        assert!(file.diff_hunks.is_none());
     }
 }

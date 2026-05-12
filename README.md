@@ -192,6 +192,7 @@ the agent gets the full file at each point in time.
 | `include_after` | bool | `true` | Include file content at head ref |
 | `max_file_size_bytes` | int | `100000` | Truncate files larger than this |
 | `line_range` | [int, int] | `null` | Return only lines in this range (1-indexed) |
+| `include_diff_hunks` | bool | `false` | Include hunk boundaries for diff-relative line mapping |
 
 **Example output:**
 
@@ -482,7 +483,9 @@ the codebase to find callers or guess which tests to check.
 Once you know which files and callers matter, request full snapshots of the
 highest-impact files. You get complete before/after content -- no reconstructing
 files from diff hunks. Use `line_range` to focus on specific sections and
-`include_before: false` when you only need the current state.
+`include_before: false` when you only need the current state. Pass
+`include_diff_hunks: true` to get unified-diff hunk boundaries for computing
+diff-relative line positions (e.g., for GitHub inline review comments).
 
 Both paths keep token usage low. `review_change` is the most efficient starting
 point for most review tasks; the three-call path is worth it when you need
