@@ -31,7 +31,6 @@ through the watch-list matchers; the first match wins.
 
 from __future__ import annotations
 
-import io
 import json
 import re
 import shlex
