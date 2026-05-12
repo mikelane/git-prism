@@ -13,12 +13,20 @@ The hook MUST be hermetic and stdlib-only (per ADR-0008): no third-party
 imports, no shelling out for parsing, no environment-variable expansion.
 
 The tokenizer uses ``shlex.shlex(posix=True, punctuation_chars=True)``
-with two wrappers:
+with three wrappers:
+
+  * Heredoc raw-text stripping: a regex-based pre-pass scans the raw
+    command for ``<<TAG`` patterns and replaces heredoc opening, body,
+    and closing lines with empty strings. This catches heredocs whose
+    ``<<`` operator appears inside a quoted context that shlex cannot
+    tokenize (e.g., multi-line double-quoted strings). After this
+    pre-pass, any remaining heredocs are handled by the token-level
+    walker below.
 
   * Heredoc body skipping: ``<<TAG`` (and ``<<-TAG`` / ``<<'TAG'`` /
-    ``<<"TAG"``) trigger a state machine that drops every token until the
-    closing ``TAG`` line. Inline ``TAG`` text inside the body is ignored
-    because we require a preceding newline token.
+    ``<<"TAG"``) trigger a state machine that drops every token until
+    the closing ``TAG`` line. Inline ``TAG`` text inside the body is
+    ignored because we require a preceding newline token.
 
   * Backtick normalization: stray backticks are converted to whitespace
     in a pre-pass so ``cmd`` substitutions split cleanly into candidate
@@ -31,8 +39,8 @@ through the watch-list matchers; the first match wins.
 
 from __future__ import annotations
 
-import io
 import json
+import re
 import shlex
 import sys
 from collections.abc import Iterable
@@ -106,6 +114,61 @@ def _heredoc_tag(token: str) -> tuple[str, bool] | None:
     return tag, is_dash
 
 
+_HEREDOC_START_PATTERN = re.compile(r"<<(-?)\s*['\"]?([A-Za-z0-9_]\w*)['\"]?")
+
+
+def _strip_heredocs_from_raw(command: str) -> str:
+    r"""Pre-pass: strip heredoc bodies from raw command text before tokenization.
+
+    Handles heredocs whose ``<<`` operator appears inside a quoted context
+    that ``shlex`` cannot tokenize (e.g., a multi-line double-quoted string
+    containing ``"$(cat <<'EOF'``). In those cases ``_tokenize_line`` raises
+    ``ValueError`` and returns ``[]``, so the ``<<`` operator is lost and
+    ``_drop_heredoc_bodies`` never sees it. The heredoc body leaks into
+    candidate commands, causing false-positive matches.
+
+    This pre-pass regex-scans each line for the ``<<TAG`` pattern and, when
+    found, replaces the heredoc opening line and every body line through the
+    closing tag with empty strings, preserving the surrounding command
+    structure for subsequent tokenization.
+    """
+    lines = command.split("\n")
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        matches = list(_HEREDOC_START_PATTERN.finditer(line))
+        if not matches:
+            result.append(line)
+            i += 1
+            continue
+
+        # Replace the heredoc opening line with an empty line.
+        result.append("")
+        i += 1
+
+        # Process each heredoc tag found on the line in order.
+        for match in matches:
+            is_dash = bool(match.group(1))  # ``<<-`` strips leading tabs
+            tag = match.group(2)
+
+            # Skip body lines until the closing tag (the tag alone on its own
+            # line, modulo ``<<-`` tab stripping).
+            while i < len(lines):
+                if is_dash:
+                    stripped = lines[i].rstrip().lstrip("\t")
+                else:
+                    stripped = lines[i].rstrip()
+                if stripped == tag:
+                    # Replace the closing tag line with an empty line.
+                    result.append("")
+                    i += 1
+                    break
+                result.append("")
+                i += 1
+    return "\n".join(result)
+
+
 def _tokenize_raw(command: str) -> list[str]:
     r"""Produce a flat token list with explicit ``\n`` separator tokens.
 
@@ -116,6 +179,9 @@ def _tokenize_raw(command: str) -> list[str]:
     cleaned = _strip_backticks(command)
     if not cleaned:
         return []
+    # Pre-pass: regex-strip heredoc bodies that shlex cannot tokenize,
+    # preventing false-positive matches from leaked body text.
+    cleaned = _strip_heredocs_from_raw(cleaned)
     tokens: list[str] = []
     lines = cleaned.split("\n")
     for index, line in enumerate(lines):
@@ -147,9 +213,11 @@ def _drop_heredoc_bodies(tokens: list[str]) -> list[str]:
                 _heredoc_tag(tokens[index + 1]) if index + 1 < len(tokens) else None
             )
             if tag_info is None:
-                # ``<<`` at end of input — drop the operator and stop.
-                break
-            tag, _is_dash = tag_info
+                # ``<<`` followed by an invalid/empty tag — skip the
+                # malformed operator and continue.
+                index += 1
+                continue
+            tag, _ = tag_info
             # Step past ``<<`` and the tag word; both are dropped.
             index += 2
             # Drop everything on the same line as the operator (it's
@@ -277,6 +345,39 @@ BLOCK_MCP_GITHUB_LIST_COMMITS = (
     "  get_commit_history(repo_path, base_ref, head_ref)\n"
     "Structured commits with per-commit semantic change analysis."
 )
+ADVICE_GET_FILE_SNAPSHOTS_GH_API = (
+    "gh api repos/.../contents/...?ref=<sha> fetches raw file content from a "
+    "specific ref via the GitHub API, bypassing git-prism entirely. "
+    "git-prism alternative:\n"
+    "  get_file_snapshots(repo_path, base_ref='<ref>^', head_ref='<ref>', "
+    "paths=[...], include_before=true, include_after=true)\n"
+    "Returns structured before/after file content at the commit boundary — "
+    "no raw API response to parse."
+)
+
+
+_GH_API_CONTENTS_PATTERN = re.compile(r"repos/[^/]+/[^/]+/contents/.*[?&]ref=")
+
+
+def _matches_gh_api_contents(command: str) -> bool:
+    """Return True if the command is ``gh api .../contents/...?ref=...``.
+
+    ``gh api repos/<owner>/<repo>/contents/<path>?ref=<sha>`` fetches raw
+    file content at a specific ref, semantically equivalent to
+    ``git show <sha>:<path>``. The hook redirects to ``get_file_snapshots``
+    as an advisory nudge (not a hard block).
+
+    Only matches when a ``ref=`` query parameter is present; bare
+    ``/contents/`` paths without ``ref=`` are metadata or directory-listing
+    calls and pass through silently.
+
+    The heredoc pre-pass is applied to the raw command before regex matching
+    so ``gh api .../contents/...?ref=...`` text inside a heredoc body does
+    not trigger a false-positive redirect.
+    """
+    # Strip heredoc bodies first to avoid matching inside opaque body text.
+    cleaned = _strip_heredocs_from_raw(_strip_backticks(command))
+    return bool(_GH_API_CONTENTS_PATTERN.search(cleaned))
 
 
 def _has_ref_range(tokens: Iterable[str]) -> bool:
@@ -372,6 +473,10 @@ class Decision:
     """
 
     __slots__ = ("mode", "advice", "message", "tool_name")
+    mode: str
+    advice: str
+    message: str
+    tool_name: str
 
     def __init__(
         self,
@@ -428,6 +533,17 @@ def _decide_redirect_for_bash_command(command: str) -> Decision:
     # claim it, because we want exit 2 not exit 0.
     if _matches_gh_pr_diff(command):
         return Decision("block", message=BLOCK_GH_PR_DIFF, tool_name="Bash")
+
+    # ``gh api .../contents/...?ref=<sha>`` fetches raw file content from
+    # a specific ref, bypassing git-prism. Advisory redirect (not block).
+    if _matches_gh_api_contents(command):
+        return Decision(
+            "advise",
+            advice=_advice_with_echo(
+                ADVICE_GET_FILE_SNAPSHOTS_GH_API, ["gh", "api", "contents"]
+            ),
+            tool_name="Bash",
+        )
 
     candidates = tokenize_command(command)
     if not candidates:
@@ -593,7 +709,9 @@ def main() -> int:
             sys.stderr.write(decision.message)
             sys.stderr.write("\n")
             return 2
-    except Exception:  # pragma: no cover - BrokenPipeError or similar; never block the agent
+    except (
+        Exception
+    ):  # pragma: no cover - BrokenPipeError or similar; never block the agent
         return 0
 
     return 0
