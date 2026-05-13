@@ -257,11 +257,11 @@ impl RepoReader {
             && !refspec.starts_with("refs/");
 
         if is_bare_branch {
-            let remote_ref = format!("refs/remotes/origin/{refspec}");
-            if self.repo.rev_parse_single(remote_ref.as_str()).is_ok() {
+            // Check all remotes (not just origin) for the tracking ref
+            if let Some(remote) = self.find_remote_for_branch(refspec) {
                 return GitError::ResolveRef(ResolveRefError {
                     refspec: refspec.to_string(),
-                    resolution: Some(format!("git fetch origin {refspec}")),
+                    resolution: Some(format!("git fetch {remote} {refspec}")),
                 });
             }
         }
@@ -270,6 +270,19 @@ impl RepoReader {
             refspec: refspec.to_string(),
             resolution: None,
         })
+    }
+
+    fn find_remote_for_branch(&self, refspec: &str) -> Option<String> {
+        let remotes_path = self.repo.path().join("refs").join("remotes");
+        let dirs = std::fs::read_dir(remotes_path).ok()?;
+        for entry in dirs.filter_map(|e| e.ok()) {
+            let remote_name = entry.file_name().to_string_lossy().to_string();
+            let remote_ref = format!("refs/remotes/{remote_name}/{refspec}");
+            if self.repo.rev_parse_single(remote_ref.as_str()).is_ok() {
+                return Some(remote_name);
+            }
+        }
+        None
     }
 }
 
@@ -802,5 +815,82 @@ mod tests {
             msg.contains("feature/foo"),
             "expected base ref name in error: {msg}"
         );
+    }
+
+    #[test]
+    fn it_suggests_fetch_from_non_origin_remote() {
+        let (local_dir, local_path) = create_test_repo();
+
+        // Create a bare remote repo
+        let remote_dir = TempDir::new().unwrap();
+        let remote_path = remote_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote_path)
+            .output()
+            .unwrap();
+
+        // Push to non-origin remote named "upstream"
+        Command::new("git")
+            .args(["remote", "add", "upstream", remote_path.to_str().unwrap()])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Create branch and push to upstream
+        Command::new("git")
+            .args(["checkout", "-b", "feature/foo"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        std::fs::write(local_path.join("feature.txt"), "feature content\n").unwrap();
+        Command::new("git")
+            .args(["add", "feature.txt"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add feature"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "-u", "upstream", "feature/foo"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["fetch", "upstream"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        // Delete the local branch so only the remote tracking ref remains
+        Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "-D", "feature/foo"])
+            .current_dir(&local_path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&local_path).unwrap();
+        let err = reader.resolve_commit("feature/foo").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"resolution\""),
+            "expected JSON resolution field in: {msg}"
+        );
+        // Should use the actual remote name "upstream", NOT hardcoded "origin"
+        assert!(
+            msg.contains("git fetch upstream feature/foo"),
+            "expected fetch suggestion with actual remote name 'upstream', got: {msg}"
+        );
+
+        drop(local_dir);
+        drop(remote_dir);
     }
 }
