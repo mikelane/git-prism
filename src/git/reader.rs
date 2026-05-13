@@ -261,7 +261,7 @@ impl RepoReader {
             if self.repo.rev_parse_single(remote_ref.as_str()).is_ok() {
                 return GitError::ResolveRef(ResolveRefError {
                     refspec: refspec.to_string(),
-                    resolution: Some(format!("git checkout {refspec}")),
+                    resolution: Some(format!("git fetch origin {refspec}")),
                 });
             }
         }
@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn it_suggests_checkout_when_branch_exists_on_origin() {
+    fn it_suggests_fetch_when_branch_exists_on_origin() {
         let (local_dir, local_path) = create_test_repo();
 
         // Create a bare remote repo with branch "feature/foo"
@@ -650,8 +650,8 @@ mod tests {
             "expected JSON resolution field in: {msg}"
         );
         assert!(
-            msg.contains("git checkout feature/foo"),
-            "expected checkout suggestion in: {msg}"
+            msg.contains("git fetch origin feature/foo"),
+            "expected fetch suggestion in: {msg}"
         );
 
         drop(local_dir);
@@ -732,8 +732,8 @@ mod tests {
             "expected JSON resolution field in: {msg}"
         );
         assert!(
-            msg.contains("git checkout feature@team"),
-            "expected checkout suggestion in: {msg}"
+            msg.contains("git fetch origin feature@team"),
+            "expected fetch suggestion in: {msg}"
         );
 
         drop(local_dir);
