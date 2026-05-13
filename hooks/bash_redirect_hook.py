@@ -179,6 +179,11 @@ def _tokenize_raw(command: str) -> list[str]:
     cleaned = _strip_backticks(command)
     if not cleaned:
         return []
+    # Handle escaped newlines: \<newline> is bash line continuation.
+    # Both the backslash and the newline are removed, joining the lines.
+    # This must happen before splitting into lines, otherwise the
+    # second line appears as a separate command.
+    cleaned = re.sub(r'\\\n', '', cleaned)
     # Pre-pass: regex-strip heredoc bodies that shlex cannot tokenize,
     # preventing false-positive matches from leaked body text.
     cleaned = _strip_heredocs_from_raw(cleaned)
@@ -375,13 +380,20 @@ def _matches_gh_api_contents(command: str) -> bool:
     ``/contents/`` paths without ``ref=`` are metadata or directory-listing
     calls and pass through silently.
 
-    The heredoc pre-pass is applied to the raw command before regex matching
-    so ``gh api .../contents/...?ref=...`` text inside a heredoc body does
-    not trigger a false-positive redirect.
+    The tokenizer-based approach correctly handles heredoc bodies (they are
+    stripped before candidate-command matching) and quoted strings (the
+    pattern only matches on actual command tokens, not quoted arguments to
+    echo or other non-gh commands).
     """
-    # Strip heredoc bodies first to avoid matching inside opaque body text.
-    cleaned = _strip_heredocs_from_raw(_strip_backticks(command))
-    return bool(_GH_API_CONTENTS_PATTERN.search(cleaned))
+    candidates = tokenize_command(command)
+    for tokens in candidates:
+        if len(tokens) >= 2 and tokens[0] == "gh" and tokens[1] == "api":
+            # Join remaining tokens to reconstruct URL paths that
+            # shlex may have split at & or other punctuation chars.
+            rest = "".join(tokens[2:])
+            if _GH_API_CONTENTS_PATTERN.search(rest):
+                return True
+    return False
 
 
 def _has_ref_range(tokens: Iterable[str]) -> bool:
