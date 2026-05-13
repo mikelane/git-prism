@@ -25,7 +25,7 @@ def _init_repo(context: Context) -> str:
     """
     repo_dir = tempfile.mkdtemp()
     context.cleanup_dirs.append(repo_dir)
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "init", "--initial-branch=main"], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=repo_dir, check=True, capture_output=True,
