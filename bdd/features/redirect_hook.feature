@@ -303,6 +303,7 @@ Feature: Redirect hooks for raw git invocations
     Then the hook exit code is 2
     And the hook stderr contains "git-prism"
     And the hook stderr contains "get_change_manifest"
+    And the hook stderr contains "review_change"
 
   @ISSUE-239
   Scenario: Bundled hook hard-blocks "mcp__github__get_commit" with exit code 2
@@ -538,3 +539,27 @@ Feature: Redirect hooks for raw git invocations
     Given the git-prism MCP server is running over stdio
     When I send a "tools/list" JSON-RPC request
     Then the description for "review_change" mentions "git diff"
+
+  # ------------------------------------------------------------------------
+  # W6: Surface review_change in bash-redirect hook message (#265)
+  #
+  # The bundled hook's redirect messages now recommend `review_change` as the
+  # primary tool for PR review workflows, with `get_change_manifest` as the
+  # quick file-level alternative.
+  # ------------------------------------------------------------------------
+
+  @ISSUE-265
+  Scenario: Advisory path surfaces both review_change and get_change_manifest
+    Given a hook input with bash command "git diff main..HEAD"
+    When I run the bundled redirect hook with that input
+    Then the hook exit code is 0
+    And the hook stdout contains "review_change"
+    And the hook stdout contains "get_change_manifest"
+
+  @ISSUE-265
+  Scenario: Hard-block path surfaces both review_change and get_change_manifest
+    Given a hook input with bash command "gh pr diff 123"
+    When I run the bundled redirect hook with that input
+    Then the hook exit code is 2
+    And the hook stderr contains "review_change"
+    And the hook stderr contains "get_change_manifest"
