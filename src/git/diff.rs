@@ -69,9 +69,12 @@ impl RepoReader {
                     C::Addition {
                         location,
                         id,
-                        entry_mode: _,
+                        entry_mode,
                         relation: _,
                     } => {
+                        if entry_mode.is_commit() {
+                            return Ok(gix::object::tree::diff::Action::Continue(()));
+                        }
                         let (size_after, is_binary, lines_added) = blob_stats(&id)?;
                         FileChange {
                             path: location.to_string(),
@@ -89,9 +92,12 @@ impl RepoReader {
                     C::Deletion {
                         location,
                         id,
-                        entry_mode: _,
+                        entry_mode,
                         relation: _,
                     } => {
+                        if entry_mode.is_commit() {
+                            return Ok(gix::object::tree::diff::Action::Continue(()));
+                        }
                         let (size_before, is_binary, lines_removed) = blob_stats(&id)?;
                         FileChange {
                             path: location.to_string(),
@@ -110,41 +116,80 @@ impl RepoReader {
                         location,
                         previous_id,
                         id,
-                        previous_entry_mode: _,
-                        entry_mode: _,
+                        previous_entry_mode,
+                        entry_mode,
                     } => {
-                        let old_obj = previous_id
-                            .object()
-                            .map_err(|e| GitError::ReadObject(e.to_string()))?;
-                        let new_obj = id
-                            .object()
-                            .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                        // Submodule-to-submodule: skip entirely
+                        if entry_mode.is_commit() && previous_entry_mode.is_commit() {
+                            return Ok(gix::object::tree::diff::Action::Continue(()));
+                        }
+                        // File-to-submodule transition: report deletion of the file
+                        if entry_mode.is_commit() {
+                            let (size_before, is_binary, lines_removed) = blob_stats(&previous_id)?;
+                            FileChange {
+                                path: location.to_string(),
+                                old_path: None,
+                                change_type: ChangeType::Deleted,
+                                change_scope: ChangeScope::Committed,
+                                is_binary,
+                                lines_added: 0,
+                                lines_removed,
+                                size_before,
+                                size_after: 0,
+                                staged_blob_id: None,
+                            }
+                        }
+                        // Submodule-to-file transition: report addition of the new file
+                        else if previous_entry_mode.is_commit() {
+                            let (size_after, is_binary, lines_added) = blob_stats(&id)?;
+                            FileChange {
+                                path: location.to_string(),
+                                old_path: None,
+                                change_type: ChangeType::Added,
+                                change_scope: ChangeScope::Committed,
+                                is_binary,
+                                lines_added,
+                                lines_removed: 0,
+                                size_before: 0,
+                                size_after,
+                                staged_blob_id: None,
+                            }
+                        }
+                        // Normal file-to-file modification
+                        else {
+                            let old_obj = previous_id
+                                .object()
+                                .map_err(|e| GitError::ReadObject(e.to_string()))?;
+                            let new_obj = id
+                                .object()
+                                .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
-                        let size_before = old_obj.data.len();
-                        let size_after = new_obj.data.len();
+                            let size_before = old_obj.data.len();
+                            let size_after = new_obj.data.len();
 
-                        let is_binary = old_obj.data.contains(&0) || new_obj.data.contains(&0);
+                            let is_binary = old_obj.data.contains(&0) || new_obj.data.contains(&0);
 
-                        let (lines_added, lines_removed) = if is_binary {
-                            (0, 0)
-                        } else {
-                            count_line_changes(
-                                Some(old_obj.data.as_ref()),
-                                Some(new_obj.data.as_ref()),
-                            )
-                        };
+                            let (lines_added, lines_removed) = if is_binary {
+                                (0, 0)
+                            } else {
+                                count_line_changes(
+                                    Some(old_obj.data.as_ref()),
+                                    Some(new_obj.data.as_ref()),
+                                )
+                            };
 
-                        FileChange {
-                            path: location.to_string(),
-                            old_path: None,
-                            change_type: ChangeType::Modified,
-                            change_scope: ChangeScope::Committed,
-                            is_binary,
-                            lines_added,
-                            lines_removed,
-                            size_before,
-                            size_after,
-                            staged_blob_id: None,
+                            FileChange {
+                                path: location.to_string(),
+                                old_path: None,
+                                change_type: ChangeType::Modified,
+                                change_scope: ChangeScope::Committed,
+                                is_binary,
+                                lines_added,
+                                lines_removed,
+                                size_before,
+                                size_after,
+                                staged_blob_id: None,
+                            }
                         }
                     }
                     C::Rewrite {
@@ -154,11 +199,14 @@ impl RepoReader {
                         id,
                         diff,
                         copy,
-                        source_entry_mode: _,
+                        source_entry_mode,
                         source_relation: _,
-                        entry_mode: _,
+                        entry_mode,
                         relation: _,
                     } => {
+                        if entry_mode.is_commit() || source_entry_mode.is_commit() {
+                            return Ok(gix::object::tree::diff::Action::Continue(()));
+                        }
                         let old_obj = source_id
                             .object()
                             .map_err(|e| GitError::ReadObject(e.to_string()))?;
@@ -771,6 +819,524 @@ mod tests {
         let (added, removed) = count_line_changes(Some(b"one\ntwo\nthree\n"), Some(b""));
         assert_eq!(added, 0);
         assert_eq!(removed, 3);
+    }
+
+    // --- Gitlink filter tests ---
+
+    #[test]
+    fn it_filters_submodule_addition_in_committed_diff() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // Create a tiny submodule repo with one commit.
+        let submod_dir = TempDir::new().unwrap();
+        let submod_path = submod_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        std::fs::write(submod_path.join("sub.txt"), "sub content\n").unwrap();
+        Command::new("git")
+            .args(["add", "sub.txt"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "sub initial"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&submod_path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Stage a gitlink entry and commit it.
+        Command::new("git")
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},sub"),
+            ])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add submodule"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        assert!(
+            !diff.files.iter().any(|f| f.path == "sub"),
+            "submodule addition should be filtered from committed diff"
+        );
+    }
+
+    #[test]
+    fn it_preserves_binary_png_in_committed_diff() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        std::fs::write(path.join("image.png"), [0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]).unwrap();
+        Command::new("git")
+            .args(["add", "image.png"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add png"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        assert!(
+            diff.files.iter().any(|f| f.path == "image.png"),
+            "binary PNG should be preserved in committed diff"
+        );
+    }
+
+    // --- Adversarial QA: Gate 3 penetration tests ---
+
+    #[test]
+    fn it_filters_submodule_replaced_by_file_in_committed_diff() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        let submod_dir = TempDir::new().unwrap();
+        let submod_path = submod_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        std::fs::write(submod_path.join("sub.txt"), "sub content\n").unwrap();
+        Command::new("git")
+            .args(["add", "sub.txt"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "sub initial"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&submod_path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        Command::new("git")
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},sub"),
+            ])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add submodule"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Replace submodule with regular file at same path
+        Command::new("git")
+            .args(["rm", "-f", "sub"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join("sub"), "now a regular file\n").unwrap();
+        Command::new("git")
+            .args(["add", "sub"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "replace submodule with file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        let sub_entries: Vec<_> = diff.files.iter().filter(|f| f.path == "sub").collect();
+        // When submodule is replaced by file, gix may report Deletion+Addition or Modification.
+        // We must not crash trying to read the old commit object as a blob.
+        assert!(
+            sub_entries.len() <= 1,
+            "expected at most one 'sub' entry; got {:?}",
+            sub_entries
+        );
+        if let Some(f) = sub_entries.first() {
+            // If it appears as Added, that's fine. If it appears as Modified,
+            // size_before would be garbage (commit object text length) because
+            // the code reads previous_id (a commit hash) as a blob.
+            if f.change_type == ChangeType::Modified {
+                assert_eq!(
+                    f.size_before, 20,
+                    "size_before should be old file size, not submodule commit object text size"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn it_preserves_symlinks_in_committed_diff() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        std::fs::write(path.join("target.txt"), "target content\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("target.txt", path.join("link.txt")).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        Command::new("git")
+            .args(["add", "target.txt", "link.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add symlink"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        assert!(
+            diff.files.iter().any(|f| f.path == "link.txt"),
+            "symlink should be preserved in committed diff, not filtered as gitlink"
+        );
+    }
+
+    #[test]
+    fn it_reports_deletion_when_file_replaced_by_submodule() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        // Create a submodule repo
+        let submod_dir = TempDir::new().unwrap();
+        let submod_path = submod_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        std::fs::write(submod_path.join("sub.txt"), "sub content\n").unwrap();
+        Command::new("git")
+            .args(["add", "sub.txt"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "sub initial"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&submod_path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Commit a regular file at "was_a_file.txt"
+        std::fs::write(path.join("was_a_file.txt"), "regular file content\n").unwrap();
+        Command::new("git")
+            .args(["add", "was_a_file.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add regular file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Replace file with submodule at same path
+        Command::new("git")
+            .args(["rm", "was_a_file.txt"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},was_a_file.txt"),
+            ])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "replace file with submodule"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+
+        let file_entries: Vec<_> = diff
+            .files
+            .iter()
+            .filter(|f| f.path == "was_a_file.txt")
+            .collect();
+        assert!(
+            !file_entries.is_empty(),
+            "file-to-submodule transition must report the file deletion"
+        );
+        assert_eq!(
+            file_entries[0].change_type,
+            ChangeType::Deleted,
+            "file-to-submodule transition must report a Deletion"
+        );
+        assert_eq!(
+            file_entries[0].size_before, 21,
+            "size_before should be the regular file's size (21 bytes)"
+        );
+    }
+
+    #[test]
+    fn it_reports_addition_when_submodule_replaced_by_file() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        let submod_dir = TempDir::new().unwrap();
+        let submod_path = submod_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        std::fs::write(submod_path.join("sub.txt"), "sub content\n").unwrap();
+        Command::new("git")
+            .args(["add", "sub.txt"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "sub initial"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&submod_path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Add submodule at "lib" and commit
+        Command::new("git")
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},lib"),
+            ])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add submodule"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        // Replace submodule with regular file at same path
+        Command::new("git")
+            .args(["rm", "-f", "lib"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        std::fs::write(path.join("lib"), "now a regular file\n").unwrap();
+        Command::new("git")
+            .args(["add", "lib"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "replace submodule with file"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+
+        let lib_entries: Vec<_> = diff.files.iter().filter(|f| f.path == "lib").collect();
+        assert!(
+            !lib_entries.is_empty(),
+            "submodule-to-file transition must report the new file"
+        );
+        assert_eq!(
+            lib_entries[0].change_type,
+            ChangeType::Added,
+            "submodule-to-file transition must report an Addition"
+        );
+        assert_eq!(
+            lib_entries[0].size_after, 19,
+            "size_after should be the new file's size (19 bytes)"
+        );
+    }
+
+    #[test]
+    fn it_filters_submodule_deletion_in_committed_diff() {
+        let (_dir, path) = create_repo_with_two_commits();
+
+        let submod_dir = TempDir::new().unwrap();
+        let submod_path = submod_dir.path().to_path_buf();
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        std::fs::write(submod_path.join("sub.txt"), "sub content\n").unwrap();
+        Command::new("git")
+            .args(["add", "sub.txt"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "sub initial"])
+            .current_dir(&submod_path)
+            .output()
+            .unwrap();
+
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&submod_path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        Command::new("git")
+            .args([
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},sub"),
+            ])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add submodule"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        Command::new("git")
+            .args(["rm", "-f", "sub"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "delete submodule"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let diff = reader.diff_commits("HEAD~1", "HEAD").unwrap();
+        assert!(
+            !diff.files.iter().any(|f| f.path == "sub"),
+            "submodule deletion should be filtered from committed diff"
+        );
     }
 
     #[test]
