@@ -38,9 +38,11 @@ jobs:
           if git rev-parse "v$VERSION" >/dev/null 2>&1; then
             echo "✓ v$VERSION tag exists"
           else
-            # Narrow allowlist: `chore: release vX.Y.Z` or `chore(release): X.Y.Z`
-            # with an actual version number after `release`. Prevents "chore: release the hounds"
-            # from bypassing the check.
+            # Narrow allowlist: `chore: release vX.Y.Z` with the literal word
+            # `release` after the colon and an actual version number after that.
+            # Prevents "chore: release the hounds" from bypassing the check.
+            # Note: `chore(release): vX.Y.Z` is intentionally not matched; the
+            # conventional-commits scope is the component, not a description of intent.
             if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && echo "${PR_TITLE:-}" | grep -qiE '^chore(\([^)]*\))?:[[:space:]]+release[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+'; then
               echo "⚠ v$VERSION has no tag (release PR in flight — OK)"
             else
