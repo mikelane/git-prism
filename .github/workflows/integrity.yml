@@ -167,6 +167,8 @@ jobs:
           done < <(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' CHANGELOG.md | sed 's/^## \[\(.*\)\]$/\1/')
           if [ -z "$MISSING" ]; then
             echo "✓ all CHANGELOG versions have matching tags"
+          elif [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] && echo "${PR_TITLE:-}" | grep -qiE '^chore(\([^)]*\))?:[[:space:]]+release[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "⚠ missing tags for versions:$MISSING (release PR in flight — OK)"
           else
             echo "✗ CHANGELOG sections without matching git tags:$MISSING"
             exit 1
