@@ -1,0 +1,9 @@
+---
+source: src/agent_detection.rs
+expression: detected
+---
+{
+  "name": "ClaudeCode",
+  "signal": "ToolSpecific",
+  "raw_value": "1"
+}

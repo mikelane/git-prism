@@ -1,3 +1,4 @@
+mod agent_detection;
 mod git;
 mod hooks;
 pub(crate) mod metrics;
@@ -97,6 +98,8 @@ enum Commands {
     },
     /// List supported languages for function-level analysis
     Languages,
+    /// Detect whether the current process is running on behalf of an AI agent
+    AgentDetect,
     /// Install / uninstall / report status of the bundled redirect hook
     Hooks {
         #[command(subcommand)]
@@ -330,6 +333,25 @@ async fn main() -> anyhow::Result<()> {
             let context: FunctionContextResponse =
                 build_function_context_with_options(&repo_path, base_ref, head_ref, &options)?;
             println!("{}", serde_json::to_string_pretty(&context)?);
+        }
+        Commands::AgentDetect => {
+            let result = agent_detection::detect_calling_agent(&agent_detection::StdEnvSource);
+            #[derive(serde::Serialize)]
+            struct Output {
+                agent: Option<agent_detection::AgentName>,
+                signal: Option<agent_detection::DetectionSignal>,
+            }
+            let output = match result {
+                Some(detected) => Output {
+                    agent: Some(detected.name),
+                    signal: Some(detected.signal),
+                },
+                None => Output {
+                    agent: None,
+                    signal: None,
+                },
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Commands::Hooks { command } => {
             let exit_code = run_hooks_command(command)?;
