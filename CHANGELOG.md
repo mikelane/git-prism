@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`git-prism agent-detect` subcommand.** Prints a JSON object indicating whether the current process is running on behalf of an AI coding agent, detected via environment variables only. Detection checks `AI_AGENT` (Vercel cross-tool convention), `AGENT` with an allowlisted value (`goose`, `amp`), and eight tool-specific markers (`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `CLINE_ACTIVE`, `AUGMENT_AGENT`, `OPENCODE_CLIENT`, `TRAE_AI_SHELL_ID`). `CI=true` is a hard override that always returns `{"agent": null, "signal": null}`. Not exposed as an MCP tool — diagnostics/ops use only. (#278)
+
 ## [0.8.0] — 2026-05-13
 
 ### Added
