@@ -5,18 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] — 2026-05-13
 
 ### Added
 
+- **Structured diff hunk metadata in `get_file_snapshots`.** Pass `include_diff_hunks: true` to get unified-diff hunk boundaries (`old_start`, `old_lines`, `new_start`, `new_lines`) for each modified file. Enables agents to compute diff-relative line positions for GitHub inline review comments without parsing raw unified diff output. Only emitted for modified files where both before and after content exists. (#271)
 - **Actionable resolution field for missing remote branches.** When `get_change_manifest` is called with a branch name that exists as a remote tracking ref (`refs/remotes/origin/{branch}`) but not as a local branch, the `ResolveRef` error now includes a JSON payload with a `resolution` field suggesting `git fetch origin {branch}`. Plain text errors are preserved for SHAs, qualified refs, and branches that do not exist anywhere. (#263)
-
-### Changed
 
 ### Fixed
 
+- **Gitlink (submodule) entries filtered from change manifest output.** Tree-diff handlers for additions, deletions, modifications, and rewrites now check for gitlink mode (`entry_mode.is_commit()`) and skip those entries. Mode transitions (file ↔ submodule at the same path) are handled correctly in both committed and worktree diffs. (#264)
+- **Redirect hook now surfaces `review_change` in advice messages.** The `BLOCK_GH_PR_DIFF` and `ADVICE_GET_CHANGE_MANIFEST` constants now include `review_change` as the preferred alternative to `git diff` for PR review. Unicode arrows and em-dashes replaced with ASCII equivalents (`-->`, `--`) for terminal safety. Escaped newlines (`\<newline>`) in bash commands are now stripped before tokenization. (#265)
 - **Redirect hook: heredoc false positive for `gh pr diff`.** The bash command tokenizer now applies a regex-based pre-pass to strip heredoc bodies from raw text before the line-by-line shlex tokenizer runs. This prevents false-positive hard-blocks when `gh pr diff` text appears verbatim inside a heredoc body that shlex cannot tokenize (e.g., inside a multi-line double-quoted string). (#270)
 - **Redirect hook: `gh api .../contents/...?ref=<sha>` bypass interception.** The hook now detects `gh api repos/<owner>/<repo>/contents/<path>?ref=<sha>` calls and redirects to `get_file_snapshots` with advisory JSON on stdout, closing a gap where agents could fetch raw file content via the GitHub API and bypass git-prism entirely. (#270)
+
+### Dependencies
+
+- `tokio` bumped from 1.51.1 to 1.52.1 (#261)
+- `rmcp` bumped from 1.5.0 to 1.6.0 (#262)
+- `tree-sitter-c-sharp` bumped from 0.23.1 to 0.23.5 (#260)
+- `clap` bumped from 4.6.0 to 4.6.1 (#259)
 
 ## [0.7.0] — 2026-04-29
 
@@ -185,6 +193,7 @@ Function-level analysis now covers 13 languages (was 8). The selection targets w
 - Binary file detection and truncation handling
 - Homebrew tap and cargo-dist cross-platform binary releases
 
+[0.8.0]: https://github.com/mikelane/git-prism/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/mikelane/git-prism/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mikelane/git-prism/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mikelane/git-prism/compare/v0.4.0...v0.5.0
