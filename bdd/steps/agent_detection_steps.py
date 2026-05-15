@@ -8,6 +8,7 @@ git-prism internals — Python-on-Rust cross-language isolation is intentional.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 from behave import given, then, when
@@ -17,8 +18,6 @@ from behave.runner import Context
 @given("the git-prism binary is available")
 def step_binary_available(context: Context) -> None:
     """Assert the release binary exists (built by environment.py before_all)."""
-    import os
-
     assert os.path.isfile(context.binary_path), (
         f"git-prism binary not found at {context.binary_path}. "
         "Run `cargo build --release` first."
