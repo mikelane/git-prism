@@ -101,6 +101,13 @@ Feature: Agent detection via environment variables
     And the JSON field "signal" is "AiAgent"
     And the JSON field "agent" is "Unknown"
 
+  Scenario: Empty CI env var does not override agent detection
+    When I run agent-detect with env vars "CI=,CLAUDECODE=1"
+    Then the exit code is 0
+    And the output is valid JSON
+    And the JSON field "agent" is "ClaudeCode"
+    And the JSON field "signal" is "ToolSpecific"
+
   Scenario: CI env var overrides agent marker
     When I run agent-detect with env vars "CI=true,CLAUDECODE=1"
     Then the exit code is 0

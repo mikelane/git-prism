@@ -75,8 +75,9 @@ pub struct DetectedAgent {
 /// 3. Tool-specific markers
 /// 4. `CI` set → `None` regardless of the above
 pub fn detect_calling_agent(env: &dyn EnvSource) -> Option<DetectedAgent> {
-    // CI wins over all agent signals — check first
-    if env.get("CI").is_some() {
+    // CI wins over all agent signals — check first. Empty CI="" is treated
+    // as unset, consistent with the empty-value handling for other markers.
+    if env.get("CI").is_some_and(|v| !v.is_empty()) {
         return None;
     }
 
@@ -90,9 +91,11 @@ pub fn detect_calling_agent(env: &dyn EnvSource) -> Option<DetectedAgent> {
         });
     }
 
-    // Priority 2: AGENT with allowlisted value
+    // Priority 2: AGENT with allowlisted value. Trim whitespace before
+    // matching so .env files with trailing spaces work correctly.
+    // raw_value preserves the original (untrimmed) value for debugging.
     if let Some(value) = env.get("AGENT") {
-        let agent_name = match value.as_str() {
+        let agent_name = match value.trim() {
             "goose" => Some(AgentName::Goose),
             "amp" => Some(AgentName::Amp),
             _ => None,
@@ -135,7 +138,8 @@ pub fn detect_calling_agent(env: &dyn EnvSource) -> Option<DetectedAgent> {
 ///
 /// Expected format: `<tool>_<version>_agent`, e.g. `claude-code_2-1-141_agent`.
 /// The tool segment maps to a known `AgentName`. Unknown tools produce
-/// `AgentName::Unknown { tool }`.
+/// `AgentName::Unknown`. The original `AI_AGENT` value is preserved on
+/// `DetectedAgent.raw_value` if callers need to parse the tool name themselves.
 fn parse_ai_agent_value(value: &str) -> AgentName {
     // Strip trailing `_agent` suffix if present
     let tool_version = value.strip_suffix("_agent").unwrap_or(value);
@@ -336,6 +340,18 @@ mod tests {
     }
 
     #[test]
+    fn it_tolerates_whitespace_in_agent_var_value() {
+        // .env files frequently produce trailing spaces; the allowlist match
+        // should be whitespace-tolerant.
+        let result = detect_calling_agent(&env(&[("AGENT", "goose ")]));
+        assert!(
+            result.is_some(),
+            "AGENT=\"goose \" (trailing space) should detect Goose"
+        );
+        assert_eq!(result.unwrap().name, AgentName::Goose);
+    }
+
+    #[test]
     fn it_ignores_agent_var_with_non_allowlisted_value() {
         let result = detect_calling_agent(&env(&[("AGENT", "1")]));
         assert_eq!(result, None);
@@ -375,6 +391,18 @@ mod tests {
     }
 
     // --- CI override ---
+
+    #[test]
+    fn it_treats_empty_ci_var_as_not_set() {
+        // Empty CI="" should NOT override agent detection — only meaningful
+        // values do, mirroring the empty-value handling for other markers.
+        let result = detect_calling_agent(&env(&[("CI", ""), ("CLAUDECODE", "1")]));
+        assert!(
+            result.is_some(),
+            "Empty CI should not override CLAUDECODE detection"
+        );
+        assert_eq!(result.unwrap().name, AgentName::ClaudeCode);
+    }
 
     #[test]
     fn it_returns_none_when_ci_is_set_alongside_claudecode() {
