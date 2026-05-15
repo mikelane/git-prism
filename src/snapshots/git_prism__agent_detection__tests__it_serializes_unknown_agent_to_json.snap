@@ -3,11 +3,7 @@ source: src/agent_detection.rs
 expression: detected
 ---
 {
-  "name": {
-    "Unknown": {
-      "tool": "sometool"
-    }
-  },
+  "name": "Unknown",
   "signal": "AiAgent",
   "raw_value": "sometool_1-0_agent"
 }

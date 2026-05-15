@@ -38,7 +38,7 @@ pub enum AgentName {
     Trae,
     Goose,
     Amp,
-    Unknown { tool: String },
+    Unknown,
 }
 
 /// Which detection signal fired.
@@ -161,9 +161,7 @@ fn parse_ai_agent_value(value: &str) -> AgentName {
         "trae" => AgentName::Trae,
         "goose" => AgentName::Goose,
         "amp" => AgentName::Amp,
-        other => AgentName::Unknown {
-            tool: other.to_string(),
-        },
+        _ => AgentName::Unknown,
     }
 }
 
@@ -373,7 +371,7 @@ mod tests {
         let result = detect_calling_agent(&env(&[("AI_AGENT", "sometool_1-0_agent")]));
         let detected = result.expect("should detect an agent");
         assert_eq!(detected.signal, DetectionSignal::AiAgent);
-        assert!(matches!(detected.name, AgentName::Unknown { .. }));
+        assert!(matches!(detected.name, AgentName::Unknown));
     }
 
     // --- CI override ---
@@ -431,6 +429,22 @@ mod tests {
         assert_eq!(detected.signal, DetectionSignal::AiAgent);
     }
 
+    // --- JSON contract: agent name must always serialize as a string ---
+
+    #[test]
+    fn it_serializes_unknown_agent_name_as_a_json_string() {
+        // CLI `agent-detect` output contract is `agent: string | null` (issue #278
+        // acceptance criterion #4). The `Unknown` variant must serialize as a string,
+        // not a nested object.
+        let name = AgentName::Unknown;
+        let value = serde_json::to_value(&name).expect("serialize");
+        assert!(
+            value.is_string(),
+            "AgentName::Unknown must serialize as a JSON string, got: {value}"
+        );
+        assert_eq!(value.as_str(), Some("Unknown"));
+    }
+
     // --- snapshot tests for JSON serialization ---
 
     #[test]
@@ -446,9 +460,7 @@ mod tests {
     #[test]
     fn it_serializes_unknown_agent_to_json() {
         let detected = DetectedAgent {
-            name: AgentName::Unknown {
-                tool: "sometool".to_string(),
-            },
+            name: AgentName::Unknown,
             signal: DetectionSignal::AiAgent,
             raw_value: "sometool_1-0_agent".to_string(),
         };
