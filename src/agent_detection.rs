@@ -342,13 +342,17 @@ mod tests {
     #[test]
     fn it_tolerates_whitespace_in_agent_var_value() {
         // .env files frequently produce trailing spaces; the allowlist match
-        // should be whitespace-tolerant.
+        // should be whitespace-tolerant. raw_value preserves the ORIGINAL
+        // (untrimmed) value so debugging surfaces the actual env contents.
         let result = detect_calling_agent(&env(&[("AGENT", "goose ")]));
-        assert!(
-            result.is_some(),
-            "AGENT=\"goose \" (trailing space) should detect Goose"
+        assert_eq!(
+            result,
+            Some(DetectedAgent {
+                name: AgentName::Goose,
+                signal: DetectionSignal::Agent,
+                raw_value: "goose ".to_string(),
+            })
         );
-        assert_eq!(result.unwrap().name, AgentName::Goose);
     }
 
     #[test]
@@ -374,12 +378,20 @@ mod tests {
 
     #[test]
     fn it_prefers_ai_agent_over_tool_specific_markers() {
+        // When both AI_AGENT and CLAUDECODE are set, AI_AGENT wins — and the
+        // returned raw_value must come from AI_AGENT, not CLAUDECODE.
         let result = detect_calling_agent(&env(&[
             ("AI_AGENT", "claude-code_2-1-141_agent"),
             ("CLAUDECODE", "1"),
         ]));
-        let detected = result.expect("should detect an agent");
-        assert_eq!(detected.signal, DetectionSignal::AiAgent);
+        assert_eq!(
+            result,
+            Some(DetectedAgent {
+                name: AgentName::ClaudeCode,
+                signal: DetectionSignal::AiAgent,
+                raw_value: "claude-code_2-1-141_agent".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -397,11 +409,14 @@ mod tests {
         // Empty CI="" should NOT override agent detection — only meaningful
         // values do, mirroring the empty-value handling for other markers.
         let result = detect_calling_agent(&env(&[("CI", ""), ("CLAUDECODE", "1")]));
-        assert!(
-            result.is_some(),
-            "Empty CI should not override CLAUDECODE detection"
+        assert_eq!(
+            result,
+            Some(DetectedAgent {
+                name: AgentName::ClaudeCode,
+                signal: DetectionSignal::ToolSpecific,
+                raw_value: "1".to_string(),
+            })
         );
-        assert_eq!(result.unwrap().name, AgentName::ClaudeCode);
     }
 
     #[test]
@@ -473,25 +488,43 @@ mod tests {
         assert_eq!(value.as_str(), Some("Unknown"));
     }
 
-    // --- snapshot tests for JSON serialization ---
+    // --- explicit JSON shape tests ---
 
     #[test]
-    fn it_serializes_detected_agent_to_json() {
+    fn it_serializes_detected_agent_to_json_with_expected_fields() {
+        // DetectedAgent serializes to a flat JSON object with three string fields.
+        // Explicit assertion (not snapshot) so the contract is visible in the test.
         let detected = DetectedAgent {
             name: AgentName::ClaudeCode,
             signal: DetectionSignal::ToolSpecific,
             raw_value: "1".to_string(),
         };
-        insta::assert_json_snapshot!(detected);
+        let value = serde_json::to_value(&detected).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "name": "ClaudeCode",
+                "signal": "ToolSpecific",
+                "raw_value": "1",
+            })
+        );
     }
 
     #[test]
-    fn it_serializes_unknown_agent_to_json() {
+    fn it_serializes_unknown_agent_to_json_with_expected_fields() {
         let detected = DetectedAgent {
             name: AgentName::Unknown,
             signal: DetectionSignal::AiAgent,
             raw_value: "sometool_1-0_agent".to_string(),
         };
-        insta::assert_json_snapshot!(detected);
+        let value = serde_json::to_value(&detected).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "name": "Unknown",
+                "signal": "AiAgent",
+                "raw_value": "sometool_1-0_agent",
+            })
+        );
     }
 }
