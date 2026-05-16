@@ -5,6 +5,9 @@ pub(crate) mod metrics;
 pub(crate) mod pagination;
 pub(crate) mod privacy;
 mod server;
+// The shim module is complete but not yet wired to argv[0] dispatch (#287).
+#[allow(dead_code)]
+mod shim;
 mod telemetry;
 mod tools;
 mod treesitter;
