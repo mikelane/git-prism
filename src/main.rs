@@ -186,7 +186,34 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    // argv[0] dispatch: when invoked as "git" (via a symlink), enter shim mode.
+    let args_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let basename = args_os
+        .first()
+        .and_then(|s| std::path::Path::new(s).file_name())
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if basename == "git" {
+        let args: Vec<&str> = args_os.iter().filter_map(|s| s.to_str()).collect();
+        let exec = shim::real_git::StdRealGitExec {
+            env: &agent_detection::StdEnvSource,
+            argv0: args.first().copied().unwrap_or("git"),
+        };
+        // run_shim either exec-replaces the process (passthrough, never returns)
+        // or returns ExitCode after printing structured JSON or an error.
+        return shim::run_shim(&args, &agent_detection::StdEnvSource, &exec);
+    }
+
+    if let Err(e) = run().await {
+        eprintln!("error: {e:#}");
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
