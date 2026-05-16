@@ -181,10 +181,19 @@ def step_env_dumper_script(context: Context) -> None:
     dumper_output = Path(tmpdir) / "env_dump.txt"
     context.dumper_output_file = str(dumper_output)
 
-    # Write the env-dumper script
+    # Write the env-dumper script. After dumping env it execs the real
+    # git via a fallback chain that matches the eventual Rust resolver
+    # (#286). Avoids hardcoding /usr/bin/git, which is wrong on Alpine,
+    # Nix, and Homebrew-only macOS runners.
     dumper_script = Path(tmpdir) / "git"
     dumper_script.write_text(
-        f'#!/bin/sh\nenv > "{dumper_output}"\nexec /usr/bin/git "$@"\n'
+        f'#!/bin/sh\n'
+        f'env > "{dumper_output}"\n'
+        f'for candidate in /usr/bin/git /usr/local/bin/git /opt/homebrew/bin/git; do\n'
+        f'    [ -x "$candidate" ] && exec "$candidate" "$@"\n'
+        f'done\n'
+        f'echo "env-dumper: no git found in standard locations" >&2\n'
+        f'exit 127\n'
     )
     dumper_script.chmod(dumper_script.stat().st_mode | stat.S_IEXEC)
     context.env_dumper_dir = Path(tmpdir)
@@ -358,18 +367,21 @@ def _parse_result_json(context: Context) -> Any:
 
 @then("the output is not JSON")
 def step_output_is_not_json(context: Context) -> None:
-    """Assert that stdout is NOT valid JSON (plain git output)."""
-    stdout = context.result.stdout
+    """Assert that stdout is NOT valid JSON (plain git output).
+
+    Any successful ``json.loads`` fails the assertion — including scalar
+    JSON values like ``null``, ``42``, or ``true`` that would otherwise
+    slip past a dict/list-only check.
+    """
+    stdout = (context.result.stdout or "").strip()
     try:
-        data = json.loads(stdout)
-        # json.loads("") raises; json.loads("null") returns None.
-        # A bare null is not what git outputs, so treat dict/list as JSON.
-        if isinstance(data, (dict, list)):
-            raise AssertionError(
-                f"Expected non-JSON output but got valid JSON:\n{stdout[:500]}"
-            )
+        json.loads(stdout)
     except json.JSONDecodeError:
-        pass  # Not JSON — assertion passes
+        return  # Expected — output is not JSON, scenario passes
+    raise AssertionError(
+        f"Expected non-JSON output (passthrough from real git) but stdout "
+        f"parsed as JSON: {stdout[:500]!r}"
+    )
 
 
 @then('the JSON output has a "files" array')
@@ -508,8 +520,24 @@ def step_hooks_status_mentions_path_shim(context: Context) -> None:
 
 @then("the hooks status output indicates path-shim is not installed")
 def step_hooks_status_not_installed(context: Context) -> None:
-    """Assert the hooks status output indicates path-shim is absent."""
+    """Assert the hooks status output reports path-shim as not installed.
+
+    Requires both ``path-shim`` and a not-installed phrase on the same
+    line so the existing bash-redirect-hook's ``not installed`` message
+    can't trigger a false GREEN before the implementation lands.
+    """
     full_output = context.result.stdout + context.result.stderr
-    assert "not installed" in full_output.lower() or "not found" in full_output.lower(), (
-        f"Expected hooks status to indicate path-shim is not installed:\n{full_output}"
+    path_shim_lines = [
+        line for line in full_output.splitlines() if "path-shim" in line.lower()
+    ]
+    assert path_shim_lines, (
+        f"Expected a line mentioning 'path-shim' in hooks status output, "
+        f"got:\n{full_output}"
+    )
+    assert any(
+        "not installed" in line.lower() or "absent" in line.lower()
+        for line in path_shim_lines
+    ), (
+        f"Expected a 'path-shim' line indicating it is not installed; "
+        f"matching lines were: {path_shim_lines!r}"
     )
