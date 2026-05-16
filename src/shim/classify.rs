@@ -94,21 +94,30 @@ fn has_ref_range(token: &str) -> bool {
     token.contains("..")
 }
 
-/// Return the pickaxe search term if the argv slice contains `-S<term>`,
-/// `-S <term>`, `-G<term>`, or `-G <term>`.
+/// Return the pickaxe search term if the argv slice contains a `-S` or `-G`
+/// flag (with or without an attached term).
+///
+/// Returns `Some(term)` where `term` may be empty:
+/// - `-S foo`       → `Some("foo")`   (separate non-range token)
+/// - `-Sfoo`        → `Some("foo")`   (concatenated)
+/// - `-S main..HEAD`→ `Some("")`      (next token is a ref range, not a term)
+/// - `-S`           → `Some("")`      (bare flag, no following token)
+///
+/// Returns `None` when no `-S`/`-G` flag is present at all.
 fn pickaxe_term<'a>(tokens: &[&'a str]) -> Option<&'a str> {
     let mut iter = tokens.iter().copied().peekable();
     while let Some(tok) = iter.next() {
         if tok == "-S" || tok == "-G" {
-            // Separate-token form: `-S term`
-            if let Some(&next) = iter.peek() {
-                return Some(next);
-            }
+            // Separate-token form: the next token is the term ONLY if it does
+            // not look like a ref range.  A ref range belongs to the range
+            // field, not the pickaxe term.
+            return match iter.peek() {
+                Some(&next) if !has_ref_range(next) => Some(next),
+                _ => Some(""),
+            };
         } else if tok.starts_with("-S") || tok.starts_with("-G") {
-            // Concatenated form: `-Sterm`
-            if tok.len() > 2 {
-                return Some(&tok[2..]);
-            }
+            // Concatenated form: `-Sterm` or `-S` (tok.len() == 2 means empty term).
+            return Some(&tok[2..]);
         }
     }
     None
@@ -375,6 +384,80 @@ mod tests {
             classify(&["git", "blame", "-w", "src/main.rs"]),
             Classification::BlameSnapshot {
                 path: "src/main.rs"
+            }
+        );
+    }
+
+    // --- F1: pickaxe term must not steal a ref-range token ---
+
+    #[test]
+    fn it_classifies_pickaxe_with_range_lookalike_as_term_and_no_range() {
+        // git log -S foo  → term="foo", range=None
+        assert_eq!(
+            classify(&["git", "log", "-S", "foo"]),
+            Classification::FunctionContext {
+                range: None,
+                pickaxe_term: "foo",
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_concatenated_pickaxe_as_term_and_no_range() {
+        // git log -Sfoo  → term="foo", range=None
+        assert_eq!(
+            classify(&["git", "log", "-Sfoo"]),
+            Classification::FunctionContext {
+                range: None,
+                pickaxe_term: "foo",
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_pickaxe_term_with_separate_range() {
+        // git log -S foo main..HEAD  → term="foo", range="main..HEAD"
+        assert_eq!(
+            classify(&["git", "log", "-S", "foo", "main..HEAD"]),
+            Classification::FunctionContext {
+                range: Some("main..HEAD"),
+                pickaxe_term: "foo",
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_pickaxe_when_next_token_is_ref_range_as_empty_term() {
+        // git log -S main..HEAD  → term="", range="main..HEAD"  (the bug case)
+        assert_eq!(
+            classify(&["git", "log", "-S", "main..HEAD"]),
+            Classification::FunctionContext {
+                range: Some("main..HEAD"),
+                pickaxe_term: "",
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_bare_pickaxe_flag_as_empty_term_no_range() {
+        // git log -S  → term="", range=None
+        assert_eq!(
+            classify(&["git", "log", "-S"]),
+            Classification::FunctionContext {
+                range: None,
+                pickaxe_term: "",
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_concatenated_pickaxe_with_separate_range() {
+        // git log -Sfoo main..HEAD  → term="foo", range="main..HEAD"
+        assert_eq!(
+            classify(&["git", "log", "-Sfoo", "main..HEAD"]),
+            Classification::FunctionContext {
+                range: Some("main..HEAD"),
+                pickaxe_term: "foo",
             }
         );
     }
