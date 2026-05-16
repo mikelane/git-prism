@@ -10,9 +10,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from typing import Any
 
 from behave import given, then, when
 from behave.runner import Context
+
+# Defensive upper bound — agent-detect should return in milliseconds.
+# A hang here would deadlock CI.
+_AGENT_DETECT_TIMEOUT_SECONDS: float = 30.0
 
 
 @given("the git-prism binary is available")
@@ -30,29 +35,36 @@ def step_run_agent_detect_with_env(context: Context, env_spec: str) -> None:
 
     env_spec is a comma-separated list of KEY=VALUE pairs.
     The binary runs with an empty base environment plus only these vars.
+
+    Note: values containing commas are not supported by this split strategy;
+    current Gherkin scenarios never use such values.
     """
     env: dict[str, str] = {}
-    for pair in env_spec.split(","):
-        pair = pair.strip()
+    for raw_pair in env_spec.split(","):
+        pair = raw_pair.strip()
         key, _, value = pair.partition("=")
         env[key.strip()] = value.strip()
 
-    context.result = subprocess.run(
+    context.result = subprocess.run(  # noqa: S603 - args list, no shell
         [context.binary_path, "agent-detect"],
         capture_output=True,
         text=True,
         env=env,
+        check=False,
+        timeout=_AGENT_DETECT_TIMEOUT_SECONDS,
     )
 
 
 @when("I run agent-detect with empty environment")
 def step_run_agent_detect_empty_env(context: Context) -> None:
     """Run agent-detect with a completely empty environment."""
-    context.result = subprocess.run(
+    context.result = subprocess.run(  # noqa: S603 - args list, no shell
         [context.binary_path, "agent-detect"],
         capture_output=True,
         text=True,
         env={},
+        check=False,
+        timeout=_AGENT_DETECT_TIMEOUT_SECONDS,
     )
 
 
@@ -82,7 +94,7 @@ def step_json_field_is_null(context: Context, field: str) -> None:
     )
 
 
-def _parse_result_json(context: Context) -> dict:
+def _parse_result_json(context: Context) -> dict[str, Any]:
     """Parse stdout as JSON, caching on the context."""
     if not hasattr(context, "json_data") or context.json_data is None:
         try:
