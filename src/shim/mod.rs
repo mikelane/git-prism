@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
-use crate::shim::classify::{Classification, classify};
+use crate::shim::classify::{classify, Classification};
 use crate::shim::real_git::RealGitExec;
 
 /// Main entry point for shim mode.
@@ -167,6 +167,60 @@ mod tests {
             exec.called.get(),
             "sentinel must take priority over agent detection"
         );
+    }
+
+    #[test]
+    fn it_dispatches_to_handler_when_agent_set_and_subcommand_classified() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Build a minimal two-commit repo so the handler has something to work with.
+        let dir = TempDir::new().unwrap();
+        let repo_path = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "t@t.com"]);
+        run(&["config", "user.name", "T"]);
+        std::fs::write(repo_path.join("a.txt"), "hello\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-m", "first"]);
+        std::fs::write(repo_path.join("b.txt"), "world\n").unwrap();
+        run(&["add", "b.txt"]);
+        run(&["commit", "-m", "second"]);
+
+        // Env: agent set, no sentinel, repo path injected via GIT_PRISM_REPO.
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            // We can't pass a &'static str for the path, so use GIT_PRISM_REPO
+            // via a separate owned-string approach. Use the String-keyed variant
+            // by leaking for this test only.
+        ]));
+        // Leak the path string so it lives long enough for the 'static lifetime.
+        let repo_str: &'static str =
+            Box::leak(repo_path.to_string_lossy().into_owned().into_boxed_str());
+
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            ("GIT_PRISM_REPO", repo_str),
+        ]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+
+        // git diff main..HEAD is a classified command that routes to handle_manifest.
+        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec);
+
+        // SpyExec must NOT have been called — the handler ran instead.
+        assert!(
+            !exec.called.get(),
+            "expected handler dispatch, not passthrough"
+        );
+        // Handler should return SUCCESS.
+        assert_eq!(code, ExitCode::SUCCESS, "handler should return SUCCESS");
     }
 
     #[test]
