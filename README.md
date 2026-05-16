@@ -78,6 +78,32 @@ git-prism hooks uninstall   # removes the hook file and settings.json entry
 git-prism hooks status      # shows whether the hook is installed and at which scope
 ```
 
+## Agent detection
+
+```bash
+git-prism agent-detect
+```
+
+Prints a JSON object indicating whether the current process is running on behalf
+of an AI coding agent, detected via environment variables only.
+
+```json
+{ "agent": "ClaudeCode", "signal": "ToolSpecific" }
+```
+
+Both fields are `null` when no agent is detected, or when `CI=true` is set (CI
+wins over all agent signals).
+
+**Detection priority order:**
+
+1. `AI_AGENT` non-empty (Vercel cross-tool convention, e.g. `claude-code_2-1-141_agent`) → `signal: "AiAgent"`
+2. `AGENT` set with an allowlisted value (`goose`, `amp`) → `signal: "Agent"`. Bare `AGENT=1` is intentionally ignored (collides with ssh-agent and build-system agents).
+3. Tool-specific markers: `CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `CLINE_ACTIVE`, `AUGMENT_AGENT`, `OPENCODE_CLIENT`, `TRAE_AI_SHELL_ID` → `signal: "ToolSpecific"`
+4. `CI` set → `{"agent": null, "signal": null}` regardless of any agent markers above.
+
+This subcommand is a diagnostics/ops tool. It is **not** exposed as an MCP tool —
+it does not appear in the MCP tool registry and existing tools are unaffected.
+
 ## Tools
 
 ### `get_change_manifest`

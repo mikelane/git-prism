@@ -79,6 +79,7 @@ For the MCP tool, omit `head_ref` to trigger working tree mode: `get_change_mani
 
 ## Module Responsibilities
 
+- `src/agent_detection.rs` — Answers "is this process running on behalf of an AI agent?" using only environment variables. Public entry point: `detect_calling_agent(env: &dyn EnvSource) -> Option<DetectedAgent>`. Production code passes `StdEnvSource`; tests inject a `HashMap`-backed stub — never call `std::env::var` inside the detection logic directly. Detection checks `AI_AGENT`, then `AGENT` (allowlisted values only), then eight tool-specific markers, with `CI=true` as a global override that always returns `None`. Does **not** do process inspection, TTY detection, or parent-process walking; those are out of scope. Not exposed as an MCP tool — used only by the `agent-detect` CLI subcommand.
 - `src/git/` — Git data access. Wraps `gix`. Returns structured Rust types, never strings.
 - `src/treesitter/` — Function/import extraction. Each language is a self-contained file implementing `LanguageAnalyzer` trait.
 - `src/tools/` — MCP tool handlers. Orchestrate git + treesitter modules into JSON responses. `context.rs` handles function context (callers/callees/test references). `review_change.rs` combines manifest + function-context for a ref range, splitting the response budget 40/60 between the two halves.
