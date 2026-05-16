@@ -8,13 +8,13 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::git::refs::parse_range;
 use crate::git::refs::RefRange;
+use crate::git::refs::parse_range;
 use crate::shim::classify::Classification;
 use crate::tools::{
-    build_function_context_with_options, build_snapshots, collect_all_history_pages,
-    collect_all_manifest_pages, collect_all_worktree_manifest_pages, ContextOptions,
-    ManifestOptions, SnapshotOptions,
+    ContextOptions, ManifestOptions, SnapshotOptions, build_function_context_with_options,
+    build_snapshots, collect_all_history_pages, collect_all_manifest_pages,
+    collect_all_worktree_manifest_pages,
 };
 
 /// Dispatch a classified git command to the appropriate tool function and
