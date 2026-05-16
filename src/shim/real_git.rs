@@ -43,32 +43,41 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     }
 }
 
-/// Walk `$PATH`, skip the directory that contains `argv0` (the shim itself),
-/// and return the first `<entry>/git` that is executable.
+/// Walk `$PATH`, skip any candidate that resolves (via symlink) to the shim
+/// binary itself, and return the first `<entry>/git` that is executable.
 ///
 /// Falls back to `/usr/bin/git`, `/usr/local/bin/git`, `/opt/homebrew/bin/git`
 /// if nothing is found in `$PATH`.  Returns `None` only when no git binary
 /// exists anywhere.
 pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathBuf> {
-    let shim_dir = shim_parent_dir(argv0);
+    let shim_path = shim_canonical_path(argv0);
 
     if let Some(path_var) = env.get("PATH") {
         for entry in path_var.split(':') {
             if entry.is_empty() {
                 continue;
             }
-            let entry_path = Path::new(entry);
-            // Skip the directory containing the shim binary.
-            if shim_dir
-                .as_ref()
-                .is_some_and(|shim| canonical_eq(entry_path, shim))
-            {
+            let candidate = Path::new(entry).join("git");
+            if !is_executable(&candidate) {
                 continue;
             }
-            let candidate = entry_path.join("git");
-            if is_executable(&candidate) {
-                return Some(candidate);
+            // Skip this candidate if:
+            // (a) it lives in the same directory as the shim binary, or
+            // (b) it resolves (via symlink) to the shim binary itself.
+            // Case (a) handles the direct install; case (b) handles the
+            // Homebrew/cellar pattern where the shim is symlinked into PATH.
+            if let Some(shim) = &shim_path {
+                let shim_dir = shim.parent().map(Path::to_path_buf);
+                let candidate_dir = candidate.parent().map(Path::to_path_buf);
+                let same_dir = match (&shim_dir, &candidate_dir) {
+                    (Some(sd), Some(cd)) => canonical_eq(sd, cd),
+                    _ => false,
+                };
+                if same_dir || canonical_eq(&candidate, shim) {
+                    continue;
+                }
             }
+            return Some(candidate);
         }
     }
 
@@ -87,13 +96,10 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
     None
 }
 
-/// Return the canonicalized parent directory of `argv0`, or `None` when
-/// canonicalization fails (e.g. relative paths, missing binary).
-fn shim_parent_dir(argv0: &str) -> Option<PathBuf> {
-    Path::new(argv0)
-        .canonicalize()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+/// Return the canonicalized path of the shim binary (`argv0`), or `None`
+/// when canonicalization fails (e.g. relative paths, missing binary).
+fn shim_canonical_path(argv0: &str) -> Option<PathBuf> {
+    Path::new(argv0).canonicalize().ok()
 }
 
 /// Return `true` if `a` and `b` refer to the same directory after
@@ -195,6 +201,48 @@ mod tests {
 
         let result = resolve_real_git("/nonexistent/git-prism", &env);
         assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn it_skips_symlink_to_shim_binary_in_different_path_entry() {
+        // Homebrew install pattern:
+        //   shim lives at  <cellar_dir>/git-prism  (NOT in PATH)
+        //   <link_dir>/git  →  <cellar_dir>/git-prism   (symlink, IS in PATH)
+        //   <real_dir>/git  is the actual git binary
+        //
+        // The resolver must skip <link_dir>/git because it resolves to the shim,
+        // even though <link_dir> is NOT the shim's parent directory.
+        let cellar_dir = TempDir::new().unwrap();
+        let link_dir = TempDir::new().unwrap();
+        let real_dir = TempDir::new().unwrap();
+
+        // Create the shim binary in cellar_dir (not in PATH).
+        let shim_binary = make_executable_file(cellar_dir.path(), "git-prism");
+
+        // Create a symlink <link_dir>/git -> <cellar_dir>/git-prism.
+        let symlink_git = link_dir.path().join("git");
+        std::os::unix::fs::symlink(&shim_binary, &symlink_git).unwrap();
+
+        // Create the real git binary in real_dir.
+        let expected = make_executable_file(real_dir.path(), "git");
+
+        // PATH: link_dir first (has the shim symlink), then real_dir.
+        let path_val = format!(
+            "{}:{}",
+            link_dir.path().display(),
+            real_dir.path().display()
+        );
+        let env = env_with_path(&path_val);
+
+        // argv0 is the canonical shim binary (cellar_dir/git-prism).
+        let argv0 = shim_binary.to_string_lossy().into_owned();
+        let result = resolve_real_git(&argv0, &env);
+
+        assert_eq!(
+            result,
+            Some(expected),
+            "resolver must skip the shim symlink and return the real git binary"
+        );
     }
 
     #[test]
