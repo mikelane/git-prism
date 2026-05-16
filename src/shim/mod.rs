@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
-use crate::shim::classify::{Classification, classify};
+use crate::shim::classify::{classify, Classification};
 use crate::shim::real_git::RealGitExec;
 
 /// Main entry point for shim mode.
@@ -41,17 +41,31 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exe
     }
 
     // 4. Dispatch to the handler.
-    let repo_path = resolve_repo_path(env);
+    let repo_path = match resolve_repo_path(env) {
+        Some(p) => p,
+        None => return exec.passthrough(argv),
+    };
     let mut stdout = std::io::stdout();
     handlers::handle(&classification, &repo_path, &mut stdout)
 }
 
 /// Return the repository path from `$GIT_PRISM_REPO` if set, otherwise use
-/// the current working directory.
-fn resolve_repo_path(env: &dyn EnvSource) -> PathBuf {
-    env.get("GIT_PRISM_REPO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().expect("cannot determine current directory"))
+/// the current working directory.  Returns `None` when the cwd cannot be
+/// determined (deleted directory, permission error) — callers should fall
+/// through to passthrough so real git can handle the error gracefully.
+///
+/// The `GIT_PRISM_CWD_UNAVAILABLE` env key is reserved for testing: when set,
+/// this function behaves as if `current_dir()` failed.
+fn resolve_repo_path(env: &dyn EnvSource) -> Option<PathBuf> {
+    if let Some(repo) = env.get("GIT_PRISM_REPO") {
+        return Some(PathBuf::from(repo));
+    }
+    // Allow tests to inject a cwd-unavailable condition without touching the
+    // real process working directory.
+    if env.get("GIT_PRISM_CWD_UNAVAILABLE").is_some() {
+        return None;
+    }
+    std::env::current_dir().ok()
 }
 
 #[cfg(test)]
@@ -152,6 +166,30 @@ mod tests {
         assert!(
             exec.called.get(),
             "sentinel must take priority over agent detection"
+        );
+    }
+
+    #[test]
+    fn it_passes_through_when_current_dir_is_unavailable() {
+        // GIT_PRISM_REPO not set, and current_dir cannot be determined.
+        // run_shim must fall through to passthrough rather than panicking.
+        // We simulate the failure via GIT_PRISM_REPO pointing to a path that
+        // doesn't exist — but the real test is that a broken cwd_source falls
+        // through. We use a MapEnv with a CWD_FAIL sentinel key that triggers
+        // the error path.
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            ("GIT_PRISM_CWD_UNAVAILABLE", "1"),
+        ]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+
+        // argv is a classified command so it would normally dispatch — but
+        // the cwd failure must cause passthrough instead.
+        run_shim(&["git", "diff", "main..HEAD"], &env, &exec);
+
+        assert!(
+            exec.called.get(),
+            "expected passthrough when current directory cannot be determined"
         );
     }
 }
