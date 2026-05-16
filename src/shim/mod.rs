@@ -194,14 +194,7 @@ mod tests {
         run(&["add", "b.txt"]);
         run(&["commit", "-m", "second"]);
 
-        // Env: agent set, no sentinel, repo path injected via GIT_PRISM_REPO.
-        let env = MapEnv(HashMap::from([
-            ("CLAUDECODE", "1"),
-            // We can't pass a &'static str for the path, so use GIT_PRISM_REPO
-            // via a separate owned-string approach. Use the String-keyed variant
-            // by leaking for this test only.
-        ]));
-        // Leak the path string so it lives long enough for the 'static lifetime.
+        // Leak the path string so it lives long enough for MapEnv's 'static lifetime.
         let repo_str: &'static str =
             Box::leak(repo_path.to_string_lossy().into_owned().into_boxed_str());
 
