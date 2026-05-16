@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
-use crate::shim::classify::{classify, Classification};
+use crate::shim::classify::{Classification, classify};
 use crate::shim::real_git::RealGitExec;
 
 /// Main entry point for shim mode.
