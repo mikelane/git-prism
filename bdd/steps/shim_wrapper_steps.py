@@ -404,19 +404,29 @@ def step_json_has_commits_array(context: Context) -> None:
 
 @then('the JSON output has a "function_context" shape')
 def step_json_has_function_context(context: Context) -> None:
-    """Assert the JSON output has a 'function_context' key holding a list."""
+    """Assert the JSON output has the function-context wire shape.
+
+    build_function_context_with_options returns {"functions": [...], ...}.
+    The Gherkin step says "function_context shape" as a semantic label;
+    the actual top-level key in the JSON response is "functions".
+    """
     data = _parse_result_json(context)
-    assert isinstance(data, dict) and isinstance(data.get("function_context"), list), (
-        f"Expected JSON with 'function_context' list, got: {str(data)[:500]}"
+    assert isinstance(data, dict) and isinstance(data.get("functions"), list), (
+        f"Expected JSON with 'functions' list (function_context shape), got: {str(data)[:500]}"
     )
 
 
 @then('the JSON output has a "snapshots" key')
 def step_json_has_snapshots_key(context: Context) -> None:
-    """Assert the JSON output contains a 'snapshots' key."""
+    """Assert the JSON output has the snapshot wire shape.
+
+    build_snapshots returns {"files": [...], ...}.
+    The Gherkin step says "snapshots key" as a semantic label;
+    the actual top-level key in the JSON response is "files".
+    """
     data = _parse_result_json(context)
-    assert isinstance(data, dict) and "snapshots" in data, (
-        f"Expected JSON with 'snapshots' key, got: {str(data)[:500]}"
+    assert isinstance(data, dict) and isinstance(data.get("files"), list), (
+        f"Expected JSON with 'files' list (snapshot shape), got: {str(data)[:500]}"
     )
 
 

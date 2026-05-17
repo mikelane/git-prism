@@ -30,7 +30,7 @@ Feature: PATH-shim wrapper for structured git output
   # real git binary.
   # -------------------------------------------------------------------------
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git diff with two-dot range produces JSON with files array
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1..HEAD" with CLAUDECODE=1
@@ -38,7 +38,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "files" array
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git diff with three-dot range produces JSON with files array
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1...HEAD" with CLAUDECODE=1
@@ -46,7 +46,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "files" array
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git log with two-dot range produces JSON with commits array
     Given a fixture git repository with two commits
     When I run the shim as "git log HEAD~1..HEAD" with CLAUDECODE=1
@@ -54,7 +54,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "commits" array
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git log with pickaxe flag produces function_context JSON
     Given a fixture git repository with two commits
     When I run the shim as "git log -Sfoo" with CLAUDECODE=1
@@ -62,7 +62,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "function_context" shape
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Pickaxe flag takes priority over log range — both present yields function_context
     Given a fixture git repository with two commits
     When I run the shim as "git log -Sfoo HEAD~1..HEAD" with CLAUDECODE=1
@@ -70,7 +70,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "function_context" shape
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git show produces JSON with snapshots key
     Given a fixture git repository with two commits
     When I run the shim as "git show HEAD" with CLAUDECODE=1
@@ -78,7 +78,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "snapshots" key
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git blame produces JSON with snapshots key
     Given a fixture git repository with two commits and a tracked file
     When I run the shim as "git blame README.md" with CLAUDECODE=1
@@ -86,7 +86,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "snapshots" key
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git status passes through to real git output
     Given a fixture git repository with two commits
     When I run the shim as "git status" with CLAUDECODE=1
@@ -94,7 +94,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is not JSON
     And the output contains "On branch"
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git commit passes through and creates a real commit
     Given a fixture git repository with two commits and a staged file
     When I run the shim as "git commit -m shim-test" with CLAUDECODE=1
@@ -102,7 +102,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is not JSON
     And the new commit exists in the repository
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git diff without ref range passes through as raw diff
     Given a fixture git repository with an unstaged modification
     When I run the shim as "git diff" with CLAUDECODE=1
@@ -110,7 +110,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is not JSON
     And the output contains "diff --git"
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git diff with single ref and no range passes through
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1" with CLAUDECODE=1
@@ -118,14 +118,14 @@ Feature: PATH-shim wrapper for structured git output
     And the output is not JSON
     And the output contains "diff --git"
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Agent plus git log without ref range passes through as raw log
     Given a fixture git repository with two commits
     When I run the shim as "git log --oneline" with CLAUDECODE=1
     Then the exit code is 0
     And the output is not JSON
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Non-agent invocation of git diff with range passes through as raw diff
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1..HEAD" without any agent env vars
@@ -133,7 +133,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is not JSON
     And the output contains "diff --git"
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Sentinel env var GIT_PRISM_INSIDE_SHIM causes passthrough even with agent flag
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1..HEAD" with CLAUDECODE=1 and GIT_PRISM_INSIDE_SHIM=1
@@ -141,7 +141,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output is not JSON
     And the output contains "diff --git"
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-287
   Scenario: Shim sets GIT_PRISM_INSIDE_SHIM=1 in the child process environment
     # Verifies the sentinel propagation: the real git invoked by the shim
     # must run with GIT_PRISM_INSIDE_SHIM=1 set so nested git calls inside
@@ -151,11 +151,16 @@ Feature: PATH-shim wrapper for structured git output
     When I run the shim as "git" pointing at the env-dumper with CLAUDECODE=1
     Then the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"
 
-  @ISSUE-287 @not_implemented
+  @ISSUE-299 @not_implemented
   Scenario: Real-git resolver skips the shim directory when walking PATH
     # The shim binary lives in tmpdir/bin. The resolver must skip that
     # directory and find the system git elsewhere in PATH. Without this
     # guard, the shim would exec itself in an infinite loop.
+    #
+    # The resolver logic itself is unit-tested in src/shim/real_git.rs.
+    # This integration assertion requires #299 (a --debug-resolver
+    # flag that prints the resolved path to stderr) — until then this
+    # scenario stays @not_implemented.
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1..HEAD" without any agent env vars
     Then the resolved real-git binary path does not live in the shim directory
