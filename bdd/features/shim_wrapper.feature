@@ -151,11 +151,16 @@ Feature: PATH-shim wrapper for structured git output
     When I run the shim as "git" pointing at the env-dumper with CLAUDECODE=1
     Then the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"
 
-  @ISSUE-287
+  @ISSUE-299 @not_implemented
   Scenario: Real-git resolver skips the shim directory when walking PATH
     # The shim binary lives in tmpdir/bin. The resolver must skip that
     # directory and find the system git elsewhere in PATH. Without this
     # guard, the shim would exec itself in an infinite loop.
+    #
+    # The resolver logic itself is unit-tested in src/shim/real_git.rs.
+    # This integration assertion requires #299 (a --debug-resolver
+    # flag that prints the resolved path to stderr) — until then this
+    # scenario stays @not_implemented.
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1..HEAD" without any agent env vars
     Then the resolved real-git binary path does not live in the shim directory
