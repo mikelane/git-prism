@@ -1322,7 +1322,11 @@ mod tests {
         install_path_shim(home).unwrap();
 
         let link = home.join(".local/share/git-prism/bin/git");
-        assert!(link.is_symlink(), "expected a symlink at {}", link.display());
+        assert!(
+            link.is_symlink(),
+            "expected a symlink at {}",
+            link.display()
+        );
     }
 
     #[test]
@@ -1335,7 +1339,10 @@ mod tests {
         install_path_shim(home).unwrap();
 
         let link = home.join(".local/share/git-prism/bin/git");
-        assert!(link.is_symlink(), "symlink must still exist after second install");
+        assert!(
+            link.is_symlink(),
+            "symlink must still exist after second install"
+        );
     }
 
     #[test]
@@ -1353,7 +1360,10 @@ mod tests {
         // install_path_shim must replace the stale symlink without error.
         install_path_shim(home).unwrap();
 
-        assert!(link.is_symlink(), "symlink must exist after replacing stale link");
+        assert!(
+            link.is_symlink(),
+            "symlink must exist after replacing stale link"
+        );
         // The new target must NOT be the stale path.
         let target = std::fs::read_link(&link).unwrap();
         assert_ne!(
