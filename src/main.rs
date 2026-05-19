@@ -115,21 +115,27 @@ enum Commands {
 enum HooksCommands {
     /// Install the bundled redirect hook into Claude Code's settings
     Install {
-        /// Where to install the hook
+        /// Where to install the hook (required unless --path-shim is set)
         #[arg(long, value_parser = ["user", "project", "local"])]
-        scope: String,
+        scope: Option<String>,
         /// Print the would-be settings JSON without writing anything
         #[arg(long)]
         dry_run: bool,
         /// Overwrite a user-edited entry in place
         #[arg(long)]
         force: bool,
+        /// Install the PATH shim: create ~/.local/share/git-prism/bin/git symlink
+        #[arg(long)]
+        path_shim: bool,
     },
     /// Remove redirect-hook entries written by this binary
     Uninstall {
-        /// Which scope to clean up
+        /// Which scope to clean up (required unless --path-shim is set)
         #[arg(long, value_parser = ["user", "project", "local"])]
-        scope: String,
+        scope: Option<String>,
+        /// Remove the PATH shim symlink (~/.local/share/git-prism/bin/git)
+        #[arg(long)]
+        path_shim: bool,
     },
     /// Report which scopes have the redirect hook installed
     Status,
@@ -148,30 +154,55 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             scope,
             dry_run,
             force,
+            path_shim,
         } => {
-            let scope = hooks::Scope::parse(&scope)?;
-            let options = hooks::InstallOptions {
-                scope,
-                dry_run,
-                force,
-            };
-            let mut stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut stdout_lock = stdout.lock();
-            let mut stderr_lock = stderr.lock();
-            hooks::install_redirect_hook(
-                &options,
-                &home,
-                &cwd,
-                &mut stdin,
-                &mut stdout_lock,
-                &mut stderr_lock,
-            )
+            if scope.is_none() && !path_shim {
+                anyhow::bail!("--scope is required unless --path-shim is set");
+            }
+            if let Some(scope_str) = scope {
+                let scope = hooks::Scope::parse(&scope_str)?;
+                let options = hooks::InstallOptions {
+                    scope,
+                    dry_run,
+                    force,
+                };
+                let mut stdin = std::io::stdin();
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut stdout_lock = stdout.lock();
+                let mut stderr_lock = stderr.lock();
+                let code = hooks::install_redirect_hook(
+                    &options,
+                    &home,
+                    &cwd,
+                    &mut stdin,
+                    &mut stdout_lock,
+                    &mut stderr_lock,
+                )?;
+                if code != 0 {
+                    return Ok(code);
+                }
+            }
+            if path_shim {
+                let symlink_path = hooks::install_path_shim(&home)?;
+                println!(
+                    "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
+                );
+                let _ = symlink_path;
+            }
+            Ok(0)
         }
-        HooksCommands::Uninstall { scope } => {
-            let scope = hooks::Scope::parse(&scope)?;
-            hooks::uninstall_redirect_hook(scope, &home, &cwd)?;
+        HooksCommands::Uninstall { scope, path_shim } => {
+            if scope.is_none() && !path_shim {
+                anyhow::bail!("--scope is required unless --path-shim is set");
+            }
+            if let Some(scope_str) = scope {
+                let scope = hooks::Scope::parse(&scope_str)?;
+                hooks::uninstall_redirect_hook(scope, &home, &cwd)?;
+            }
+            if path_shim {
+                hooks::uninstall_path_shim(&home)?;
+            }
             Ok(0)
         }
         HooksCommands::Status => {
@@ -179,6 +210,18 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             let report = hooks::status_report(&home, &cwd, cwd_is_repo)?;
             for line in &report.lines {
                 println!("{line}");
+            }
+            let shim_status = hooks::path_shim_status(&home);
+            match shim_status {
+                hooks::PathShimStatus::Installed { target } => {
+                    println!("path-shim: installed @ {}", target.display());
+                }
+                hooks::PathShimStatus::NotInstalled => {
+                    println!("path-shim: not installed");
+                }
+                hooks::PathShimStatus::BrokenLink { reason } => {
+                    println!("path-shim: broken link ({reason})");
+                }
             }
             Ok(0)
         }
