@@ -173,14 +173,14 @@ Feature: PATH-shim wrapper for structured git output
   # Operations use a tempdir HOME for isolation.
   # -------------------------------------------------------------------------
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks install --path-shim creates the symlink in an isolated HOME
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
     And the path "$HOME/.local/share/git-prism/bin/git" is a symlink
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks install --path-shim prints the PATH update instruction
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
@@ -188,7 +188,7 @@ Feature: PATH-shim wrapper for structured git output
     And the output contains "PATH"
     And the output contains ".local/share/git-prism/bin"
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks install --path-shim is idempotent
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
@@ -196,7 +196,7 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the path "$HOME/.local/share/git-prism/bin/git" is a symlink
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks status reports path-shim as present after install
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
@@ -204,14 +204,14 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the hooks status output mentions "path-shim"
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks status reports path-shim as absent before install
     Given an isolated HOME directory
     When I run "git-prism hooks status" with the isolated HOME
     Then the exit code is 0
     And the hooks status output indicates path-shim is not installed
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks uninstall --path-shim removes the symlink
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
@@ -219,7 +219,7 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the path "$HOME/.local/share/git-prism/bin/git" does not exist
 
-  @ISSUE-288 @not_implemented
+  @ISSUE-288
   Scenario: hooks uninstall --path-shim removes the parent directory when empty
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
