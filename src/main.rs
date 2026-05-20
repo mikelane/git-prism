@@ -121,7 +121,8 @@ enum HooksCommands {
         /// Print the would-be settings JSON without writing anything
         #[arg(long)]
         dry_run: bool,
-        /// Overwrite a user-edited entry in place
+        /// Overwrite a user-edited entry in place; also allows overwriting a
+        /// pre-existing regular file at the path-shim target (use with caution)
         #[arg(long)]
         force: bool,
         /// Install the PATH shim: create ~/.local/share/git-prism/bin/git symlink
@@ -184,7 +185,7 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 }
             }
             if path_shim {
-                let symlink_path = hooks::install_path_shim(&home)?;
+                let symlink_path = hooks::install_path_shim(&home, force)?;
                 println!(
                     "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
                 );
