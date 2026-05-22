@@ -14,6 +14,13 @@ pub(crate) trait RealGitExec {
     /// (argv[0] should be `"git"`).  Returns `ExitCode` only when exec
     /// failed (in production this never returns on success).
     fn passthrough(&self, argv: &[&str]) -> ExitCode;
+
+    /// Run the real git binary with `argv` and return the stdout byte length.
+    ///
+    /// Used by the opt-in shadow-run path for token-savings instrumentation.
+    /// The stdout buffer is dropped immediately after measuring — callers
+    /// must not rely on its contents.
+    fn capture(&self, argv: &[&str]) -> Result<usize, String>;
 }
 
 /// Production implementation that walks `$PATH` to find the real git binary
@@ -40,6 +47,21 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         let err = cmd.exec(); // never returns on success
         eprintln!("git-prism shim: exec failed: {err}");
         ExitCode::from(127)
+    }
+
+    fn capture(&self, argv: &[&str]) -> Result<usize, String> {
+        let real = match resolve_real_git(self.argv0, self.env) {
+            Some(p) => p,
+            None => return Err("could not find real git binary".to_string()),
+        };
+        // std::process::Command passes args as a slice — no shell involved,
+        // so there is no command-injection risk here.
+        let output = std::process::Command::new(&real)
+            .args(argv.iter().skip(1))
+            .env("GIT_PRISM_INSIDE_SHIM", "1")
+            .output()
+            .map_err(|e| format!("failed to spawn git: {e}"))?;
+        Ok(output.stdout.len())
     }
 }
 

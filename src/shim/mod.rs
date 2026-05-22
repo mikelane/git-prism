@@ -8,11 +8,13 @@
 pub(crate) mod classify;
 pub(crate) mod handlers;
 pub(crate) mod real_git;
+pub(crate) mod shadow;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
+use crate::metrics::{ShimOutcome, ShimSubcommand};
 use crate::shim::classify::{Classification, classify};
 use crate::shim::real_git::RealGitExec;
 
@@ -24,29 +26,68 @@ use crate::shim::real_git::RealGitExec;
 /// 3. `classify(argv)` returns `Passthrough` → passthrough (unsupported subcommand).
 /// 4. Otherwise → call the appropriate handler and return structured JSON.
 pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exec: &G) -> ExitCode {
+    let metrics = crate::metrics::get();
+
     // 1. Loop-break sentinel: a nested git call from within the shim.
     if env.get("GIT_PRISM_INSIDE_SHIM").is_some() {
+        metrics.record_shim_invocation(ShimOutcome::LoopBreak);
         return exec.passthrough(argv);
     }
 
     // 2. Only intercept when an AI agent is the caller.
     if crate::agent_detection::detect_calling_agent(env).is_none() {
+        metrics.record_shim_invocation(ShimOutcome::NoAgent);
         return exec.passthrough(argv);
     }
 
     // 3. Classify the subcommand.
     let classification = classify(argv);
+    let subcommand = classification_to_subcommand(&classification);
     if classification == Classification::Passthrough {
+        metrics.record_shim_invocation(ShimOutcome::Passthrough);
         return exec.passthrough(argv);
     }
+
+    // Record classification metric before dispatching.
+    metrics.record_shim_classification(subcommand);
 
     // 4. Dispatch to the handler.
     let repo_path = match resolve_repo_path(env) {
         Some(p) => p,
-        None => return exec.passthrough(argv),
+        None => {
+            metrics.record_shim_invocation(ShimOutcome::Passthrough);
+            return exec.passthrough(argv);
+        }
     };
-    let mut stdout = std::io::stdout();
-    handlers::handle(&classification, &repo_path, &mut stdout)
+    let mut out_buf = Vec::new();
+    let code = handlers::handle(&classification, &repo_path, &mut out_buf);
+
+    // Emit response bytes metric before flushing so the count is always recorded.
+    metrics.record_shim_invocation(ShimOutcome::Structured);
+    metrics.record_shim_response_bytes(out_buf.len() as u64);
+
+    // Flush the buffered response to stdout.
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(&out_buf);
+
+    // Shadow run happens AFTER the response is flushed — agent latency is unaffected.
+    shadow::maybe_shadow_capture(env, subcommand, argv, exec);
+
+    code
+}
+
+/// Map a `Classification` variant to the bounded `ShimSubcommand` label used
+/// in metrics.  `Passthrough` has no meaningful subcommand, so it folds to
+/// `Other`.
+fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
+    match c {
+        Classification::Manifest { .. } => ShimSubcommand::Diff,
+        Classification::History { .. } => ShimSubcommand::Log,
+        Classification::FunctionContext { .. } => ShimSubcommand::Log,
+        Classification::ShowSnapshot { .. } => ShimSubcommand::Show,
+        Classification::BlameSnapshot { .. } => ShimSubcommand::Blame,
+        Classification::Passthrough => ShimSubcommand::Other,
+    }
 }
 
 /// Return the repository path from `$GIT_PRISM_REPO` if set, otherwise use
@@ -104,6 +145,10 @@ mod tests {
         fn passthrough(&self, _argv: &[&str]) -> ExitCode {
             self.called.set(true);
             self.exit_code
+        }
+
+        fn capture(&self, _argv: &[&str]) -> Result<usize, String> {
+            Ok(0)
         }
     }
 
