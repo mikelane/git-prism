@@ -56,9 +56,6 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exe
         return exec.passthrough(argv);
     }
 
-    // Record classification metric before dispatching.
-    metrics.record_shim_classification(subcommand);
-
     // 4. Dispatch to the handler.
     let repo_path = match resolve_repo_path(env) {
         Some(p) => p,
@@ -67,6 +64,8 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exe
             return exec.passthrough(argv);
         }
     };
+    // Only record classification once we are committed to structured dispatch.
+    metrics.record_shim_classification(subcommand);
     let mut out_buf = Vec::new();
     let code = handlers::handle(&classification, &repo_path, &mut out_buf);
 
@@ -93,7 +92,7 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
     match c {
         Classification::Manifest { .. } => ShimSubcommand::Diff,
         Classification::History { .. } => ShimSubcommand::Log,
-        Classification::FunctionContext { .. } => ShimSubcommand::Log,
+        Classification::FunctionContext { .. } => ShimSubcommand::Log, // git log -S/-G is still log
         Classification::ShowSnapshot { .. } => ShimSubcommand::Show,
         Classification::BlameSnapshot { .. } => ShimSubcommand::Blame,
         Classification::Passthrough => ShimSubcommand::Other,
