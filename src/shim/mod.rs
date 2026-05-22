@@ -76,7 +76,9 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exe
 
     // Flush the buffered response to stdout.
     use std::io::Write;
-    let _ = std::io::stdout().write_all(&out_buf);
+    if let Err(e) = std::io::stdout().write_all(&out_buf) {
+        tracing::warn!(error = %e, "failed to write structured response to stdout");
+    }
 
     // Shadow run happens AFTER the response is flushed — agent latency is unaffected.
     shadow::maybe_shadow_capture(env, subcommand, argv, exec);
