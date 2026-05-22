@@ -155,7 +155,7 @@ mod tests {
             self.exit_code
         }
 
-        fn capture(&self, _argv: &[&str]) -> Result<usize, String> {
+        fn capture(&self, _argv: &[&str]) -> Result<usize, crate::shim::real_git::CaptureError> {
             Ok(0)
         }
     }

@@ -82,7 +82,7 @@ pub(crate) fn maybe_shadow_capture<E: EnvSource, G: RealGitExec>(
             metrics::get().record_shim_shadow_git_bytes(subcommand, bytes as u64);
         }
         Err(e) => {
-            tracing::warn!(error = %e, "shadow git capture failed");
+            tracing::debug!(error_kind = e.kind(), error = %e, "shadow git capture failed; metric not recorded");
         }
     }
 }
@@ -178,7 +178,7 @@ mod tests {
             std::process::ExitCode::SUCCESS
         }
 
-        fn capture(&self, _argv: &[&str]) -> Result<usize, String> {
+        fn capture(&self, _argv: &[&str]) -> Result<usize, crate::shim::real_git::CaptureError> {
             self.capture_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.stdout_len)
         }
