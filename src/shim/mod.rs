@@ -314,4 +314,38 @@ mod tests {
             "expected passthrough when current directory cannot be determined"
         );
     }
+
+    #[test]
+    fn classification_to_subcommand_maps_each_variant() {
+        use crate::shim::classify::Classification;
+        assert_eq!(
+            classification_to_subcommand(&Classification::Manifest { range: "x" }),
+            ShimSubcommand::Diff
+        );
+        assert_eq!(
+            classification_to_subcommand(&Classification::History { range: "x" }),
+            ShimSubcommand::Log
+        );
+        assert_eq!(
+            classification_to_subcommand(&Classification::FunctionContext {
+                range: None,
+                pickaxe_term: "x",
+            }),
+            ShimSubcommand::Log
+        );
+        assert_eq!(
+            classification_to_subcommand(&Classification::ShowSnapshot { sha: "abc1234" }),
+            ShimSubcommand::Show
+        );
+        assert_eq!(
+            classification_to_subcommand(&Classification::BlameSnapshot {
+                path: "src/main.rs"
+            }),
+            ShimSubcommand::Blame
+        );
+        assert_eq!(
+            classification_to_subcommand(&Classification::Passthrough),
+            ShimSubcommand::Other
+        );
+    }
 }
