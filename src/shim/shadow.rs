@@ -90,6 +90,7 @@ pub(crate) fn maybe_shadow_capture<E: EnvSource, G: RealGitExec>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -151,6 +152,72 @@ mod tests {
         assert_eq!(parse_sample_pct(&env_with("50")), 50);
         assert_eq!(parse_sample_pct(&env_with("1")), 1);
         assert_eq!(parse_sample_pct(&env_with("99")), 99);
+    }
+
+    // --- CountingExec spy for sampling tests ---
+
+    struct CountingExec {
+        capture_calls: AtomicUsize,
+        passthrough_calls: AtomicUsize,
+        stdout_len: usize,
+    }
+
+    impl CountingExec {
+        fn new(stdout_len: usize) -> Self {
+            Self {
+                capture_calls: AtomicUsize::new(0),
+                passthrough_calls: AtomicUsize::new(0),
+                stdout_len,
+            }
+        }
+    }
+
+    impl RealGitExec for CountingExec {
+        fn passthrough(&self, _argv: &[&str]) -> std::process::ExitCode {
+            self.passthrough_calls.fetch_add(1, Ordering::SeqCst);
+            std::process::ExitCode::SUCCESS
+        }
+
+        fn capture(&self, _argv: &[&str]) -> Result<usize, String> {
+            self.capture_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.stdout_len)
+        }
+    }
+
+    // --- AC-required sampling tests ---
+
+    #[test]
+    fn sample_pct_100_always_calls_capture() {
+        // SAMPLE_PCT=100 → capture() must be called on every invocation.
+        let env = env_with("100");
+        let exec = CountingExec::new(42);
+        maybe_shadow_capture(&env, ShimSubcommand::Diff, &["git", "diff"], &exec);
+        assert_eq!(
+            exec.capture_calls.load(Ordering::SeqCst),
+            1,
+            "SAMPLE_PCT=100 must call capture() exactly once"
+        );
+        assert_eq!(
+            exec.passthrough_calls.load(Ordering::SeqCst),
+            0,
+            "shadow path must not call passthrough()"
+        );
+    }
+
+    #[test]
+    fn sample_pct_0_never_calls_capture() {
+        // SAMPLE_PCT=0 (default) → capture() must never be called regardless
+        // of how many times maybe_shadow_capture is invoked.
+        let env = env_with("0");
+        let exec = CountingExec::new(42);
+        for _ in 0..100 {
+            maybe_shadow_capture(&env, ShimSubcommand::Diff, &["git", "diff"], &exec);
+        }
+        assert_eq!(
+            exec.capture_calls.load(Ordering::SeqCst),
+            0,
+            "SAMPLE_PCT=0 must never call capture()"
+        );
     }
 
     #[test]

@@ -373,6 +373,17 @@ impl Metrics {
     }
 }
 
+#[cfg(test)]
+impl Metrics {
+    /// Test-only constructor: creates a fresh `Metrics` from the no-op global
+    /// meter (no OTLP endpoint configured in unit tests).  Use this instead of
+    /// `get()` in tests so each test gets an isolated instance rather than
+    /// sharing the global singleton.
+    pub(crate) fn new_for_test() -> Self {
+        Self::new()
+    }
+}
+
 /// Global singleton accessor for the [`Metrics`] instance.
 ///
 /// The instruments are created from the global meter provider, which is either

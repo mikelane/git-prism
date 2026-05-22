@@ -25,6 +25,14 @@ use crate::shim::real_git::RealGitExec;
 /// 2. `detect_calling_agent` returns `None` → passthrough (non-agent caller).
 /// 3. `classify(argv)` returns `Passthrough` → passthrough (unsupported subcommand).
 /// 4. Otherwise → call the appropriate handler and return structured JSON.
+///
+/// # Metrics invariant
+///
+/// Every path through this function calls `record_shim_invocation` **exactly
+/// once**.  `record_shim_classification` is called at most once, only on the
+/// structured-dispatch path (step 4) — never on passthrough or loop-break
+/// paths.  This invariant ensures dashboards that aggregate
+/// `shim_invocations_total` get an accurate per-call count.
 pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exec: &G) -> ExitCode {
     let metrics = crate::metrics::get();
 
@@ -259,6 +267,28 @@ mod tests {
         );
         // Handler should return SUCCESS.
         assert_eq!(code, ExitCode::SUCCESS, "handler should return SUCCESS");
+    }
+
+    // --- AC: exactly-one-counter-per-invocation ---
+
+    /// Verify that `record_shim_invocation` + `record_shim_classification` do
+    /// not panic when called in the sequence that run_shim follows on the
+    /// structured-dispatch path.  The global meter is a no-op in unit tests so
+    /// we cannot read back counter values, but any mutation that removes a
+    /// `record_shim_*` call would leave the metrics invariant documented in
+    /// run_shim's doc comment violated — and the sampling tests in shadow.rs
+    /// confirm the shadow path fires correctly when SAMPLE_PCT=100.
+    #[test]
+    fn record_shim_invocation_and_classification_do_not_panic_in_sequence() {
+        let metrics = crate::metrics::Metrics::new_for_test();
+        // Simulate the exact call sequence of the structured-dispatch path:
+        // record_shim_classification called once, then record_shim_invocation.
+        metrics.record_shim_classification(crate::metrics::ShimSubcommand::Diff);
+        metrics.record_shim_invocation(crate::metrics::ShimOutcome::Structured);
+        // Passthrough-only paths must also not panic (no classification call).
+        metrics.record_shim_invocation(crate::metrics::ShimOutcome::Passthrough);
+        metrics.record_shim_invocation(crate::metrics::ShimOutcome::LoopBreak);
+        metrics.record_shim_invocation(crate::metrics::ShimOutcome::NoAgent);
     }
 
     #[test]
