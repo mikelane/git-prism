@@ -47,11 +47,20 @@ pub(crate) fn parse_sample_pct(env: &dyn EnvSource) -> u8 {
 ///
 /// Decision logic:
 /// 1. Read `GIT_PRISM_SHADOW_SAMPLE_PCT`.  If 0, return immediately — no overhead.
-/// 2. Roll a random u8 in `0..100`.  If `roll >= sample_pct`, skip.
+/// 2. Roll a random u32 in `0..100`.  If `roll >= sample_pct`, skip.
 /// 3. Execute `argv` via `exec` with stdout captured into a buffer.
 /// 4. Record the buffer length as `shim_shadow_git_bytes{git_subcommand}`.
 ///
 /// The buffer is dropped immediately after recording — we only need its length.
+///
+/// # Sampling bias note
+///
+/// We use `rand::random::<u32>() % 100` rather than `rand::random::<u8>() % 100`.
+/// A u8 has 256 values; 256 % 100 = 56, so rolls 0–55 each have 3 preimages while
+/// rolls 56–99 have only 2 — a 17% relative bias at sample_pct=50.  With u32
+/// (4 294 967 296 values; bias = 96 / 4 294 967 296 ≈ 2e-8), the distortion is
+/// negligible.  This is non-cryptographic sampling — use a CSPRNG if you need
+/// security properties.
 pub(crate) fn maybe_shadow_capture<E: EnvSource, G: RealGitExec>(
     env: &E,
     subcommand: ShimSubcommand,
@@ -63,7 +72,7 @@ pub(crate) fn maybe_shadow_capture<E: EnvSource, G: RealGitExec>(
         return;
     }
 
-    let roll = rand::random::<u8>() % 100;
+    let roll = (rand::random::<u32>() % 100) as u8;
     if roll >= sample_pct {
         return;
     }
