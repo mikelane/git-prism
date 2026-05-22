@@ -25,8 +25,14 @@ pub(crate) fn parse_sample_pct(env: &dyn EnvSource) -> u8 {
         Some(s) if s.is_empty() => return 0,
         Some(s) => s,
     };
-    match s.parse::<i64>() {
+    let s_trimmed = s.trim();
+    if s_trimmed.is_empty() {
+        return 0;
+    }
+    match s_trimmed.parse::<i64>() {
         Ok(n) => n.clamp(0, 100) as u8,
+        Err(e) if matches!(e.kind(), std::num::IntErrorKind::PosOverflow) => 100,
+        Err(e) if matches!(e.kind(), std::num::IntErrorKind::NegOverflow) => 0,
         Err(_) => {
             tracing::warn!(
                 value = %s,
@@ -136,5 +142,26 @@ mod tests {
         assert_eq!(parse_sample_pct(&env_with("50")), 50);
         assert_eq!(parse_sample_pct(&env_with("1")), 1);
         assert_eq!(parse_sample_pct(&env_with("99")), 99);
+    }
+
+    #[test]
+    fn overflow_value_clamps_to_hundred() {
+        assert_eq!(parse_sample_pct(&env_with("99999999999999999999999")), 100);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        assert_eq!(parse_sample_pct(&env_with(" 50 ")), 50);
+    }
+
+    #[test]
+    fn decimal_value_returns_zero() {
+        // Decimal is unparseable as integer — disable (don't accept fractional pct)
+        assert_eq!(parse_sample_pct(&env_with("50.5")), 0);
+    }
+
+    #[test]
+    fn whitespace_only_returns_zero() {
+        assert_eq!(parse_sample_pct(&env_with("   ")), 0);
     }
 }
