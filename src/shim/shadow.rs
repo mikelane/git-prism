@@ -245,4 +245,28 @@ mod tests {
     fn whitespace_only_returns_zero() {
         assert_eq!(parse_sample_pct(&env_with("   ")), 0);
     }
+
+    // --- FailingCapture — error path must not panic ---
+
+    struct FailingCapture;
+
+    impl RealGitExec for FailingCapture {
+        fn passthrough(&self, _argv: &[&str]) -> std::process::ExitCode {
+            std::process::ExitCode::SUCCESS
+        }
+
+        fn capture(&self, _argv: &[&str]) -> Result<usize, crate::shim::real_git::CaptureError> {
+            Err(crate::shim::real_git::CaptureError::Spawn(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "fake spawn failure"),
+            ))
+        }
+    }
+
+    #[test]
+    fn it_does_not_panic_when_shadow_capture_fails() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_SHADOW_SAMPLE_PCT", "100")]));
+        let exec = FailingCapture;
+        // This must not panic — failure path is debug-log + continue
+        maybe_shadow_capture(&env, ShimSubcommand::Diff, &["git", "diff"], &exec);
+    }
 }
