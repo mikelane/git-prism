@@ -25,7 +25,12 @@ _SHIM_TIMEOUT_SECONDS: float = 30.0
 
 # Agent-related environment variables that must be stripped before each
 # scenario so the host shell's own agent environment cannot bleed in.
+# CI is included because detect_calling_agent() treats any non-empty CI value
+# as a global override that suppresses agent detection (returns None). GitHub
+# Actions sets CI=true on every job, which would make every shim scenario fall
+# through to passthrough instead of routing to structured JSON output.
 _AGENT_ENV_VARS: tuple[str, ...] = (
+    "CI",
     "CLAUDECODE",
     "AI_AGENT",
     "AGENT",
