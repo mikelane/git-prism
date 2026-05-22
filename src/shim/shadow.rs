@@ -226,6 +226,11 @@ mod tests {
     }
 
     #[test]
+    fn it_clamps_negative_overflow_to_zero() {
+        assert_eq!(parse_sample_pct(&env_with("-99999999999999999999999")), 0);
+    }
+
+    #[test]
     fn surrounding_whitespace_is_trimmed() {
         assert_eq!(parse_sample_pct(&env_with(" 50 ")), 50);
     }
