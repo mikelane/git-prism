@@ -8,12 +8,37 @@ use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
 
+/// Errors returned by [`RealGitExec::capture`].
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CaptureError {
+    #[error("could not find real git binary")]
+    RealGitNotFound,
+    #[error("failed to spawn git: {0}")]
+    Spawn(#[from] std::io::Error),
+}
+
+impl CaptureError {
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::RealGitNotFound => "git_not_found",
+            Self::Spawn(_) => "spawn_failed",
+        }
+    }
+}
+
 /// Abstracts exec-ing the real git binary.
 pub(crate) trait RealGitExec {
     /// Replace the current process with the real git binary, passing `argv`
     /// (argv[0] should be `"git"`).  Returns `ExitCode` only when exec
     /// failed (in production this never returns on success).
     fn passthrough(&self, argv: &[&str]) -> ExitCode;
+
+    /// Run the real git binary with `argv` and return the stdout byte length.
+    ///
+    /// Used by the opt-in shadow-run path for token-savings instrumentation.
+    /// The stdout buffer is dropped immediately after measuring — callers
+    /// must not rely on its contents.
+    fn capture(&self, argv: &[&str]) -> Result<usize, CaptureError>;
 }
 
 /// Production implementation that walks `$PATH` to find the real git binary
@@ -40,6 +65,17 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         let err = cmd.exec(); // never returns on success
         eprintln!("git-prism shim: exec failed: {err}");
         ExitCode::from(127)
+    }
+
+    fn capture(&self, argv: &[&str]) -> Result<usize, CaptureError> {
+        let real = resolve_real_git(self.argv0, self.env).ok_or(CaptureError::RealGitNotFound)?;
+        // std::process::Command passes args as a slice — no shell involved,
+        // so there is no command-injection risk here.
+        let output = std::process::Command::new(&real)
+            .args(argv.iter().skip(1))
+            .env("GIT_PRISM_INSIDE_SHIM", "1")
+            .output()?;
+        Ok(output.stdout.len())
     }
 }
 

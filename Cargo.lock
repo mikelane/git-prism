@@ -660,6 +660,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rand",
  "rmcp",
  "schemars",
  "serde",

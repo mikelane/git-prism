@@ -3,6 +3,61 @@ use std::sync::OnceLock;
 use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::{KeyValue, global};
 
+/// Outcome label values for `shim_invocations_total`.
+///
+/// Each variant maps to a stable, bounded string used as an OTel attribute
+/// value — no heap allocation per invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShimOutcome {
+    /// The shim returned structured JSON to the agent.
+    Structured,
+    /// The shim passed the command through to real git (unrecognised subcommand).
+    Passthrough,
+    /// The shim detected the loop-break sentinel and passed through immediately.
+    LoopBreak,
+    /// No agent environment variable was detected; passed through without intercepting.
+    NoAgent,
+}
+
+impl ShimOutcome {
+    /// Returns the fixed OTel attribute string for this outcome.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Structured => "structured",
+            Self::Passthrough => "passthrough",
+            Self::LoopBreak => "loop_break",
+            Self::NoAgent => "no_agent",
+        }
+    }
+}
+
+/// Subcommand label values for `shim_classification_total` and
+/// `shim_shadow_git_bytes`.
+///
+/// Cardinality is bounded by construction — all unrecognised subcommands fold
+/// into `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShimSubcommand {
+    Diff,
+    Log,
+    Show,
+    Blame,
+    Other,
+}
+
+impl ShimSubcommand {
+    /// Returns the fixed OTel attribute string for this subcommand.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Diff => "diff",
+            Self::Log => "log",
+            Self::Show => "show",
+            Self::Blame => "blame",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Histogram bucket boundaries for duration measurements (milliseconds).
 const DURATION_BUCKETS: &[f64] = &[
     1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0,
@@ -47,6 +102,12 @@ pub struct Metrics {
     response_bytes: Histogram<f64>,
     manifest_files_returned: Histogram<f64>,
     manifest_functions_changed: Histogram<f64>,
+
+    // Shim counters
+    shim_invocations_total: Counter<u64>,
+    shim_classification_total: Counter<u64>,
+    shim_response_bytes: Counter<u64>,
+    shim_shadow_git_bytes: Counter<u64>,
 }
 
 impl Metrics {
@@ -136,6 +197,28 @@ impl Metrics {
             .with_boundaries(DURATION_BUCKETS.to_vec())
             .build();
 
+        let shim_invocations_total = meter
+            .u64_counter("git_prism.shim.invocations_total")
+            .with_description("Shim invocation counts by outcome")
+            .build();
+
+        let shim_classification_total = meter
+            .u64_counter("git_prism.shim.classification_total")
+            .with_description("Shim classification counts by git subcommand (agent paths only)")
+            .build();
+
+        let shim_response_bytes = meter
+            .u64_counter("git_prism.shim.response_bytes")
+            .with_description("Byte length of structured JSON returned to the agent by the shim")
+            .build();
+
+        let shim_shadow_git_bytes = meter
+            .u64_counter("git_prism.shim.shadow_git_bytes")
+            .with_description(
+                "Byte length of raw git output captured by shadow runs (opt-in sampling)",
+            )
+            .build();
+
         Self {
             sessions_started,
             requests_total,
@@ -152,6 +235,10 @@ impl Metrics {
             manifest_functions_changed,
             gix_operation_ms,
             treesitter_parse_ms,
+            shim_invocations_total,
+            shim_classification_total,
+            shim_response_bytes,
+            shim_shadow_git_bytes,
         }
     }
 
@@ -255,6 +342,46 @@ impl Metrics {
             &[KeyValue::new("language", language.to_string())],
         );
     }
+
+    /// Increment the shim invocation counter for the given outcome.
+    pub fn record_shim_invocation(&self, outcome: ShimOutcome) {
+        self.shim_invocations_total
+            .add(1, &[KeyValue::new("outcome", outcome.as_str())]);
+    }
+
+    /// Increment the shim classification counter for the given git subcommand.
+    ///
+    /// Call only on agent-detected paths after classification — not on
+    /// passthrough or loop-break paths.
+    pub fn record_shim_classification(&self, subcommand: ShimSubcommand) {
+        self.shim_classification_total
+            .add(1, &[KeyValue::new("git_subcommand", subcommand.as_str())]);
+    }
+
+    /// Record the byte length of a structured JSON response emitted by the shim.
+    pub fn record_shim_response_bytes(&self, bytes: u64) {
+        self.shim_response_bytes
+            .add(bytes, &[KeyValue::new("outcome", "structured")]);
+    }
+
+    /// Record the byte length of raw git output from an opt-in shadow run.
+    pub fn record_shim_shadow_git_bytes(&self, subcommand: ShimSubcommand, bytes: u64) {
+        self.shim_shadow_git_bytes.add(
+            bytes,
+            &[KeyValue::new("git_subcommand", subcommand.as_str())],
+        );
+    }
+}
+
+#[cfg(test)]
+impl Metrics {
+    /// Test-only constructor: creates a fresh `Metrics` from the no-op global
+    /// meter (no OTLP endpoint configured in unit tests).  Use this instead of
+    /// `get()` in tests so each test gets an isolated instance rather than
+    /// sharing the global singleton.
+    pub(crate) fn new_for_test() -> Self {
+        Self::new()
+    }
 }
 
 /// Global singleton accessor for the [`Metrics`] instance.
@@ -339,6 +466,23 @@ mod tests {
         ] {
             metrics.record_error("test_tool", kind);
         }
+    }
+
+    #[test]
+    fn shim_outcome_variants_map_to_stable_string_labels() {
+        assert_eq!(ShimOutcome::Structured.as_str(), "structured");
+        assert_eq!(ShimOutcome::Passthrough.as_str(), "passthrough");
+        assert_eq!(ShimOutcome::LoopBreak.as_str(), "loop_break");
+        assert_eq!(ShimOutcome::NoAgent.as_str(), "no_agent");
+    }
+
+    #[test]
+    fn shim_subcommand_variants_map_to_stable_string_labels() {
+        assert_eq!(ShimSubcommand::Diff.as_str(), "diff");
+        assert_eq!(ShimSubcommand::Log.as_str(), "log");
+        assert_eq!(ShimSubcommand::Show.as_str(), "show");
+        assert_eq!(ShimSubcommand::Blame.as_str(), "blame");
+        assert_eq!(ShimSubcommand::Other.as_str(), "other");
     }
 
     #[test]
