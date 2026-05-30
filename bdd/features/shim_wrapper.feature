@@ -151,7 +151,7 @@ Feature: PATH-shim wrapper for structured git output
     When I run the shim as "git" pointing at the env-dumper with CLAUDECODE=1
     Then the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"
 
-  @ISSUE-299 @not_implemented
+  @ISSUE-299
   Scenario: Real-git resolver skips the shim directory when walking PATH
     # The shim binary lives in tmpdir/bin. The resolver must skip that
     # directory and find the system git elsewhere in PATH. Without this
