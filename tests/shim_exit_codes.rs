@@ -48,3 +48,42 @@ fn it_exits_126_when_real_git_is_found_but_unexecutable() {
         "found-but-unexecutable real git must yield exit 126, not 127"
     );
 }
+
+/// Adversarial QA (issue #324, gate 3): `git-prism shim status` must report a
+/// dangling symlink (target no longer exists) as BROKEN, not "installed".
+///
+/// The `PathShimStatus::BrokenLink` variant and its doc comment promise exactly
+/// this. But `path_shim_status` uses `std::fs::read_link`, which SUCCEEDS on a
+/// dangling symlink (it only reads the link's textual target). So the canonical
+/// broken-link case is mis-classified as `Installed`. This drives the built
+/// binary end-to-end and currently FAILS.
+#[test]
+fn shim_status_reports_broken_for_dangling_symlink() {
+    let bin = env!("CARGO_BIN_EXE_git-prism");
+    let home = TempDir::new().unwrap();
+    let shim_dir = home.path().join(".local/share/git-prism/bin");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+
+    // A symlink whose target does not exist: the canonical "broken link".
+    symlink(
+        home.path().join("nonexistent-target-xyz"),
+        shim_dir.join("git"),
+    )
+    .unwrap();
+
+    let out = Command::new(bin)
+        .env("HOME", home.path())
+        .args(["shim", "status"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("broken"),
+        "dangling symlink must be reported as broken; got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("shim: installed"),
+        "dangling symlink must NOT be reported as installed; got: {stdout}"
+    );
+}
