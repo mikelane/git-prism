@@ -166,7 +166,7 @@ so you can confirm which `git` binary the shim is delegating to:
 
 ```bash
 GIT_PRISM_DEBUG_RESOLVER=1 git status
-# (stderr) git-prism: resolved real git -> /usr/bin/git
+# (stderr) git-prism shim: resolved real git to /usr/bin/git
 ```
 
 ### Coexisting with rtk
