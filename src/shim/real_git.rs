@@ -3,7 +3,9 @@
 //! Abstracts "find the real git binary and exec it" behind a trait so the
 //! shim's decision logic can be unit-tested with a fake implementation.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
@@ -179,6 +181,7 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    #[cfg(unix)]
     use std::fs;
 
     #[cfg(unix)]
@@ -205,6 +208,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     fn env_with_path(path_val: &str) -> MapEnv {
         MapEnv(HashMap::from([("PATH".to_string(), path_val.to_string())]))
     }
