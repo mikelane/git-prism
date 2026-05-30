@@ -67,8 +67,8 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
             cmd.args(argv.iter().skip(1)); // skip argv[0] ("git")
             cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
             let err = cmd.exec(); // never returns on success
-            eprintln!("git-prism shim: exec failed: {err}");
-            ExitCode::from(127)
+            eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
+            ExitCode::from(exec_failure_exit_code(&err))
         }
         #[cfg(not(unix))]
         {
@@ -87,6 +87,17 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
             .env("GIT_PRISM_INSIDE_SHIM", "1")
             .output()?;
         Ok(output.stdout.len())
+    }
+}
+
+/// Map an exec `io::Error` to the conventional shell exit code.
+///
+/// - 126: command found but not executable (`PermissionDenied`)
+/// - 127: command not found or other exec failure
+fn exec_failure_exit_code(err: &std::io::Error) -> u8 {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => 126,
+        _ => 127,
     }
 }
 
@@ -311,6 +322,25 @@ mod tests {
             Some(expected),
             "resolver must skip the shim symlink and return the real git binary"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_maps_permission_denied_to_exit_126() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(exec_failure_exit_code(&err), 126);
+    }
+
+    #[test]
+    fn it_maps_not_found_to_exit_127() {
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(exec_failure_exit_code(&err), 127);
+    }
+
+    #[test]
+    fn it_maps_other_errors_to_exit_127() {
+        let err = std::io::Error::from(std::io::ErrorKind::Other);
+        assert_eq!(exec_failure_exit_code(&err), 127);
     }
 
     #[cfg(unix)]
