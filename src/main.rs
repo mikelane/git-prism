@@ -262,7 +262,8 @@ async fn main() -> std::process::ExitCode {
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
-    if basename == "git" {
+    // Enter shim mode when invoked as "git" or "gh" (via a symlink).
+    if basename == "git" || basename == "gh" {
         let args: Vec<&str> = args_os.iter().filter_map(|s| s.to_str()).collect();
         let exec = shim::real_git::StdRealGitExec {
             env: &agent_detection::StdEnvSource,

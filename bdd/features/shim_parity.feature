@@ -79,7 +79,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
     Scenario: gh pr diff produces structured JSON when invoked via the shim
       Given the shim is installed with a "gh" symlink
       And a real gh binary is available on PATH
-      When an agent runs "gh pr diff 1" via the shim with CLAUDECODE=1
+      When an agent runs "gh pr diff 330" via the shim with CLAUDECODE=1
       Then the exit code is 0
       And the output is valid JSON
       And the JSON output has a "files" array
