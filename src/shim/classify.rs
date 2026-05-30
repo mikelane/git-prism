@@ -34,11 +34,17 @@ pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> Classification<'a> {
     if argv.len() < 2 {
         return Classification::Passthrough;
     }
-    let binary = argv[0];
+    // argv[0] may be an absolute path (e.g. /tmp/bin/gh) when invoked via a
+    // symlink; extract only the filename component for dispatch, matching what
+    // main.rs does for the shim-mode gate.
+    let binary_basename = std::path::Path::new(argv[0])
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(argv[0]);
     let subcommand = argv[1];
     let rest = &argv[2..];
 
-    match binary {
+    match binary_basename {
         "gh" => classify_gh(subcommand, rest),
         _ => classify_git(subcommand, rest),
     }
