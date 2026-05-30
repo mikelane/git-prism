@@ -248,8 +248,16 @@ def step_run_shim_with_both_flags(context: Context, command: str) -> None:
 
 @when('I run the shim as "{command}" without any agent env vars')
 def step_run_shim_no_agent_vars(context: Context, command: str) -> None:
-    """Invoke the shim with no agent env vars set (non-agent invocation)."""
-    _run_shim(context, _parse_shim_command(command), extra_env=None)
+    """Invoke the shim with no agent env vars set (non-agent invocation).
+
+    Always sets GIT_PRISM_DEBUG_RESOLVER=1 so the shim emits the resolved
+    real-git path to stderr, enabling the resolver-path assertions.
+    """
+    _run_shim(
+        context,
+        _parse_shim_command(command),
+        extra_env={"GIT_PRISM_DEBUG_RESOLVER": "1"},
+    )
 
 
 @when('I run the shim as "git" pointing at the env-dumper with CLAUDECODE=1')
@@ -479,15 +487,26 @@ def step_env_dumper_contains_sentinel(context: Context) -> None:
 def step_real_git_not_in_shim_dir(context: Context) -> None:
     """Assert the shim resolved real git to a path outside the shim directory.
 
-    NOTE: This assertion is a placeholder.  Verifying the resolved binary path
-    requires instrumentation that does not yet exist in the shim implementation.
-    Issue #286 should add a --debug-resolver flag that prints the resolved real-git
-    path to stderr; update this step when that lands.
+    Reads the 'resolved real git to <path>' line emitted by GIT_PRISM_DEBUG_RESOLVER
+    and asserts the resolved path is not inside context.shim_dir.
     """
-    raise AssertionError(
-        "real-git resolver introspection requires #286 instrumentation — "
-        "assertion deferred.  Add --debug-resolver to the shim (#286) that "
-        "prints the resolved real-git path to stderr, then update this step."
+    stderr = context.result.stderr
+    prefix = "git-prism shim: resolved real git to "
+    resolved_path = None
+    for line in stderr.splitlines():
+        if line.startswith(prefix):
+            resolved_path = Path(line[len(prefix):].strip())
+            break
+
+    assert resolved_path is not None, (
+        f"Expected 'resolved real git to <path>' in shim stderr but found none.\n"
+        f"stderr: {stderr}"
+    )
+
+    shim_dir = context.shim_dir
+    assert not str(resolved_path).startswith(str(shim_dir)), (
+        f"Resolved real git '{resolved_path}' lives inside the shim directory '{shim_dir}'. "
+        "The resolver must skip the shim dir and find git elsewhere."
     )
 
 
