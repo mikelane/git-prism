@@ -22,6 +22,7 @@ Platform note for @ISSUE-322:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -44,6 +45,26 @@ from shim_wrapper_steps import (
 
 _SHIM_DIR_RELATIVE = ".local/share/git-prism/bin"
 _SHIM_EXPORT_FRAGMENT = ".local/share/git-prism/bin"
+
+_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _install_stub_gh(context: Context, script: str) -> Path:
+    """Write a stub gh shell script into a fresh tempdir/bin and make it executable.
+
+    Returns the path to the stub binary.  Registers the tempdir for cleanup and
+    sets context.stub_gh_dir / context.stub_gh_path.
+    """
+    tmpdir = tempfile.mkdtemp()
+    context.cleanup_dirs.append(tmpdir)
+    stub_dir = Path(tmpdir) / "bin"
+    stub_dir.mkdir()
+    stub_path = stub_dir / "gh"
+    stub_path.write_text(script)
+    stub_path.chmod(stub_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    context.stub_gh_dir = stub_dir
+    context.stub_gh_path = stub_path
+    return stub_path
 
 
 def _run_binary(
@@ -164,24 +185,24 @@ def step_stub_gh_with_pr_shas(context: Context) -> None:
     context.fixture_base_sha = base_sha
     context.fixture_head_sha = head_sha
 
+    assert _SHA_PATTERN.fullmatch(base_sha), (
+        f"base_sha has unexpected shape (want 40 hex chars): {base_sha!r}"
+    )
+    assert _SHA_PATTERN.fullmatch(head_sha), (
+        f"head_sha has unexpected shape (want 40 hex chars): {head_sha!r}"
+    )
+
     stub_script = f"""\
 #!/bin/sh
 # Stub gh — hermetic, no network, no auth required.
 if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$4" = "--json" ]; then
-    printf '{{"baseRefOid":"{base_sha}","headRefOid":"{head_sha}"}}'
+    printf '%s' '{{"baseRefOid":"{base_sha}","headRefOid":"{head_sha}"}}'
     exit 0
 fi
-exit 0
+echo "stub gh: unhandled args: $*" >&2
+exit 64
 """
-    tmpdir = tempfile.mkdtemp()
-    context.cleanup_dirs.append(tmpdir)
-    stub_dir = Path(tmpdir) / "bin"
-    stub_dir.mkdir()
-    stub_path = stub_dir / "gh"
-    stub_path.write_text(stub_script)
-    stub_path.chmod(stub_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    context.stub_gh_dir = stub_dir
-    context.stub_gh_path = stub_path
+    _install_stub_gh(context, stub_script)
 
 
 @given("a stub gh binary is installed for passthrough comparison")
@@ -200,24 +221,17 @@ def step_stub_gh_for_passthrough(context: Context) -> None:
 #!/bin/sh
 # Stub gh for passthrough parity — canned output, no network.
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
-    printf '{"name":"stub-repo"}'
+    printf '%s' '{"name":"stub-repo"}'
     exit 0
 fi
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
-    printf '[]'
+    printf '%s' '[]'
     exit 0
 fi
-exit 0
+echo "stub gh: unhandled args: $*" >&2
+exit 64
 """
-    tmpdir = tempfile.mkdtemp()
-    context.cleanup_dirs.append(tmpdir)
-    stub_dir = Path(tmpdir) / "bin"
-    stub_dir.mkdir()
-    stub_path = stub_dir / "gh"
-    stub_path.write_text(stub_script)
-    stub_path.chmod(stub_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    context.stub_gh_dir = stub_dir
-    context.stub_gh_path = stub_path
+    _install_stub_gh(context, stub_script)
 
 
 @given("a real gh binary is available on PATH")

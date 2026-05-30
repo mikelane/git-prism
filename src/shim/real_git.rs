@@ -125,6 +125,8 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     }
 
     fn capture(&self, argv: &[&str]) -> Result<usize, CaptureError> {
+        // capture() is only used on the git shadow-run path (maybe_shadow_capture in shadow.rs).
+        // gh invocations never reach here; they are handled by handle_gh_pr_diff / passthrough.
         let real = resolve_real_git(self.argv0, self.env).ok_or(CaptureError::RealGitNotFound)?;
         // std::process::Command passes args as a slice — no shell involved,
         // so there is no command-injection risk here.

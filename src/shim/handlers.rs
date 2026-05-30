@@ -139,8 +139,8 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
 /// Handle `gh pr diff <N>` by resolving the PR's base..head ref range via the
 /// `gh` CLI, then feeding it through the existing manifest pipeline.
 ///
-/// Execs `gh pr view <N> --json baseRefName,headRefName` to obtain the branch
-/// names, then calls `handle_manifest` with `"base..head"`.
+/// Execs `gh pr view <N> --json baseRefOid,headRefOid` to obtain the commit
+/// SHAs, then calls `handle_manifest` with `"base_sha..head_sha"`.
 ///
 /// `repo_path` may be a subdirectory of the git repo (e.g. `bdd/`); this
 /// function discovers the actual git root before opening it, mirroring what
@@ -178,7 +178,7 @@ fn discover_git_root(start: &Path) -> anyhow::Result<std::path::PathBuf> {
 }
 
 /// Resolve a PR number to a `"base_sha..head_sha"` ref range string by
-/// calling `gh pr view <N> --json baseRefName,headRefName,baseRefOid,headRefOid`.
+/// calling `gh pr view <N> --json baseRefOid,headRefOid`.
 ///
 /// Uses commit SHAs (not branch names) so the range works even after the PR
 /// branch has been deleted (merged PRs).  The SHAs are permanent; branch names
