@@ -159,8 +159,7 @@ Feature: PATH-shim wrapper for structured git output
     #
     # The resolver logic itself is unit-tested in src/shim/real_git.rs.
     # This integration assertion requires #299 (a --debug-resolver
-    # flag that prints the resolved path to stderr) — until then this
-    # scenario stays @not_implemented.
+    # flag that prints the resolved path to stderr).
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1..HEAD" without any agent env vars
     Then the resolved real-git binary path does not live in the shim directory

@@ -78,6 +78,121 @@ git-prism hooks uninstall   # removes the hook file and settings.json entry
 git-prism hooks status      # shows whether the hook is installed and at which scope
 ```
 
+## PATH shim (experimental)
+
+> **Unix-only.** The shim relies on `execvp`-style process replacement that has no
+> clean Windows equivalent. `git-prism hooks install --path-shim` cleanly bails on
+> non-Unix platforms ("not supported on non-Unix platforms"), and the shim code
+> compiles as a no-op there. Everything below assumes macOS or Linux.
+
+### What it does and why
+
+The bundled redirect hook above only fires inside Claude Code's `PreToolUse`
+pipeline. Agents that shell out to `git` through other channels — a subprocess,
+a shell tool, a wrapper script — never hit it. The PATH shim closes that gap at
+the process level.
+
+When installed, `git-prism` is placed on your `PATH` as a binary literally named
+`git`, ahead of the real git. Every `git` invocation flows through git-prism
+first. The shim then decides, per command:
+
+- **AI agent + a watch-list subcommand with a ref range** → route to git-prism's
+  structured-JSON path (the same data the MCP tools return) instead of porcelain.
+  The watch list is `diff`, `log`, `show`, `blame`, and pickaxe forms
+  (`-S`/`-G`), but **only when a ref range is present** (e.g. `git diff main..HEAD`).
+- **Everything else** — humans, CI, non-agents, ref-range-less commands like
+  `git status` or a bare `git diff` — falls straight through to the real git
+  binary, unchanged.
+
+Agent detection reuses the env-var-only logic behind
+[`git-prism agent-detect`](#agent-detection): no agent signal (or `CI=true`)
+means vanilla git, always. The classifier and watch list live in
+[`src/shim/classify.rs`](src/shim/classify.rs); the real-git resolver that walks
+`PATH` (skipping the shim's own directory) lives in `src/shim/real_git.rs`.
+
+### Install
+
+```bash
+git-prism hooks install --path-shim
+```
+
+This creates a symlink at `~/.local/share/git-prism/bin/git` pointing at the
+git-prism binary and prints both the created path and the line to add to your
+shell profile:
+
+```
+Created symlink: /home/you/.local/share/git-prism/bin/git
+Add this to your shell profile (~/.bashrc, ~/.zshrc, ...):
+  export PATH="$HOME/.local/share/git-prism/bin:$PATH"
+```
+
+Add that `export` line to your shell profile so the shim directory precedes the
+real git on `PATH`, then open a new shell.
+
+### Smoke test
+
+```bash
+# 1. Install and wire up PATH
+git-prism hooks install --path-shim
+export PATH="$HOME/.local/share/git-prism/bin:$PATH"
+
+# 2. As a non-agent, you get vanilla git — passthrough
+git --version            # prints the real git version
+
+# 3. As an agent, a ref-range diff is intercepted and returns structured JSON
+AI_AGENT=smoke-test git diff HEAD~1..HEAD | head -c 80
+# => {"metadata":{ ... structured manifest ...
+
+# 4. A ref-range-less command always passes through, even for an agent
+AI_AGENT=smoke-test git status   # plain porcelain
+```
+
+### Escape hatch and loop prevention
+
+The shim sets `GIT_PRISM_INSIDE_SHIM=1` in every child process it spawns. When
+the shim sees that variable already set, it forces passthrough — so nested git
+calls (a `lefthook` pre-push hook, `cargo`'s internal git, a build script that
+shells out to git) never recurse back into the shim and loop. You can set it
+yourself to force vanilla git for one command:
+
+```bash
+GIT_PRISM_INSIDE_SHIM=1 git diff main..HEAD   # bypasses the shim
+```
+
+### Debugging
+
+Set `GIT_PRISM_DEBUG_RESOLVER=1` to print the resolved real-git path to stderr,
+so you can confirm which `git` binary the shim is delegating to:
+
+```bash
+GIT_PRISM_DEBUG_RESOLVER=1 git status
+# (stderr) git-prism shim: resolved real git to /usr/bin/git
+```
+
+### Coexisting with rtk
+
+If you use [rtk](https://github.com/rtk-rs) (or any tool that also wraps `git`
+on `PATH`), the two wrappers will fight over the same command. Tell rtk to leave
+`git` alone by adding it to rtk's exclude list in
+`~/Library/Application Support/rtk/config.toml`:
+
+```toml
+exclude_commands = ["git"]
+```
+
+### Uninstall
+
+```bash
+git-prism hooks uninstall --path-shim   # removes the symlink
+git-prism hooks status                  # reflects path-shim presence/absence
+```
+
+After uninstalling, remove the `export PATH=...` line you added to your shell
+profile.
+
+A narrated end-to-end walkthrough of the shim lives at
+[`demo/path-shim.mp4`](demo/path-shim.mp4).
+
 ## Agent detection
 
 ```bash
