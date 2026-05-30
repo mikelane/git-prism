@@ -53,9 +53,14 @@ pub fn run_install_with_io(
 }
 
 /// Return true if the shim directory string appears in the current `PATH` env var.
+/// Normalizes trailing slashes so a PATH entry like `/path/to/bin/` matches `/path/to/bin`.
 fn shim_dir_is_in_path(shim_dir: &str) -> bool {
     let path_env = std::env::var("PATH").unwrap_or_default();
-    path_env.split(':').any(|entry| entry == shim_dir)
+    let normalized_shim = shim_dir.trim_end_matches('/');
+    path_env.split(':').any(|entry| {
+        let normalized_entry = entry.trim_end_matches('/');
+        normalized_entry == normalized_shim
+    })
 }
 
 /// Prompt for PATH consent and act on the answer.
@@ -82,6 +87,7 @@ fn offer_path_setup(
 }
 
 /// Append the export line to the shell rc file, unless it is already present.
+/// Detects presence by matching the full export line (line-wise, ignoring comments).
 fn append_to_rc_idempotent(home: &std::path::Path, stdout: &mut dyn Write) -> Result<()> {
     let rc_path = detect_rc_file(home);
     let existing = if rc_path.exists() {
@@ -90,7 +96,13 @@ fn append_to_rc_idempotent(home: &std::path::Path, stdout: &mut dyn Write) -> Re
         String::new()
     };
 
-    if !existing.contains(SHIM_EXPORT_FRAGMENT) {
+    // Check if the full export line already exists (non-comment, trimmed match).
+    let export_line_already_present = existing.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && trimmed.trim() == SHIM_EXPORT_LINE.trim()
+    });
+
+    if !export_line_already_present {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
