@@ -229,35 +229,24 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       And the rc file ".zshrc" under HOME is unchanged
 
   # ===========================================================================
-  # @ISSUE-326 — redirect hook deprecation and removal
+  # @ISSUE-326 — redirect hook removal (hard removal, no deprecation phase)
   #
-  # Phase 1 (this release): hooks install without --path-shim still installs
-  # the redirect hook but prints a deprecation warning naming the replacement.
-  # Phase 2 (after removal): bash_redirect_hook.py is gone from the install
-  # and hooks install exits non-zero with an informative message.
+  # The redirect hook (bash_redirect_hook.py) is removed entirely in v0.9.0.
+  # hooks install without --path-shim exits non-zero and names the replacement.
+  # bash_redirect_hook.py is absent from the repository after removal.
+  # ADR-0011 documents the rationale.
   # ===========================================================================
 
-  Rule: hooks install without --path-shim warns about deprecation
+  Rule: hooks install without --path-shim is a hard error after redirect hook removal
 
-    @ISSUE-326 @not_implemented
-    Scenario: hooks install prints a deprecation warning naming the replacement
+    @ISSUE-326
+    Scenario: hooks install exits non-zero and names git-prism shim install
       Given an isolated HOME with an empty .claude directory
-      When I install the redirect hook at user scope
-      Then the exit code is 0
-      And the stderr contains "deprecated"
-      And the stderr contains "git-prism shim install"
-
-  Rule: After redirect hook removal, hooks install exits with an informative error
-
-    @ISSUE-326 @not_implemented
-    Scenario: hooks install exits non-zero after bash_redirect_hook.py is removed
-      Given the redirect hook files have been removed from the installation
       When I run "git-prism hooks install" with an isolated HOME
       Then the exit code is not 0
       And the stderr contains "git-prism shim install"
 
-    @ISSUE-326 @not_implemented
-    Scenario: bash_redirect_hook.py is absent after removal
-      Given the redirect hook files have been removed from the installation
+    @ISSUE-326
+    Scenario: bash_redirect_hook.py is absent from the repository
       When I inspect the git-prism hooks directory
       Then "hooks/bash_redirect_hook.py" does not exist in the installation
