@@ -67,8 +67,8 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
             cmd.args(argv.iter().skip(1)); // skip argv[0] ("git")
             cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
             let err = cmd.exec(); // never returns on success
-            eprintln!("git-prism shim: exec failed: {err}");
-            ExitCode::from(127)
+            eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
+            ExitCode::from(exec_failure_exit_code(&err))
         }
         #[cfg(not(unix))]
         {
