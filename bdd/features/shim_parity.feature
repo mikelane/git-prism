@@ -75,7 +75,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: gh pr diff is routed through git-prism structured output
 
-    @ISSUE-323 @not_implemented
+    @ISSUE-323
     Scenario: gh pr diff produces structured JSON when invoked via the shim
       Given the shim is installed with a "gh" symlink
       And a real gh binary is available on PATH
@@ -87,7 +87,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: Non-diff gh commands pass through to the real gh binary unchanged
 
-    @ISSUE-323 @not_implemented
+    @ISSUE-323
     Scenario: gh repo view passes through with matching exit code and output
       Given the shim is installed with a "gh" symlink
       And a real gh binary is available on PATH
@@ -96,7 +96,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       Then the shim exit code matches the real gh exit code
       And the shim stdout matches the real gh stdout
 
-    @ISSUE-323 @not_implemented
+    @ISSUE-323
     Scenario: gh issue list passes through unchanged
       Given the shim is installed with a "gh" symlink
       And a real gh binary is available on PATH
