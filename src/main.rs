@@ -186,10 +186,10 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             }
             if path_shim {
                 let symlink_path = hooks::install_path_shim(&home, force)?;
+                println!("Created symlink: {}", symlink_path.display());
                 println!(
                     "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
                 );
-                let _ = symlink_path;
             }
             Ok(0)
         }
