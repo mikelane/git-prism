@@ -343,6 +343,7 @@ mod tests {
         assert_eq!(exec_failure_exit_code(&err), 127);
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_skips_non_executable_git_files() {
         let dir = TempDir::new().unwrap();
