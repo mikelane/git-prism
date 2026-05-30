@@ -188,6 +188,13 @@ Feature: PATH-shim wrapper for structured git output
     And the output contains "PATH"
     And the output contains ".local/share/git-prism/bin"
 
+  @ISSUE-302
+  Scenario: hooks install --path-shim prints the symlink path
+    Given an isolated HOME directory
+    When I run "git-prism hooks install --path-shim" with the isolated HOME
+    Then the exit code is 0
+    And the output contains "Created symlink:"
+
   @ISSUE-288
   Scenario: hooks install --path-shim is idempotent
     Given an isolated HOME directory
