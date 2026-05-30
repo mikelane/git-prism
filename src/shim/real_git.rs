@@ -76,9 +76,33 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         }
         #[cfg(not(unix))]
         {
-            let _ = argv;
-            eprintln!("git-prism shim: passthrough is not supported on non-Unix platforms");
-            ExitCode::from(127)
+            let real = match resolve_real_git(self.argv0, self.env) {
+                Some(p) => p,
+                None => {
+                    eprintln!("git-prism shim: could not find real git binary");
+                    return ExitCode::from(127);
+                }
+            };
+
+            if self.env.get("GIT_PRISM_DEBUG_RESOLVER").is_some() {
+                eprintln!("git-prism shim: resolved real git to {}", real.display());
+            }
+
+            let status = std::process::Command::new(&real)
+                .args(argv.iter().skip(1))
+                .env("GIT_PRISM_INSIDE_SHIM", "1")
+                .status();
+
+            match status {
+                Ok(s) => {
+                    let code = s.code().unwrap_or(1);
+                    ExitCode::from(code as u8)
+                }
+                Err(err) => {
+                    eprintln!("git-prism shim: spawn of {} failed: {err}", real.display());
+                    ExitCode::from(exec_failure_exit_code(&err))
+                }
+            }
         }
     }
 
@@ -161,9 +185,45 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
     None
 }
 
-/// Non-Unix stub: the shim is unix-only so real-git resolution is not available.
+/// Walk `%PATH%` on Windows, skip any candidate that resolves to the shim
+/// binary itself, and return the first `<entry>\git.exe` that exists.
+///
+/// Returns `None` only when no git binary is found anywhere on PATH.
 #[cfg(not(unix))]
-pub(crate) fn resolve_real_git(_argv0: &str, _env: &dyn EnvSource) -> Option<PathBuf> {
+pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathBuf> {
+    use std::path::Path;
+
+    let shim_canonical = std::path::PathBuf::from(argv0)
+        .canonicalize()
+        .ok()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.canonicalize().ok())
+        });
+
+    if let Some(path_var) = env.get("PATH") {
+        for entry in path_var.split(';') {
+            if entry.is_empty() {
+                continue;
+            }
+            // On Windows git may be "git.exe" or "git" (cmd.exe resolves extensions).
+            // Try both; prefer the .exe form.
+            for name in &["git.exe", "git"] {
+                let candidate = Path::new(entry).join(name);
+                if !candidate.exists() {
+                    continue;
+                }
+                // Skip if this candidate resolves to the shim itself.
+                if let Some(shim) = &shim_canonical {
+                    if candidate.canonicalize().ok().as_ref() == Some(shim) {
+                        continue;
+                    }
+                }
+                return Some(candidate);
+            }
+        }
+    }
     None
 }
 
