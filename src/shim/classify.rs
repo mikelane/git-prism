@@ -55,10 +55,13 @@ pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> Classification<'a> {
 /// Only `gh pr diff <N>` is intercepted; everything else passes through to
 /// the real `gh` binary.
 fn classify_gh<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
-    // gh pr diff <N>  →  intercept; everything else passes through.
+    // gh pr diff <N>  →  intercept only if N is a numeric PR number.
+    // Flags (starting with -) and non-numeric tokens pass through.
     if subcommand == "pr"
         && rest.first() == Some(&"diff")
         && let Some(pr_number) = rest.get(1)
+        && !pr_number.starts_with('-')
+        && pr_number.chars().all(|c| c.is_ascii_digit())
     {
         return Classification::GhPrDiff { pr_number };
     }
@@ -192,6 +195,32 @@ mod tests {
     fn it_passes_through_gh_pr_diff_without_number() {
         // "gh pr diff" with no number is ambiguous — pass through.
         assert_eq!(classify(&["gh", "pr", "diff"]), Classification::Passthrough);
+    }
+
+    #[test]
+    fn it_passes_through_gh_pr_diff_help_flag() {
+        // "gh pr diff --help" must pass through, not be treated as PR number "--help"
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--help"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_gh_pr_diff_with_other_flags() {
+        // Other flags like --web, --patch, --name-only must pass through
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--web"]),
+            Classification::Passthrough
+        );
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--patch"]),
+            Classification::Passthrough
+        );
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--name-only"]),
+            Classification::Passthrough
+        );
     }
 
     #[test]

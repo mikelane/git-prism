@@ -105,3 +105,37 @@ fn find_gh(path: &str) -> Option<std::path::PathBuf> {
         if p.is_file() { Some(p) } else { None }
     })
 }
+
+/// ADVERSARIAL QA PROBE: `gh pr diff --help` must pass through to real gh so
+/// the user sees help text, not a git-prism manifest attempt against a PR
+/// numbered "--help".
+#[test]
+#[cfg(unix)]
+fn it_passes_through_gh_pr_diff_help_flag() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, shim_dir) = build_shim_dir_with_gh_symlink();
+    let stub_tmp = TempDir::new().unwrap();
+    let stub_dir = stub_tmp.path().join("bin");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub = stub_dir.join("gh");
+    fs::write(&stub, b"#!/bin/sh\necho GH_HELP_SENTINEL\nexit 0\n").unwrap();
+    let mut p = fs::metadata(&stub).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&stub, p).unwrap();
+
+    let path = format!("{}:{}", stub_dir.display(), shim_dir.display());
+    let out = Command::new(shim_dir.join("gh"))
+        .args(["pr", "diff", "--help"])
+        .env("CLAUDECODE", "1")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("GH_HELP_SENTINEL"),
+        "gh pr diff --help must pass through to real gh, not be intercepted as a \
+         PR numbered '--help'. stdout: {stdout:?}, stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
