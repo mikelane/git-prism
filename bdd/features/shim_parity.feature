@@ -115,14 +115,14 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: git-prism shim install creates the symlink via the new subcommand
 
-    @ISSUE-324 @not_implemented
+    @ISSUE-324
     Scenario: shim install creates the git symlink in the shim directory
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
       Then the exit code is 0
       And the path ".local/share/git-prism/bin/git" is a symlink under HOME
 
-    @ISSUE-324 @not_implemented
+    @ISSUE-324
     Scenario: shim install is idempotent
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
@@ -132,7 +132,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: git-prism shim status reports installation state
 
-    @ISSUE-324 @not_implemented
+    @ISSUE-324
     Scenario: shim status reports active after install
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
@@ -141,7 +141,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       And the output contains "installed"
       And the output contains ".local/share/git-prism/bin"
 
-    @ISSUE-324 @not_implemented
+    @ISSUE-324
     Scenario: shim status reports absent before install
       Given an isolated HOME directory
       When I run "git-prism shim status" with the isolated HOME
@@ -150,7 +150,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: git-prism shim uninstall removes the symlink
 
-    @ISSUE-324 @not_implemented
+    @ISSUE-324
     Scenario: shim uninstall removes the git symlink
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
@@ -160,7 +160,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: deprecated --path-shim alias still works but warns
 
-    @ISSUE-324 @not_implemented
+    @ISSUE-324
     Scenario: hooks install --path-shim prints a deprecation warning to stderr
       Given an isolated HOME directory
       When I run "git-prism hooks install --path-shim" with the isolated HOME

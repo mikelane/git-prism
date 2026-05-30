@@ -500,10 +500,10 @@ pub fn uninstall_redirect_hook(scope: Scope, home: &Path, cwd: &Path) -> Result<
 
 /// The on-disk directory where the path-shim symlink is installed.
 /// Relative to `$HOME`.
-const PATH_SHIM_REL_DIR: &str = ".local/share/git-prism/bin";
+pub const PATH_SHIM_REL_DIR: &str = ".local/share/git-prism/bin";
 
 /// Name of the git shim symlink inside `PATH_SHIM_REL_DIR`.
-const PATH_SHIM_LINK_NAME: &str = "git";
+pub const PATH_SHIM_LINK_NAME: &str = "git";
 
 /// Status of the path-shim symlink reported by `hooks status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,7 +672,25 @@ pub fn path_shim_status(home: &Path) -> PathShimStatus {
         return PathShimStatus::NotInstalled;
     }
     match std::fs::read_link(&link) {
-        Ok(target) => PathShimStatus::Installed { target },
+        Ok(target) => {
+            // Verify that the symlink target actually exists on disk.
+            // read_link() succeeds for dangling symlinks (it only reads the textual target),
+            // so we must check if the resolved path exists.
+            let resolved = if target.is_absolute() {
+                target.clone()
+            } else {
+                link.parent()
+                    .map(|p| p.join(&target))
+                    .unwrap_or_else(|| target.clone())
+            };
+            if resolved.exists() {
+                PathShimStatus::Installed { target }
+            } else {
+                PathShimStatus::BrokenLink {
+                    reason: format!("symlink target does not exist: {}", target.display()),
+                }
+            }
+        }
         Err(e) => PathShimStatus::BrokenLink {
             reason: e.to_string(),
         },
