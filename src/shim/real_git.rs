@@ -62,6 +62,10 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
                 }
             };
 
+            if self.env.get("GIT_PRISM_DEBUG_RESOLVER").is_some() {
+                eprintln!("git-prism shim: resolved real git to {}", real.display());
+            }
+
             use std::os::unix::process::CommandExt as _;
             let mut cmd = std::process::Command::new(&real);
             cmd.args(argv.iter().skip(1)); // skip argv[0] ("git")
@@ -163,11 +167,19 @@ pub(crate) fn resolve_real_git(_argv0: &str, _env: &dyn EnvSource) -> Option<Pat
     None
 }
 
-/// Return the canonicalized path of the shim binary (`argv0`), or `None`
-/// when canonicalization fails (e.g. relative paths, missing binary).
+/// Return the canonicalized path of the shim binary.
+///
+/// Tries `argv0` first (works when the shim is invoked with a full path).
+/// Falls back to `std::env::current_exe()` which the OS always resolves
+/// correctly, even when `argv0` is a bare name like `"git"` (e.g. when
+/// the kernel sets argv[0] from a PATH lookup).
 #[cfg(unix)]
 fn shim_canonical_path(argv0: &str) -> Option<PathBuf> {
-    Path::new(argv0).canonicalize().ok()
+    Path::new(argv0).canonicalize().ok().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+    })
 }
 
 /// Return `true` if `a` and `b` refer to the same directory after
