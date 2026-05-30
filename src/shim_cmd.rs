@@ -27,15 +27,27 @@ const SHIM_EXPORT_LINE: &str = r#"export PATH="$HOME/.local/share/git-prism/bin:
 /// in `PATH`. If not, prompts the user via stdin for consent to append the
 /// export line to their shell rc file.
 pub fn run_install(home: &std::path::Path, force: bool) -> Result<()> {
-    run_install_with_io(home, force, &mut io::stdin().lock(), &mut io::stdout())
+    let rc_path = detect_rc_file(home);
+    run_install_with_io(
+        home,
+        force,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+        &rc_path,
+    )
 }
 
 /// Testable install implementation with injected I/O.
+///
+/// `rc_path` is the shell rc file to append the export line to when the user
+/// consents. Production callers pass `detect_rc_file(home)`; tests pass an
+/// explicit path so the result is independent of the runner's `$SHELL`.
 pub fn run_install_with_io(
     home: &std::path::Path,
     force: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
+    rc_path: &std::path::Path,
 ) -> Result<()> {
     let symlink_path = hooks::install_path_shim(home, force)?;
     writeln!(stdout, "Created symlink: {}", symlink_path.display())?;
@@ -48,7 +60,7 @@ pub fn run_install_with_io(
         return Ok(());
     }
 
-    offer_path_setup(home, stdin, stdout)?;
+    offer_path_setup(home, rc_path, stdin, stdout)?;
     Ok(())
 }
 
@@ -66,6 +78,7 @@ fn shim_dir_is_in_path(shim_dir: &str) -> bool {
 /// Prompt for PATH consent and act on the answer.
 fn offer_path_setup(
     home: &std::path::Path,
+    rc_path: &std::path::Path,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
 ) -> Result<()> {
@@ -79,7 +92,7 @@ fn offer_path_setup(
     stdin.read_line(&mut answer)?;
 
     if answer.trim().eq_ignore_ascii_case("y") {
-        append_to_rc_idempotent(home, stdout)?;
+        append_to_rc_idempotent(home, rc_path, stdout)?;
     } else {
         print_manual_instructions(stdout)?;
     }
@@ -88,10 +101,13 @@ fn offer_path_setup(
 
 /// Append the export line to the shell rc file, unless it is already present.
 /// Detects presence by matching the full export line (line-wise, ignoring comments).
-fn append_to_rc_idempotent(home: &std::path::Path, stdout: &mut dyn Write) -> Result<()> {
-    let rc_path = detect_rc_file(home);
+fn append_to_rc_idempotent(
+    home: &std::path::Path,
+    rc_path: &std::path::Path,
+    stdout: &mut dyn Write,
+) -> Result<()> {
     let existing = if rc_path.exists() {
-        std::fs::read_to_string(&rc_path)?
+        std::fs::read_to_string(rc_path)?
     } else {
         String::new()
     };
@@ -106,7 +122,7 @@ fn append_to_rc_idempotent(home: &std::path::Path, stdout: &mut dyn Write) -> Re
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&rc_path)?;
+            .open(rc_path)?;
         writeln!(file, "\n{SHIM_EXPORT_LINE}")?;
     }
 
@@ -185,16 +201,20 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Install with consent, using an explicit `.zshrc` path so the test is
+    /// independent of the CI runner's `$SHELL`.
     fn install_with_consent(home: &std::path::Path) {
+        let rc = home.join(".zshrc");
         let mut stdin = Cursor::new("y\n");
         let mut stdout = Vec::new();
-        run_install_with_io(home, false, &mut stdin, &mut stdout).unwrap();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, &rc).unwrap();
     }
 
     fn install_with_decline(home: &std::path::Path) {
+        let rc = home.join(".zshrc");
         let mut stdin = Cursor::new("n\n");
         let mut stdout = Vec::new();
-        run_install_with_io(home, false, &mut stdin, &mut stdout).unwrap();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, &rc).unwrap();
     }
 
     #[test]
@@ -254,7 +274,7 @@ mod tests {
 
         let mut stdin = Cursor::new("y\n");
         let mut stdout = Vec::new();
-        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout).unwrap();
+        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, &rc).unwrap();
 
         let out = String::from_utf8(stdout).unwrap();
         assert!(
@@ -279,9 +299,10 @@ mod tests {
     #[test]
     fn decline_output_contains_shim_dir_path() {
         let dir = TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
         let mut stdin = Cursor::new("n\n");
         let mut stdout = Vec::new();
-        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout).unwrap();
+        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, &rc).unwrap();
 
         let out = String::from_utf8(stdout).unwrap();
         assert!(
