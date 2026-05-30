@@ -186,7 +186,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: User consents to auto-PATH setup — rc file is updated idempotently
 
-    @ISSUE-325 @not_implemented
+    @ISSUE-325
     Scenario: Accepting PATH setup appends the export line to the shell rc
       Given an isolated HOME directory
       And the shim directory is not in PATH
@@ -196,7 +196,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       And the rc file ".zshrc" under HOME contains the shim directory export line
       And the output contains "restart"
 
-    @ISSUE-325 @not_implemented
+    @ISSUE-325
     Scenario: Re-running install does not append the export line a second time
       Given an isolated HOME directory
       And the shim directory is not in PATH
@@ -207,7 +207,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: User declines auto-PATH setup — rc file is not modified
 
-    @ISSUE-325 @not_implemented
+    @ISSUE-325
     Scenario: Declining PATH setup prints manual instructions and leaves rc unchanged
       Given an isolated HOME directory
       And the shim directory is not in PATH
@@ -219,7 +219,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: Shim directory already in PATH — no prompt, no rc modification
 
-    @ISSUE-325 @not_implemented
+    @ISSUE-325
     Scenario: No PATH prompt when shim directory is already in PATH
       Given an isolated HOME directory
       And the shim directory is already in PATH

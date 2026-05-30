@@ -5,22 +5,157 @@
 //! See ADR-0009 (`docs/decisions/0009-path-shim-architecture.md`) for design
 //! rationale.
 
+use std::io::{self, BufRead, Write};
+
 use anyhow::Result;
 
 use crate::hooks;
+
+/// The export line fragment used to detect existing entries and compute the shim dir.
+const SHIM_EXPORT_FRAGMENT: &str = ".local/share/git-prism/bin";
+
+/// The full export line written to shell rc files.
+const SHIM_EXPORT_LINE: &str = r#"export PATH="$HOME/.local/share/git-prism/bin:$PATH""#;
 
 /// Install the PATH shim symlink and print the result to stdout.
 ///
 /// Idempotent: if the symlink already exists and points at the current binary,
 /// this is a silent no-op. `force` allows overwriting a regular file at the
 /// target path.
+///
+/// After installing the symlink, checks whether the shim directory is already
+/// in `PATH`. If not, prompts the user via stdin for consent to append the
+/// export line to their shell rc file.
 pub fn run_install(home: &std::path::Path, force: bool) -> Result<()> {
+    let rc_path = detect_rc_file(home);
+    run_install_with_io(
+        home,
+        force,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+        &rc_path,
+    )
+}
+
+/// Testable install implementation with injected I/O.
+///
+/// `rc_path` is the shell rc file to append the export line to when the user
+/// consents. Production callers pass `detect_rc_file(home)`; tests pass an
+/// explicit path so the result is independent of the runner's `$SHELL`.
+pub fn run_install_with_io(
+    home: &std::path::Path,
+    force: bool,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+    rc_path: &std::path::Path,
+) -> Result<()> {
     let symlink_path = hooks::install_path_shim(home, force)?;
-    println!("Created symlink: {}", symlink_path.display());
-    println!(
-        "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
-    );
+    writeln!(stdout, "Created symlink: {}", symlink_path.display())?;
+
+    let shim_dir = home.join(SHIM_EXPORT_FRAGMENT);
+    let shim_dir_str = shim_dir.to_string_lossy().into_owned();
+
+    if shim_dir_is_in_path(&shim_dir_str) {
+        // Already on PATH — nothing to do.
+        return Ok(());
+    }
+
+    offer_path_setup(home, rc_path, stdin, stdout)?;
     Ok(())
+}
+
+/// Return true if the shim directory string appears in the current `PATH` env var.
+/// Normalizes trailing slashes so a PATH entry like `/path/to/bin/` matches `/path/to/bin`.
+fn shim_dir_is_in_path(shim_dir: &str) -> bool {
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let normalized_shim = shim_dir.trim_end_matches('/');
+    path_env.split(':').any(|entry| {
+        let normalized_entry = entry.trim_end_matches('/');
+        normalized_entry == normalized_shim
+    })
+}
+
+/// Prompt for PATH consent and act on the answer.
+fn offer_path_setup(
+    home: &std::path::Path,
+    rc_path: &std::path::Path,
+    stdin: &mut dyn BufRead,
+    stdout: &mut dyn Write,
+) -> Result<()> {
+    writeln!(
+        stdout,
+        "\nThe shim directory is not in your PATH.\nAdd it automatically? [y/N] "
+    )?;
+    stdout.flush()?;
+
+    let mut answer = String::new();
+    stdin.read_line(&mut answer)?;
+
+    if answer.trim().eq_ignore_ascii_case("y") {
+        append_to_rc_idempotent(home, rc_path, stdout)?;
+    } else {
+        print_manual_instructions(stdout)?;
+    }
+    Ok(())
+}
+
+/// Append the export line to the shell rc file, unless it is already present.
+/// Detects presence by matching the full export line (line-wise, ignoring comments).
+fn append_to_rc_idempotent(
+    home: &std::path::Path,
+    rc_path: &std::path::Path,
+    stdout: &mut dyn Write,
+) -> Result<()> {
+    let existing = if rc_path.exists() {
+        std::fs::read_to_string(rc_path)?
+    } else {
+        String::new()
+    };
+
+    // Check if the full export line already exists (non-comment, trimmed match).
+    let export_line_already_present = existing.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && trimmed.trim() == SHIM_EXPORT_LINE.trim()
+    });
+
+    if !export_line_already_present {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(rc_path)?;
+        writeln!(file, "\n{SHIM_EXPORT_LINE}")?;
+    }
+
+    let rc_display = rc_path
+        .strip_prefix(home)
+        .map(|p| format!("~/{}", p.display()))
+        .unwrap_or_else(|_| rc_path.display().to_string());
+
+    writeln!(
+        stdout,
+        "Added to {rc_display}. Please restart Claude Code so the new PATH takes effect in its shell snapshot."
+    )?;
+    Ok(())
+}
+
+/// Print manual PATH instructions to stdout.
+fn print_manual_instructions(stdout: &mut dyn Write) -> Result<()> {
+    writeln!(
+        stdout,
+        "To complete setup, add this line to your shell rc manually:\n  {SHIM_EXPORT_LINE}"
+    )?;
+    Ok(())
+}
+
+/// Determine the shell rc file based on `$SHELL`, defaulting to `.zshrc`.
+fn detect_rc_file(home: &std::path::Path) -> std::path::PathBuf {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let rc_name = if shell.contains("bash") {
+        ".bashrc"
+    } else {
+        ".zshrc"
+    };
+    home.join(rc_name)
 }
 
 /// Remove the PATH shim symlink.
@@ -59,25 +194,42 @@ pub fn run_status(home: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
     use tempfile::TempDir;
 
+    /// Install with consent, using an explicit `.zshrc` path so the test is
+    /// independent of the CI runner's `$SHELL`.
+    fn install_with_consent(home: &std::path::Path) {
+        let rc = home.join(".zshrc");
+        let mut stdin = Cursor::new("y\n");
+        let mut stdout = Vec::new();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, &rc).unwrap();
+    }
+
+    fn install_with_decline(home: &std::path::Path) {
+        let rc = home.join(".zshrc");
+        let mut stdin = Cursor::new("n\n");
+        let mut stdout = Vec::new();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, &rc).unwrap();
+    }
+
     #[test]
-    #[cfg(unix)]
     fn run_install_creates_symlink_under_home() {
         let dir = TempDir::new().unwrap();
-        run_install(dir.path(), false).unwrap();
+        install_with_decline(dir.path());
         let link = dir.path().join(".local/share/git-prism/bin/git");
         assert!(link.is_symlink(), "symlink must exist after shim install");
     }
 
     #[test]
-    #[cfg(unix)]
     fn run_install_is_idempotent() {
         let dir = TempDir::new().unwrap();
-        run_install(dir.path(), false).unwrap();
-        run_install(dir.path(), false).unwrap();
+        install_with_decline(dir.path());
+        install_with_decline(dir.path());
         let link = dir.path().join(".local/share/git-prism/bin/git");
         assert!(
             link.is_symlink(),
@@ -86,10 +238,83 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    fn consent_appends_export_line_to_rc_file() {
+        let dir = TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::fs::write(&rc, "# shell rc\n").unwrap();
+
+        install_with_consent(dir.path());
+
+        let content = std::fs::read_to_string(&rc).unwrap();
+        assert!(
+            content.contains(SHIM_EXPORT_FRAGMENT),
+            "rc file must contain the export fragment after consent"
+        );
+    }
+
+    #[test]
+    fn consent_appends_export_line_exactly_once_on_repeat() {
+        let dir = TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::fs::write(&rc, "# shell rc\n").unwrap();
+
+        install_with_consent(dir.path());
+        install_with_consent(dir.path());
+
+        let content = std::fs::read_to_string(&rc).unwrap();
+        let count = content.matches(SHIM_EXPORT_FRAGMENT).count();
+        assert_eq!(count, 1, "export fragment must appear exactly once");
+    }
+
+    #[test]
+    fn consent_output_contains_restart() {
+        let dir = TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::fs::write(&rc, "# shell rc\n").unwrap();
+
+        let mut stdin = Cursor::new("y\n");
+        let mut stdout = Vec::new();
+        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, &rc).unwrap();
+
+        let out = String::from_utf8(stdout).unwrap();
+        assert!(
+            out.contains("restart"),
+            "output must tell user to restart Claude Code; got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn decline_leaves_rc_file_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        std::fs::write(&rc, "# shell rc\n").unwrap();
+        let original = std::fs::read_to_string(&rc).unwrap();
+
+        install_with_decline(dir.path());
+
+        let after = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(original, after, "rc file must be unchanged after decline");
+    }
+
+    #[test]
+    fn decline_output_contains_shim_dir_path() {
+        let dir = TempDir::new().unwrap();
+        let rc = dir.path().join(".zshrc");
+        let mut stdin = Cursor::new("n\n");
+        let mut stdout = Vec::new();
+        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, &rc).unwrap();
+
+        let out = String::from_utf8(stdout).unwrap();
+        assert!(
+            out.contains(SHIM_EXPORT_FRAGMENT),
+            "output must contain the shim dir path; got: {out:?}"
+        );
+    }
+
+    #[test]
     fn run_uninstall_removes_symlink() {
         let dir = TempDir::new().unwrap();
-        run_install(dir.path(), false).unwrap();
+        install_with_decline(dir.path());
         run_uninstall(dir.path()).unwrap();
         let link = dir.path().join(".local/share/git-prism/bin/git");
         assert!(!link.is_symlink() && !link.exists(), "symlink must be gone");
@@ -98,15 +323,13 @@ mod tests {
     #[test]
     fn run_status_reports_not_installed_when_absent() {
         let dir = TempDir::new().unwrap();
-        // Verifies no panic/error when shim is absent.
         run_status(dir.path()).unwrap();
     }
 
     #[test]
-    #[cfg(unix)]
     fn run_status_succeeds_after_install() {
         let dir = TempDir::new().unwrap();
-        run_install(dir.path(), false).unwrap();
+        install_with_decline(dir.path());
         run_status(dir.path()).unwrap();
     }
 }

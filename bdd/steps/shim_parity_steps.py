@@ -479,6 +479,9 @@ def step_shim_install_consent(context: Context) -> None:
     """Run git-prism shim install, answering 'y' to the PATH setup prompt."""
     binary = _find_binary(context)
     env = _isolated_env(context)
+    # Pin SHELL to zsh so detect_rc_file always picks .zshrc, regardless of
+    # the CI runner's ambient $SHELL (which is /bin/bash on GitHub Actions).
+    env["SHELL"] = "/bin/zsh"
     # If the shim dir was injected into PATH by a prior Given step, use that.
     if hasattr(context, "injected_path"):
         env["PATH"] = context.injected_path
@@ -502,6 +505,9 @@ def step_shim_install_consent_again(context: Context) -> None:
     """Run git-prism shim install a second time with 'y' consent (idempotency check)."""
     binary = _find_binary(context)
     env = _isolated_env(context)
+    # Pin SHELL to zsh so detect_rc_file always picks .zshrc, regardless of
+    # the CI runner's ambient $SHELL (which is /bin/bash on GitHub Actions).
+    env["SHELL"] = "/bin/zsh"
     result = subprocess.run(  # noqa: S603
         [str(binary), "shim", "install"],
         input="y\n",
