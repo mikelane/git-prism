@@ -48,7 +48,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: Windows passthrough preserves real-git exit code and output
 
-    @ISSUE-322 @not_implemented @windows
+    @ISSUE-322 @windows
     Scenario: Successful git command exit code and stdout match real git on Windows
       Given a fixture git repository with two commits
       When the shim runs "git status" without agent env vars
@@ -56,7 +56,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       Then the shim exit code matches the real git exit code
       And the shim stdout matches the real git stdout
 
-    @ISSUE-322 @not_implemented @windows
+    @ISSUE-322 @windows
     Scenario: Failed git command exit code and stderr match real git on Windows
       Given a fixture git repository with two commits
       When the shim runs "git not-a-real-subcommand" without agent env vars
