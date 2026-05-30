@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PATH shim (experimental, Unix-only).** Installed as a `git` binary ahead of the real git on `PATH`, git-prism intercepts watch-list subcommands (`diff`/`log`/`show`/`blame`/pickaxe) that carry a ref range when an AI agent is detected, routing them to structured JSON; humans, CI, non-agents, and ref-range-less commands pass through to vanilla git untouched. Ships the Python classifier ported to `src/shim/classify.rs`, `argv[0]`-aware dispatch in `main` (#287), the shim core of `classify`/`real_git`/handlers (#286), and a `git-prism hooks install --path-shim` flag (plus matching `uninstall`/`status`) that creates the `~/.local/share/git-prism/bin/git` symlink and prints the `Created symlink:` line and PATH-export instructions (#288, #302). Agent detection reuses the env-var logic from #280. `GIT_PRISM_INSIDE_SHIM=1` forces passthrough and is set in child processes to break recursion through nested git calls. `GIT_PRISM_DEBUG_RESOLVER=1` prints the resolved real-git path to stderr (#299). (#284)
+- **Shim telemetry counters.** `shim_invocations_total` and `shim_classification_total` record how often the shim runs and how each command is classified (intercept vs passthrough). (#289)
 - **`git-prism agent-detect` subcommand.** Prints a JSON object indicating whether the current process is running on behalf of an AI coding agent, detected via environment variables only. Detection checks `AI_AGENT` (Vercel cross-tool convention), `AGENT` with an allowlisted value (`goose`, `amp`), and eight tool-specific markers (`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `CLINE_ACTIVE`, `AUGMENT_AGENT`, `OPENCODE_CLIENT`, `TRAE_AI_SHELL_ID`). `CI=true` is a hard override that always returns `{"agent": null, "signal": null}`. Not exposed as an MCP tool — diagnostics/ops use only. (#278)
+
+### Fixed
+
+- **Shim passthrough distinguishes exit 126 from 127.** When delegating to the real git, the shim now returns `126` if the resolved binary exists but is not executable, and `127` if no git binary is found on `PATH`, matching POSIX shell conventions instead of collapsing both into one code. (#296)
+- **Windows builds compile cleanly.** The shim's `execvp`-based exec path is now gated behind `#[cfg(unix)]`, so the crate compiles as a no-op on Windows and `hooks install --path-shim` bails with "not supported on non-Unix platforms" rather than failing the build. (#314)
 
 ## [0.8.0] — 2026-05-13
 
