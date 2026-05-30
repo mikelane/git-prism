@@ -9,6 +9,8 @@
 //! gh pr diff → manifest pipeline (which requires a live GitHub connection
 //! and is covered by the BDD suite).
 
+#![cfg(unix)]
+
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
