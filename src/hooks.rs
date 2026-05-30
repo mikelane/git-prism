@@ -1376,6 +1376,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    #[cfg(unix)]
     fn install_path_shim_creates_symlink_in_expected_location() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1391,6 +1392,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn install_path_shim_is_idempotent() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1407,6 +1409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn install_path_shim_replaces_stale_symlink() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1435,6 +1438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn path_shim_status_returns_installed_after_install() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1453,6 +1457,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    #[cfg(unix)]
     fn uninstall_path_shim_removes_symlink() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1466,6 +1471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn uninstall_path_shim_removes_empty_bin_directory() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1490,6 +1496,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn path_shim_status_returns_not_installed_after_uninstall() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1516,6 +1523,7 @@ mod tests {
     ///
     /// This is a data-loss bug.
     #[test]
+    #[cfg(unix)]
     fn adversarial_uninstall_path_shim_must_not_delete_unrelated_regular_file() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -1551,6 +1559,7 @@ mod tests {
     /// Expected: error out unless --force is passed, or at minimum refuse
     /// to overwrite anything that isn't a symlink.
     #[test]
+    #[cfg(unix)]
     fn adversarial_install_path_shim_must_not_overwrite_regular_file_without_force() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();

@@ -3,7 +3,9 @@
 //! Abstracts "find the real git binary and exec it" behind a trait so the
 //! shim's decision logic can be unit-tested with a fake implementation.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::agent_detection::EnvSource;
@@ -50,21 +52,30 @@ pub(crate) struct StdRealGitExec<'e, E: EnvSource> {
 
 impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     fn passthrough(&self, argv: &[&str]) -> ExitCode {
-        let real = match resolve_real_git(self.argv0, self.env) {
-            Some(p) => p,
-            None => {
-                eprintln!("git-prism shim: could not find real git binary");
-                return ExitCode::from(127);
-            }
-        };
+        #[cfg(unix)]
+        {
+            let real = match resolve_real_git(self.argv0, self.env) {
+                Some(p) => p,
+                None => {
+                    eprintln!("git-prism shim: could not find real git binary");
+                    return ExitCode::from(127);
+                }
+            };
 
-        use std::os::unix::process::CommandExt;
-        let mut cmd = std::process::Command::new(&real);
-        cmd.args(argv.iter().skip(1)); // skip argv[0] ("git")
-        cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
-        let err = cmd.exec(); // never returns on success
-        eprintln!("git-prism shim: exec failed: {err}");
-        ExitCode::from(127)
+            use std::os::unix::process::CommandExt as _;
+            let mut cmd = std::process::Command::new(&real);
+            cmd.args(argv.iter().skip(1)); // skip argv[0] ("git")
+            cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
+            let err = cmd.exec(); // never returns on success
+            eprintln!("git-prism shim: exec failed: {err}");
+            ExitCode::from(127)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = argv;
+            eprintln!("git-prism shim: passthrough is not supported on non-Unix platforms");
+            ExitCode::from(127)
+        }
     }
 
     fn capture(&self, argv: &[&str]) -> Result<usize, CaptureError> {
@@ -85,6 +96,9 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
 /// Falls back to `/usr/bin/git`, `/usr/local/bin/git`, `/opt/homebrew/bin/git`
 /// if nothing is found in `$PATH`.  Returns `None` only when no git binary
 /// exists anywhere.
+///
+/// On non-Unix platforms this always returns `None` — the shim is unix-only.
+#[cfg(unix)]
 pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathBuf> {
     let shim_path = shim_canonical_path(argv0);
 
@@ -132,8 +146,15 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
     None
 }
 
+/// Non-Unix stub: the shim is unix-only so real-git resolution is not available.
+#[cfg(not(unix))]
+pub(crate) fn resolve_real_git(_argv0: &str, _env: &dyn EnvSource) -> Option<PathBuf> {
+    None
+}
+
 /// Return the canonicalized path of the shim binary (`argv0`), or `None`
 /// when canonicalization fails (e.g. relative paths, missing binary).
+#[cfg(unix)]
 fn shim_canonical_path(argv0: &str) -> Option<PathBuf> {
     Path::new(argv0).canonicalize().ok()
 }
@@ -141,6 +162,7 @@ fn shim_canonical_path(argv0: &str) -> Option<PathBuf> {
 /// Return `true` if `a` and `b` refer to the same directory after
 /// canonicalization.  Falls back to a direct comparison when either
 /// canonicalization fails.
+#[cfg(unix)]
 fn canonical_eq(a: &Path, b: &Path) -> bool {
     let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
     let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
@@ -148,6 +170,7 @@ fn canonical_eq(a: &Path, b: &Path) -> bool {
 }
 
 /// Return `true` when `path` exists and is executable by the current user.
+#[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
@@ -158,9 +181,10 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    #[cfg(unix)]
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     use tempfile::TempDir;
 
     use super::*;
@@ -173,7 +197,9 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn make_executable_file(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
         let p = dir.join(name);
         fs::write(&p, b"#!/bin/sh\n").unwrap();
         let mut perms = fs::metadata(&p).unwrap().permissions();
@@ -182,10 +208,12 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     fn env_with_path(path_val: &str) -> MapEnv {
         MapEnv(HashMap::from([("PATH".to_string(), path_val.to_string())]))
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_skips_shim_directory_and_finds_git_in_next_path_entry() {
         let shim_dir = TempDir::new().unwrap();
@@ -210,6 +238,7 @@ mod tests {
         assert_eq!(result, Some(expected));
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_uses_fallback_chain_when_path_has_no_git() {
         // Use an empty PATH so $PATH search finds nothing.
@@ -218,6 +247,7 @@ mod tests {
         let _ = resolve_real_git("/nonexistent/git-prism", &env);
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_returns_none_when_no_git_found_anywhere() {
         // No PATH key at all.
@@ -227,6 +257,7 @@ mod tests {
         let _ = resolve_real_git("/nonexistent/path/git-prism", &env);
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_finds_git_in_path_when_shim_dir_is_absent() {
         let real_dir = TempDir::new().unwrap();
@@ -239,6 +270,7 @@ mod tests {
         assert_eq!(result, Some(expected));
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_skips_symlink_to_shim_binary_in_different_path_entry() {
         // Homebrew install pattern:
@@ -281,6 +313,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_skips_non_executable_git_files() {
         let dir = TempDir::new().unwrap();
