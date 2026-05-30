@@ -90,6 +90,17 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     }
 }
 
+/// Map an exec `io::Error` to the conventional shell exit code.
+///
+/// - 126: command found but not executable (`PermissionDenied`)
+/// - 127: command not found or other exec failure
+fn exec_failure_exit_code(err: &std::io::Error) -> u8 {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => 126,
+        _ => 127,
+    }
+}
+
 /// Walk `$PATH`, skip any candidate that resolves (via symlink) to the shim
 /// binary itself, and return the first `<entry>/git` that is executable.
 ///
@@ -314,6 +325,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn it_maps_permission_denied_to_exit_126() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(exec_failure_exit_code(&err), 126);
+    }
+
+    #[test]
+    fn it_maps_not_found_to_exit_127() {
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(exec_failure_exit_code(&err), 127);
+    }
+
+    #[test]
+    fn it_maps_other_errors_to_exit_127() {
+        let err = std::io::Error::from(std::io::ErrorKind::Other);
+        assert_eq!(exec_failure_exit_code(&err), 127);
+    }
+
     #[test]
     fn it_skips_non_executable_git_files() {
         let dir = TempDir::new().unwrap();
