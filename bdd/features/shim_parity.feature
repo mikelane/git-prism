@@ -83,6 +83,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       Then the exit code is 0
       And the output is valid JSON
       And the JSON output has a "files" array
+      And each entry in the "files" array has a "change_scope" field
 
   Rule: Non-diff gh commands pass through to the real gh binary unchanged
 
@@ -102,6 +103,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       When an agent runs "gh issue list --limit 1" via the shim with CLAUDECODE=1
       And the real gh binary runs "gh issue list --limit 1" directly
       Then the shim exit code matches the real gh exit code
+      And the shim stdout matches the real gh stdout
 
   # ===========================================================================
   # @ISSUE-324 — git-prism shim subcommand
@@ -216,9 +218,10 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
     Scenario: No PATH prompt when shim directory is already in PATH
       Given an isolated HOME directory
       And the shim directory is already in PATH
+      And a shell rc file exists at ".zshrc" under HOME
       When I run "git-prism shim install" with the isolated HOME
       Then the exit code is 0
-      And the output does not contain "PATH"
+      And the rc file ".zshrc" under HOME is unchanged
 
   # ===========================================================================
   # @ISSUE-326 — redirect hook deprecation and removal
@@ -246,8 +249,7 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
       Given the redirect hook files have been removed from the installation
       When I run "git-prism hooks install" with an isolated HOME
       Then the exit code is not 0
-      And the stderr is not empty
-      And the output contains "git-prism shim install"
+      And the stderr contains "git-prism shim install"
 
     @ISSUE-326 @not_implemented
     Scenario: bash_redirect_hook.py is absent after removal

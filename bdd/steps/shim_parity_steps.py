@@ -30,7 +30,6 @@ from pathlib import Path
 from behave import given, then, when
 from behave.runner import Context
 
-from repo_setup_steps import _commit, _init_repo, _write_file
 from shim_wrapper_steps import (
     _SHIM_TIMEOUT_SECONDS,
     _build_shim_dir,
@@ -164,6 +163,13 @@ def step_redirect_hook_files_removed(context: Context) -> None:
     context flag that the When step uses to run git-prism from a fake
     installation directory where bash_redirect_hook.py has been deleted.
     The implementation will be exercised through a real binary invocation.
+
+    # TODO(#326): fake_install_root is built here but the When step runs the
+    # real binary without wiring it in. When #326 lands, the implementer must
+    # arrange for the binary invocation to exercise a post-removal code path
+    # (e.g. by building a stripped binary or using an env var that skips the
+    # hook file lookup) so this scenario tests the real removed state rather
+    # than just asserting that the real project hooks/ dir lacks the file.
     """
     # Build a fake installation root that looks like a post-removal layout:
     # the hooks/ directory exists but bash_redirect_hook.py is absent.
@@ -554,4 +560,42 @@ def step_file_does_not_exist_in_installation(context: Context, rel_path: str) ->
     assert not target.exists(), (
         f"Expected {target} to NOT exist after redirect hook removal, "
         f"but it still exists. This is the expected RED state before #326 lands."
+    )
+
+
+@then('each entry in the "files" array has a "change_scope" field')
+def step_files_entries_have_change_scope(context: Context) -> None:
+    """Assert every entry in the top-level files array carries a change_scope field.
+
+    This is a git-prism manifest-specific field that raw gh output cannot
+    produce, so a passing assertion here proves the shim routed the call
+    through git-prism rather than forwarding raw gh output.
+
+    Fails RED now because the gh shim does not exist yet — the real gh
+    binary returns plain text or its own JSON, neither of which has a
+    change_scope field on file entries.
+    """
+    import json as _json
+    stdout = (context.result.stdout or "").strip()
+    try:
+        data = _json.loads(stdout)
+    except _json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"Output is not valid JSON: {exc}\n"
+            f"stdout: {stdout[:500]}\n"
+            f"stderr: {context.result.stderr[:500]}"
+        ) from exc
+    files = data.get("files") if isinstance(data, dict) else None
+    assert isinstance(files, list) and files, (
+        f"Expected a non-empty 'files' array in JSON, got: {str(data)[:500]}"
+    )
+    missing = [
+        i for i, entry in enumerate(files)
+        if not (isinstance(entry, dict) and "change_scope" in entry)
+    ]
+    assert not missing, (
+        f"Files entries at indices {missing} are missing 'change_scope' field. "
+        f"This field is emitted only by git-prism manifest output — raw gh "
+        f"output cannot satisfy this assertion.\n"
+        f"files[0]: {files[0] if files else 'empty'}"
     )
