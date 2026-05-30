@@ -54,21 +54,32 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     fn passthrough(&self, argv: &[&str]) -> ExitCode {
         #[cfg(unix)]
         {
-            let real = match resolve_real_git(self.argv0, self.env) {
+            // Determine which binary to resolve by extracting the basename of
+            // self.argv0 (the shim symlink path, e.g. "/tmp/bin/gh" → "gh").
+            // argv[0] is a full path when the OS execs the shim by path; using
+            // the basename of self.argv0 gets the symlink name ("git" or "gh").
+            let binary_name = std::path::Path::new(self.argv0)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("git");
+            let real = match resolve_real_binary(binary_name, self.argv0, self.env) {
                 Some(p) => p,
                 None => {
-                    eprintln!("git-prism shim: could not find real git binary");
+                    eprintln!("git-prism shim: could not find real {binary_name} binary");
                     return ExitCode::from(127);
                 }
             };
 
             if self.env.get("GIT_PRISM_DEBUG_RESOLVER").is_some() {
-                eprintln!("git-prism shim: resolved real git to {}", real.display());
+                eprintln!(
+                    "git-prism shim: resolved real {binary_name} to {}",
+                    real.display()
+                );
             }
 
             use std::os::unix::process::CommandExt as _;
             let mut cmd = std::process::Command::new(&real);
-            cmd.args(argv.iter().skip(1)); // skip argv[0] ("git")
+            cmd.args(argv.iter().skip(1)); // skip argv[0]
             cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
             let err = cmd.exec(); // never returns on success
             eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
@@ -76,16 +87,23 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         }
         #[cfg(not(unix))]
         {
-            let real = match resolve_real_git(self.argv0, self.env) {
+            let binary_name = std::path::Path::new(self.argv0)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("git");
+            let real = match resolve_real_binary(binary_name, self.argv0, self.env) {
                 Some(p) => p,
                 None => {
-                    eprintln!("git-prism shim: could not find real git binary");
+                    eprintln!("git-prism shim: could not find real {binary_name} binary");
                     return ExitCode::from(127);
                 }
             };
 
             if self.env.get("GIT_PRISM_DEBUG_RESOLVER").is_some() {
-                eprintln!("git-prism shim: resolved real git to {}", real.display());
+                eprintln!(
+                    "git-prism shim: resolved real {binary_name} to {}",
+                    real.display()
+                );
             }
 
             let status = std::process::Command::new(&real)
@@ -107,6 +125,8 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     }
 
     fn capture(&self, argv: &[&str]) -> Result<usize, CaptureError> {
+        // capture() is only used on the git shadow-run path (maybe_shadow_capture in shadow.rs).
+        // gh invocations never reach here; they are handled by handle_gh_pr_diff / passthrough.
         let real = resolve_real_git(self.argv0, self.env).ok_or(CaptureError::RealGitNotFound)?;
         // std::process::Command passes args as a slice — no shell involved,
         // so there is no command-injection risk here.
@@ -211,6 +231,106 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
             // Try both; prefer the .exe form.
             for name in &["git.exe", "git"] {
                 let candidate = Path::new(entry).join(name);
+                if !candidate.exists() {
+                    continue;
+                }
+                // Skip if this candidate resolves to the shim itself.
+                if let Some(shim) = &shim_canonical {
+                    if candidate.canonicalize().ok().as_ref() == Some(shim) {
+                        continue;
+                    }
+                }
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the real binary for `binary_name` (e.g. `"git"`, `"gh"`), skipping
+/// any PATH entry that resolves to the shim binary itself.
+///
+/// For `"git"`, delegates to `resolve_real_git` which includes hardcoded
+/// fallback paths.  For all other binaries, performs the same shim-skipping
+/// PATH walk without fallbacks (those binaries are not bundled on every system
+/// the way git is).
+///
+/// On non-Unix platforms this always returns `None`.
+#[cfg(unix)]
+pub(crate) fn resolve_real_binary(
+    binary_name: &str,
+    argv0: &str,
+    env: &dyn EnvSource,
+) -> Option<PathBuf> {
+    if binary_name == "git" {
+        return resolve_real_git(argv0, env);
+    }
+    // Generic PATH walk for non-git binaries (e.g. "gh").
+    let shim_path = shim_canonical_path(argv0);
+    if let Some(path_var) = env.get("PATH") {
+        for entry in path_var.split(':') {
+            if entry.is_empty() {
+                continue;
+            }
+            let candidate = Path::new(entry).join(binary_name);
+            if !is_executable(&candidate) {
+                continue;
+            }
+            if let Some(shim) = &shim_path {
+                let shim_dir = shim.parent().map(Path::to_path_buf);
+                let candidate_dir = candidate.parent().map(Path::to_path_buf);
+                let same_dir = match (&shim_dir, &candidate_dir) {
+                    (Some(sd), Some(cd)) => canonical_eq(sd, cd),
+                    _ => false,
+                };
+                if same_dir || canonical_eq(&candidate, shim) {
+                    continue;
+                }
+            }
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Walk `%PATH%` on Windows for `binary_name`, skipping any candidate that
+/// resolves to the shim binary itself.
+///
+/// For `"git"`, delegates to `resolve_real_git` which includes hardcoded
+/// fallback paths.  For all other binaries (e.g. `"gh"`), performs the same
+/// shim-skipping PATH walk without fallbacks.
+///
+/// Returns `None` only when no matching binary is found anywhere on PATH.
+#[cfg(not(unix))]
+pub(crate) fn resolve_real_binary(
+    binary_name: &str,
+    argv0: &str,
+    env: &dyn EnvSource,
+) -> Option<PathBuf> {
+    use std::path::Path;
+
+    if binary_name == "git" {
+        return resolve_real_git(argv0, env);
+    }
+
+    // Generic PATH walk for non-git binaries (e.g. "gh") on Windows.
+    let shim_canonical = std::path::PathBuf::from(argv0)
+        .canonicalize()
+        .ok()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.canonicalize().ok())
+        });
+
+    if let Some(path_var) = env.get("PATH") {
+        for entry in path_var.split(';') {
+            if entry.is_empty() {
+                continue;
+            }
+            // Try <name>.exe then <name> (cmd.exe resolves extensions).
+            for suffix in &[".exe", ""] {
+                let candidate = Path::new(entry).join(format!("{binary_name}{suffix}"));
                 if !candidate.exists() {
                     continue;
                 }

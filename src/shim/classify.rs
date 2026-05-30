@@ -3,7 +3,7 @@
 //! Ports `_classify_git_command` from `hooks/bash_redirect_hook.py` to Rust.
 //! All logic is pure — no I/O, no env reads.
 
-/// The result of classifying a `git …` argv slice.
+/// The result of classifying a `git …` or `gh …` argv slice.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Classification<'a> {
     /// `git diff <ref>..<ref>` → `get_change_manifest`
@@ -19,21 +19,57 @@ pub(crate) enum Classification<'a> {
     ShowSnapshot { sha: &'a str },
     /// `git blame <path>` → `get_file_snapshots` (blame variant)
     BlameSnapshot { path: &'a str },
-    /// Anything else — pass through to real git.
+    /// `gh pr diff <N>` → `get_change_manifest` via resolved PR base..head range
+    GhPrDiff { pr_number: &'a str },
+    /// Anything else — pass through to real git/gh.
     Passthrough,
 }
 
-/// Classify a `git …` argv slice (argv[0] is the binary name, argv[1] is the
-/// git subcommand).  Returns `Passthrough` when the subcommand is not on the
-/// watch list or does not carry a ref range.
+/// Classify a `git …` or `gh …` argv slice.
+///
+/// `argv[0]` is the binary name (`"git"` or `"gh"`); `argv[1]` is the
+/// subcommand.  Returns `Passthrough` when the subcommand is not on the
+/// watch list or the argv is too short.
 pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> Classification<'a> {
-    // Need at least ["git", "<subcommand>"]
     if argv.len() < 2 {
         return Classification::Passthrough;
     }
+    // argv[0] may be an absolute path (e.g. /tmp/bin/gh) when invoked via a
+    // symlink; extract only the filename component for dispatch, matching what
+    // main.rs does for the shim-mode gate.
+    let binary_basename = std::path::Path::new(argv[0])
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(argv[0]);
     let subcommand = argv[1];
     let rest = &argv[2..];
 
+    match binary_basename {
+        "gh" => classify_gh(subcommand, rest),
+        _ => classify_git(subcommand, rest),
+    }
+}
+
+/// Classify `gh <subcommand> …` argv.
+///
+/// Only `gh pr diff <N>` is intercepted; everything else passes through to
+/// the real `gh` binary.
+fn classify_gh<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
+    // gh pr diff <N>  →  intercept only if N is a numeric PR number.
+    // Flags (starting with -) and non-numeric tokens pass through.
+    if subcommand == "pr"
+        && rest.first() == Some(&"diff")
+        && let Some(pr_number) = rest.get(1)
+        && !pr_number.starts_with('-')
+        && pr_number.chars().all(|c| c.is_ascii_digit())
+    {
+        return Classification::GhPrDiff { pr_number };
+    }
+    Classification::Passthrough
+}
+
+/// Classify `git <subcommand> …` argv (existing logic, unchanged).
+fn classify_git<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
     match subcommand {
         "log" => classify_log(rest),
         "diff" => classify_diff(rest),
@@ -128,6 +164,71 @@ mod tests {
     use super::*;
 
     // --- Passthrough cases ---
+
+    // --- gh classification ---
+
+    #[test]
+    fn it_classifies_gh_pr_diff_as_gh_pr_diff() {
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "42"]),
+            Classification::GhPrDiff { pr_number: "42" }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_gh_repo_view() {
+        assert_eq!(
+            classify(&["gh", "repo", "view", "--json", "name"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_gh_issue_list() {
+        assert_eq!(
+            classify(&["gh", "issue", "list", "--limit", "1"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_gh_pr_diff_without_number() {
+        // "gh pr diff" with no number is ambiguous — pass through.
+        assert_eq!(classify(&["gh", "pr", "diff"]), Classification::Passthrough);
+    }
+
+    #[test]
+    fn it_passes_through_gh_pr_diff_help_flag() {
+        // "gh pr diff --help" must pass through, not be treated as PR number "--help"
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--help"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_gh_pr_diff_with_other_flags() {
+        // Other flags like --web, --patch, --name-only must pass through
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--web"]),
+            Classification::Passthrough
+        );
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--patch"]),
+            Classification::Passthrough
+        );
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "--name-only"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_gh_pr_list() {
+        assert_eq!(classify(&["gh", "pr", "list"]), Classification::Passthrough);
+    }
+
+    // --- git classification (existing) ---
 
     #[test]
     fn it_passes_through_git_status() {

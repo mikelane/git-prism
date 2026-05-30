@@ -22,7 +22,9 @@ Platform note for @ISSUE-322:
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -43,6 +45,26 @@ from shim_wrapper_steps import (
 
 _SHIM_DIR_RELATIVE = ".local/share/git-prism/bin"
 _SHIM_EXPORT_FRAGMENT = ".local/share/git-prism/bin"
+
+_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _install_stub_gh(context: Context, script: str) -> Path:
+    """Write a stub gh shell script into a fresh tempdir/bin and make it executable.
+
+    Returns the path to the stub binary.  Registers the tempdir for cleanup and
+    sets context.stub_gh_dir / context.stub_gh_path.
+    """
+    tmpdir = tempfile.mkdtemp()
+    context.cleanup_dirs.append(tmpdir)
+    stub_dir = Path(tmpdir) / "bin"
+    stub_dir.mkdir()
+    stub_path = stub_dir / "gh"
+    stub_path.write_text(script)
+    stub_path.chmod(stub_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    context.stub_gh_dir = stub_dir
+    context.stub_gh_path = stub_path
+    return stub_path
 
 
 def _run_binary(
@@ -137,6 +159,79 @@ def step_shim_installed_with_gh_symlink(context: Context) -> None:
     gh_link.symlink_to(binary)
     context.gh_shim_dir = shim_dir
     context.gh_shim_link = gh_link
+
+
+@given("a stub gh binary is installed that knows the fixture PR SHAs")
+def step_stub_gh_with_pr_shas(context: Context) -> None:
+    """Create a stub gh script that returns fixture repo commit SHAs for pr view.
+
+    The stub lives in its own tempdir/bin directory (separate from the shim dir)
+    so PATH ordering controls which 'gh' wins: stub_gh_dir must come before
+    gh_shim_dir so that when the shim (argv0=gh) calls Command::new("gh") to
+    resolve the PR range, it hits this stub — not a recursive shim invocation.
+
+    The stub handles:
+      pr view <N> --json baseRefOid,headRefOid  -> fixture base..head SHAs
+      anything else                             -> exit 0, empty output
+    """
+    repo_path = context.repo_path
+    # Capture the two commit SHAs from the fixture repo (base=HEAD~1, head=HEAD).
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD~1"], cwd=repo_path, text=True
+    ).strip()
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo_path, text=True
+    ).strip()
+    context.fixture_base_sha = base_sha
+    context.fixture_head_sha = head_sha
+
+    assert _SHA_PATTERN.fullmatch(base_sha), (
+        f"base_sha has unexpected shape (want 40 hex chars): {base_sha!r}"
+    )
+    assert _SHA_PATTERN.fullmatch(head_sha), (
+        f"head_sha has unexpected shape (want 40 hex chars): {head_sha!r}"
+    )
+
+    stub_script = f"""\
+#!/bin/sh
+# Stub gh — hermetic, no network, no auth required.
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$4" = "--json" ]; then
+    printf '%s' '{{"baseRefOid":"{base_sha}","headRefOid":"{head_sha}"}}'
+    exit 0
+fi
+echo "stub gh: unhandled args: $*" >&2
+exit 64
+"""
+    _install_stub_gh(context, stub_script)
+
+
+@given("a stub gh binary is installed for passthrough comparison")
+def step_stub_gh_for_passthrough(context: Context) -> None:
+    """Create a stub gh script with canned deterministic output for passthrough scenarios.
+
+    The stub handles the specific subcommands used by passthrough scenarios:
+      repo view --json name     -> {"name":"stub-repo"}
+      issue list --limit 1     -> []
+      anything else            -> exit 0, empty output
+
+    This stub is placed in stub_gh_dir and also recorded as stub_gh_path so
+    the 'the stub gh binary runs ... directly' When step can invoke it directly.
+    """
+    stub_script = """\
+#!/bin/sh
+# Stub gh for passthrough parity — canned output, no network.
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+    printf '%s' '{"name":"stub-repo"}'
+    exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
+    printf '%s' '[]'
+    exit 0
+fi
+echo "stub gh: unhandled args: $*" >&2
+exit 64
+"""
+    _install_stub_gh(context, stub_script)
 
 
 @given("a real gh binary is available on PATH")
@@ -273,19 +368,52 @@ def step_agent_runs_via_gh_shim(context: Context, command: str) -> None:
     )
 
     env = _clean_env()
-    env["PATH"] = f"{context.gh_shim_dir}:{env.get('PATH', '')}"
+    # Put stub_gh_dir FIRST on PATH so both the shim's internal Command::new("gh")
+    # (used to resolve PR SHAs) and any subsequent gh call resolve to the stub,
+    # not to the shim symlink itself (which would cause infinite recursion).
+    # We invoke the shim directly by absolute path (context.gh_shim_link) rather
+    # than via PATH, so the agent's command still routes through the shim.
+    stub_prefix = f"{context.stub_gh_dir}:" if hasattr(context, "stub_gh_dir") else ""
+    env["PATH"] = f"{stub_prefix}{env.get('PATH', '')}"
     env["CLAUDECODE"] = "1"
 
+    # Invoke the shim binary directly (not via PATH) to avoid ambiguity with
+    # the stub on PATH.  argv[0] must be the shim link path so the binary sees
+    # "gh" as its own name and routes to handle_gh_pr_diff.
+    shim_bin = str(context.gh_shim_link)
     result = subprocess.run(  # noqa: S603
-        parts,
+        [shim_bin, *parts[1:]],
         capture_output=True,
         text=True,
         env=env,
+        cwd=getattr(context, "repo_path", None),
         check=False,
         timeout=_SHIM_TIMEOUT_SECONDS,
     )
     context.gh_shim_result = result
     context.result = result
+
+
+@when("the stub gh binary runs \"{command}\" directly")
+def step_stub_gh_runs_directly(context: Context, command: str) -> None:
+    """Run the same gh command with the stub binary directly for parity comparison.
+
+    Invokes context.stub_gh_path directly (not via PATH resolution) so the
+    comparison is against the stub's own output — no real gh required.
+    """
+    parts = command.split()
+    assert parts and parts[0] == "gh", (
+        f"Expected command starting with 'gh', got: {command!r}"
+    )
+
+    result = subprocess.run(  # noqa: S603
+        [str(context.stub_gh_path), *parts[1:]],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+    context.real_gh_result = result
 
 
 @when("the real gh binary runs \"{command}\" directly")

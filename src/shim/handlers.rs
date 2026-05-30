@@ -48,6 +48,7 @@ fn dispatch<W: Write>(
         } => handle_function_context(*range, pickaxe_term, repo_path, out),
         Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, out),
         Classification::BlameSnapshot { path } => handle_blame_snapshot(path, repo_path, out),
+        Classification::GhPrDiff { pr_number } => handle_gh_pr_diff(pr_number, repo_path, out),
         Classification::Passthrough => {
             anyhow::bail!("dispatch called with Passthrough — caller bug")
         }
@@ -133,6 +134,83 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
     let result = build_snapshots(repo_path, &base_ref, &head_ref, &[], &options)?;
     serde_json::to_writer_pretty(out, &result)?;
     Ok(())
+}
+
+/// Handle `gh pr diff <N>` by resolving the PR's base..head ref range via the
+/// `gh` CLI, then feeding it through the existing manifest pipeline.
+///
+/// Execs `gh pr view <N> --json baseRefOid,headRefOid` to obtain the commit
+/// SHAs, then calls `handle_manifest` with `"base_sha..head_sha"`.
+///
+/// `repo_path` may be a subdirectory of the git repo (e.g. `bdd/`); this
+/// function discovers the actual git root before opening it, mirroring what
+/// `git rev-parse --show-toplevel` does.
+fn handle_gh_pr_diff<W: Write>(
+    pr_number: &str,
+    repo_path: &Path,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let range = resolve_pr_range(pr_number)?;
+    // Discover the real git root so gix::open() doesn't fail on subdirectories.
+    let git_root = discover_git_root(repo_path)?;
+    handle_manifest(&range, &git_root, out)
+}
+
+/// Walk up the directory tree from `start` until we find a directory that
+/// contains a `.git` entry (file or directory), and return that directory.
+///
+/// This mirrors what `git rev-parse --show-toplevel` does and is necessary
+/// because `gix::open` requires the exact repo root, not a subdirectory.
+fn discover_git_root(start: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Ok(current);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => anyhow::bail!(
+                "could not find git repository root from {}",
+                start.display()
+            ),
+        }
+    }
+}
+
+/// Resolve a PR number to a `"base_sha..head_sha"` ref range string by
+/// calling `gh pr view <N> --json baseRefOid,headRefOid`.
+///
+/// Uses commit SHAs (not branch names) so the range works even after the PR
+/// branch has been deleted (merged PRs).  The SHAs are permanent; branch names
+/// are ephemeral.
+///
+/// Returns an error when `gh` is not on PATH, exits non-zero, or returns
+/// JSON that cannot be parsed.
+fn resolve_pr_range(pr_number: &str) -> anyhow::Result<String> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", pr_number, "--json", "baseRefOid,headRefOid"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run gh pr view: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "gh pr view {pr_number} failed with status {}: {stderr}",
+            output.status
+        );
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| anyhow::anyhow!("gh pr view returned invalid JSON: {e}"))?;
+
+    let base_sha = json["baseRefOid"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("gh pr view JSON missing baseRefOid"))?;
+    let head_sha = json["headRefOid"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("gh pr view JSON missing headRefOid"))?;
+
+    Ok(format!("{base_sha}..{head_sha}"))
 }
 
 fn handle_blame_snapshot<W: Write>(

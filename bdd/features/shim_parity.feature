@@ -70,15 +70,20 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
   # When a symlink named "gh" points at the git-prism shim binary, the shim
   # must recognise argv[0] == "gh" and route pr diff calls through git-prism's
   # structured diff pipeline. All other gh subcommands pass through unchanged.
-  # Requires a real gh binary on PATH for passthrough comparison.
+  #
+  # All scenarios are hermetic: a stub "gh" script is placed on PATH ahead of
+  # any real gh installation. The stub responds with fixture data so no network
+  # access or GitHub authentication is required. The fixture git repo provides
+  # the real commits whose SHAs the stub returns.
   # ===========================================================================
 
   Rule: gh pr diff is routed through git-prism structured output
 
-    @ISSUE-323 @not_implemented
+    @ISSUE-323
     Scenario: gh pr diff produces structured JSON when invoked via the shim
-      Given the shim is installed with a "gh" symlink
-      And a real gh binary is available on PATH
+      Given a fixture git repository with two commits
+      And the shim is installed with a "gh" symlink
+      And a stub gh binary is installed that knows the fixture PR SHAs
       When an agent runs "gh pr diff 1" via the shim with CLAUDECODE=1
       Then the exit code is 0
       And the output is valid JSON
@@ -87,21 +92,21 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
 
   Rule: Non-diff gh commands pass through to the real gh binary unchanged
 
-    @ISSUE-323 @not_implemented
+    @ISSUE-323
     Scenario: gh repo view passes through with matching exit code and output
       Given the shim is installed with a "gh" symlink
-      And a real gh binary is available on PATH
+      And a stub gh binary is installed for passthrough comparison
       When an agent runs "gh repo view --json name" via the shim with CLAUDECODE=1
-      And the real gh binary runs "gh repo view --json name" directly
+      And the stub gh binary runs "gh repo view --json name" directly
       Then the shim exit code matches the real gh exit code
       And the shim stdout matches the real gh stdout
 
-    @ISSUE-323 @not_implemented
+    @ISSUE-323
     Scenario: gh issue list passes through unchanged
       Given the shim is installed with a "gh" symlink
-      And a real gh binary is available on PATH
+      And a stub gh binary is installed for passthrough comparison
       When an agent runs "gh issue list --limit 1" via the shim with CLAUDECODE=1
-      And the real gh binary runs "gh issue list --limit 1" directly
+      And the stub gh binary runs "gh issue list --limit 1" directly
       Then the shim exit code matches the real gh exit code
       And the shim stdout matches the real gh stdout
 
