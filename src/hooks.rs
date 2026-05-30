@@ -500,10 +500,10 @@ pub fn uninstall_redirect_hook(scope: Scope, home: &Path, cwd: &Path) -> Result<
 
 /// The on-disk directory where the path-shim symlink is installed.
 /// Relative to `$HOME`.
-const PATH_SHIM_REL_DIR: &str = ".local/share/git-prism/bin";
+pub const PATH_SHIM_REL_DIR: &str = ".local/share/git-prism/bin";
 
 /// Name of the git shim symlink inside `PATH_SHIM_REL_DIR`.
-const PATH_SHIM_LINK_NAME: &str = "git";
+pub const PATH_SHIM_LINK_NAME: &str = "git";
 
 /// Status of the path-shim symlink reported by `hooks status`.
 #[derive(Debug, Clone, PartialEq, Eq)]

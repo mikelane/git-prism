@@ -81,7 +81,7 @@ git-prism hooks status      # shows whether the hook is installed and at which s
 ## PATH shim (experimental)
 
 > **Unix-only.** The shim relies on `execvp`-style process replacement that has no
-> clean Windows equivalent. `git-prism hooks install --path-shim` cleanly bails on
+> clean Windows equivalent. `git-prism shim install` cleanly bails on
 > non-Unix platforms ("not supported on non-Unix platforms"), and the shim code
 > compiles as a no-op there. Everything below assumes macOS or Linux.
 
@@ -113,7 +113,7 @@ means vanilla git, always. The classifier and watch list live in
 ### Install
 
 ```bash
-git-prism hooks install --path-shim
+git-prism shim install
 ```
 
 This creates a symlink at `~/.local/share/git-prism/bin/git` pointing at the
@@ -122,18 +122,28 @@ shell profile:
 
 ```
 Created symlink: /home/you/.local/share/git-prism/bin/git
-Add this to your shell profile (~/.bashrc, ~/.zshrc, ...):
+Add this to your shell init (~/.zshrc or ~/.bashrc):
   export PATH="$HOME/.local/share/git-prism/bin:$PATH"
 ```
 
 Add that `export` line to your shell profile so the shim directory precedes the
 real git on `PATH`, then open a new shell.
 
+To check status or remove the shim:
+
+```bash
+git-prism shim status     # reports installed / not installed + directory
+git-prism shim uninstall  # removes the symlink
+```
+
+> **Deprecated:** `git-prism hooks install --path-shim` still works in this
+> release but prints a deprecation warning. Use `git-prism shim install` instead.
+
 ### Smoke test
 
 ```bash
 # 1. Install and wire up PATH
-git-prism hooks install --path-shim
+git-prism shim install
 export PATH="$HOME/.local/share/git-prism/bin:$PATH"
 
 # 2. As a non-agent, you get vanilla git — passthrough

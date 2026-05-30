@@ -8,6 +8,7 @@ mod server;
 // The shim module is complete but not yet wired to argv[0] dispatch (#287).
 #[allow(dead_code)]
 mod shim;
+mod shim_cmd;
 mod telemetry;
 mod tools;
 mod treesitter;
@@ -104,6 +105,11 @@ enum Commands {
     Languages,
     /// Detect whether the current process is running on behalf of an AI agent
     AgentDetect,
+    /// Install, uninstall, or query the PATH shim (creates ~/.local/share/git-prism/bin/git)
+    Shim {
+        #[command(subcommand)]
+        command: ShimCommands,
+    },
     /// Install / uninstall / report status of the bundled redirect hook
     Hooks {
         #[command(subcommand)]
@@ -139,6 +145,20 @@ enum HooksCommands {
         path_shim: bool,
     },
     /// Report which scopes have the redirect hook installed
+    Status,
+}
+
+#[derive(Subcommand)]
+enum ShimCommands {
+    /// Create ~/.local/share/git-prism/bin/git symlink pointing at this binary
+    Install {
+        /// Overwrite a regular file at the shim target (use with caution)
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the ~/.local/share/git-prism/bin/git symlink
+    Uninstall,
+    /// Report whether the shim is installed and show the shim directory
     Status,
 }
 
@@ -185,6 +205,9 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 }
             }
             if path_shim {
+                eprintln!(
+                    "warning: --path-shim is deprecated; use `git-prism shim install` instead"
+                );
                 let symlink_path = hooks::install_path_shim(&home, force)?;
                 println!("Created symlink: {}", symlink_path.display());
                 println!(
@@ -393,6 +416,14 @@ async fn run() -> anyhow::Result<()> {
                 },
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Commands::Shim { command } => {
+            let home = hooks::home_dir()?;
+            match command {
+                ShimCommands::Install { force } => shim_cmd::run_install(&home, force)?,
+                ShimCommands::Uninstall => shim_cmd::run_uninstall(&home)?,
+                ShimCommands::Status => shim_cmd::run_status(&home)?,
+            }
         }
         Commands::Hooks { command } => {
             let exit_code = run_hooks_command(command)?;
