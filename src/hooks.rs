@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Map, Value};
 
 /// Resolve `$HOME` for the current process. Returns an error rather than a
