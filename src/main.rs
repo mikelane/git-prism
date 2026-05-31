@@ -172,7 +172,7 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
     match command {
         HooksCommands::Install {
             scope,
-            dry_run: _,
+            dry_run,
             force,
             path_shim,
         } => {
@@ -181,6 +181,15 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 eprintln!(
                     "warning: --path-shim is deprecated; use `git-prism shim install` instead"
                 );
+                if dry_run {
+                    println!(
+                        "dry-run: would create symlink at $HOME/.local/share/git-prism/bin/git (not created)"
+                    );
+                    println!(
+                        "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
+                    );
+                    return Ok(0);
+                }
                 let symlink_path = hooks::install_path_shim(&home, force)?;
                 println!("Created symlink: {}", symlink_path.display());
                 println!(
