@@ -61,7 +61,6 @@ impl Scope {
 #[derive(Debug, Clone)]
 pub struct ScopePaths {
     pub settings_file: PathBuf,
-    pub hooks_dir: PathBuf,
 }
 
 impl ScopePaths {
@@ -71,21 +70,18 @@ impl ScopePaths {
                 let claude = home.join(".claude");
                 Self {
                     settings_file: claude.join("settings.json"),
-                    hooks_dir: claude.join("hooks"),
                 }
             }
             Scope::Project => {
                 let claude = cwd.join(".claude");
                 Self {
                     settings_file: claude.join("settings.json"),
-                    hooks_dir: claude.join("hooks"),
                 }
             }
             Scope::Local => {
                 let claude = cwd.join(".claude");
                 Self {
                     settings_file: claude.join("settings.local.json"),
-                    hooks_dir: claude.join("hooks"),
                 }
             }
         }
@@ -474,7 +470,6 @@ mod tests {
             local.settings_file,
             Path::new("/proj/.claude/settings.local.json")
         );
-        assert_eq!(local.hooks_dir, Path::new("/proj/.claude/hooks"));
     }
 
     // -------------------------------------------------------------------------
