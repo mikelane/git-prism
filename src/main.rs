@@ -110,7 +110,7 @@ enum Commands {
         #[command(subcommand)]
         command: ShimCommands,
     },
-    /// Install / uninstall / report status of the bundled redirect hook
+    /// Uninstall legacy redirect-hook entries; query/install/uninstall the PATH shim
     Hooks {
         #[command(subcommand)]
         command: HooksCommands,
@@ -119,19 +119,18 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum HooksCommands {
-    /// Install the bundled redirect hook into Claude Code's settings
+    /// Install the PATH shim (redirect hook removed in v0.9.0; use --path-shim or `git-prism shim install`)
     Install {
-        /// Where to install the hook (required unless --path-shim is set)
+        /// Accepted for backwards compatibility; ignored (redirect hook removed in v0.9.0)
         #[arg(long, value_parser = ["user", "project", "local"])]
         scope: Option<String>,
-        /// Print the would-be settings JSON without writing anything
+        /// Accepted for backwards compatibility; ignored
         #[arg(long)]
         dry_run: bool,
-        /// Overwrite a user-edited entry in place; also allows overwriting a
-        /// pre-existing regular file at the path-shim target (use with caution)
+        /// Overwrite a pre-existing regular file at the path-shim target (use with caution)
         #[arg(long)]
         force: bool,
-        /// Install the PATH shim: create ~/.local/share/git-prism/bin/git symlink
+        /// Deprecated alias for `git-prism shim install`; still works with a warning
         #[arg(long)]
         path_shim: bool,
     },
@@ -173,38 +172,12 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
     match command {
         HooksCommands::Install {
             scope,
-            dry_run,
+            dry_run: _,
             force,
             path_shim,
         } => {
-            if scope.is_none() && !path_shim {
-                anyhow::bail!("--scope is required unless --path-shim is set");
-            }
-            if let Some(scope_str) = scope {
-                let scope = hooks::Scope::parse(&scope_str)?;
-                let options = hooks::InstallOptions {
-                    scope,
-                    dry_run,
-                    force,
-                };
-                let mut stdin = std::io::stdin();
-                let stdout = std::io::stdout();
-                let stderr = std::io::stderr();
-                let mut stdout_lock = stdout.lock();
-                let mut stderr_lock = stderr.lock();
-                let code = hooks::install_redirect_hook(
-                    &options,
-                    &home,
-                    &cwd,
-                    &mut stdin,
-                    &mut stdout_lock,
-                    &mut stderr_lock,
-                )?;
-                if code != 0 {
-                    return Ok(code);
-                }
-            }
             if path_shim {
+                // Deprecated alias — still works but warns.
                 eprintln!(
                     "warning: --path-shim is deprecated; use `git-prism shim install` instead"
                 );
@@ -213,8 +186,26 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 println!(
                     "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
                 );
+                return Ok(0);
             }
-            Ok(0)
+            // hooks install without --path-shim: the redirect hook was removed in v0.9.0.
+            // Scope argument is accepted by clap but ignored — we always error.
+            let _ = scope;
+            eprintln!(
+                "error: the redirect hook (bash_redirect_hook.py) was removed in v0.9.0.\n\
+                 \n\
+                 Use the PATH shim instead:\n\
+                 \n\
+                 \x20 git-prism shim install\n\
+                 \n\
+                 The shim intercepts git at the PATH layer and is a strict superset of the\n\
+                 redirect hook's coverage. If you had the old hook installed, remove it first:\n\
+                 \n\
+                 \x20 git-prism hooks uninstall --scope user   # or --scope project / local\n\
+                 \n\
+                 See docs/decisions/0011-redirect-hook-removal.md for details."
+            );
+            Ok(1)
         }
         HooksCommands::Uninstall { scope, path_shim } => {
             if scope.is_none() && !path_shim {

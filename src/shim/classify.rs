@@ -1,6 +1,7 @@
 //! argv-based git subcommand classifier.
 //!
-//! Ports `_classify_git_command` from `hooks/bash_redirect_hook.py` to Rust.
+//! Implements the same command classification logic that was previously in
+//! `hooks/bash_redirect_hook.py` (removed in v0.9.0, see ADR-0011).
 //! All logic is pure — no I/O, no env reads.
 
 /// The result of classifying a `git …` or `gh …` argv slice.
