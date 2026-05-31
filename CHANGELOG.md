@@ -7,10 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`git-prism hooks install` (without `--path-shim`) now exits non-zero.** The bundled redirect hook (`bash_redirect_hook.py` / `git-prism-redirect.sh`) was removed. Running `git-prism hooks install` without `--path-shim` prints a migration message to stderr and exits 1.
+
+  **Migration:** use the PATH shim instead:
+
+  ```sh
+  # Remove any previously installed redirect hook entry first:
+  git-prism hooks uninstall --scope user   # or --scope project / local
+
+  # Install the PATH shim:
+  git-prism shim install
+  ```
+
+  The PATH shim intercepts git at the PATH layer and is a strict superset of the redirect hook's coverage. See `docs/decisions/0011-redirect-hook-removal.md` for rationale. (#326)
+
 ### Added
 
 - **`git-prism shim` subcommand (first-class PATH shim management).** `git-prism shim install`, `git-prism shim uninstall`, and `git-prism shim status` are now first-class top-level subcommands, replacing the `--path-shim` flag under `git-prism hooks`. The shim install logic is unchanged — the symlink goes to `~/.local/share/git-prism/bin/git` — but the entry point is now semantically correct: the shim is a PATH-layer interceptor, not a Claude Code hook. (#324)
-- **`git-prism hooks install --path-shim` deprecation warning.** The flag still works for one release but now prints `warning: --path-shim is deprecated; use \`git-prism shim install\` instead` to stderr. It will be removed in the next minor version (#326). (#324)
+- **`git-prism hooks install --path-shim` deprecated alias.** The flag still works with a warning (`warning: --path-shim is deprecated; use \`git-prism shim install\` instead`). Use `git-prism shim install` for new installs. (#324)
 - **PATH shim (experimental, Unix-only).** Installed as a `git` binary ahead of the real git on `PATH`, git-prism intercepts watch-list subcommands (`diff`/`log`/`show`/`blame`/pickaxe) that carry a ref range when an AI agent is detected, routing them to structured JSON; humans, CI, non-agents, and ref-range-less commands pass through to vanilla git untouched. Ships the Python classifier ported to `src/shim/classify.rs`, `argv[0]`-aware dispatch in `main` (#287), the shim core of `classify`/`real_git`/handlers (#286), and a `git-prism hooks install --path-shim` flag (plus matching `uninstall`/`status`) that creates the `~/.local/share/git-prism/bin/git` symlink and prints the `Created symlink:` line and PATH-export instructions (#288, #302). Agent detection reuses the env-var logic from #280. `GIT_PRISM_INSIDE_SHIM=1` forces passthrough and is set in child processes to break recursion through nested git calls. `GIT_PRISM_DEBUG_RESOLVER=1` prints the resolved real-git path to stderr (#299). (#284)
 - **Shim telemetry counters.** `shim_invocations_total` and `shim_classification_total` record how often the shim runs and how each command is classified (intercept vs passthrough). (#289)
 - **`git-prism agent-detect` subcommand.** Prints a JSON object indicating whether the current process is running on behalf of an AI coding agent, detected via environment variables only. Detection checks `AI_AGENT` (Vercel cross-tool convention), `AGENT` with an allowlisted value (`goose`, `amp`), and eight tool-specific markers (`CLAUDECODE`, `CURSOR_AGENT`, `GEMINI_CLI`, `CODEX_SANDBOX`, `CLINE_ACTIVE`, `AUGMENT_AGENT`, `OPENCODE_CLIENT`, `TRAE_AI_SHELL_ID`). `CI=true` is a hard override that always returns `{"agent": null, "signal": null}`. Not exposed as an MCP tool — diagnostics/ops use only. (#278)

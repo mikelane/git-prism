@@ -55,42 +55,39 @@ claude mcp add git-prism -- git-prism serve
 That's it. The server uses stdio transport and is available in all Claude Code
 sessions.
 
-## Bundled redirect hooks
+## Redirect hook (removed in v0.9.0)
 
-### What it does
+Earlier versions bundled a Claude Code `PreToolUse` redirect hook, installed via
+`git-prism hooks install`. It was **removed in v0.9.0**: the [PATH shim](#path-shim)
+below is a strict superset of its coverage and the hook's structural blind spots
+made it the weaker of the two. See
+[ADR 0010](docs/decisions/0010-shim-direct-call-interception.md) and
+[ADR 0011](docs/decisions/0011-redirect-hook-removal.md) for the rationale.
 
-The bundled redirect hook blocks accidental bash redirections that overwrite tracked files in agentic sessions. It soft-warns on watch-listed paths and hard-blocks `gh pr diff` and `mcp__github__*` tool calls that use output redirection. The hook uses a Python stdlib tokenizer (`shlex`) to parse bash structurally, catching compound commands (`&&`), subshells, pipelines, and variable expansion — not just simple regexes.
-
-Requires `python3` (3.9+) on PATH. macOS ships this; Linux users can install via the system package manager.
-
-### Install
-
-```bash
-git-prism hooks install
-```
-
-The command copies `~/.claude/hooks/git-prism-redirect.sh` and the Python helper alongside it, then writes a `PreToolUse` hook entry into Claude Code's `~/.claude/settings.json`. Default scope is `user` because Claude Code issue [anthropics/claude-code#13898](https://github.com/anthropics/claude-code/issues/13898) prevents custom subagents from correctly calling project-scoped MCP servers — using user scope ensures the redirect works in both root agents and subagents.
-
-### Uninstall and status
+`git-prism hooks install` now exits with an error directing you to
+`git-prism shim install`. If you ran the old redirect hook, clean up its leftover
+`PreToolUse` entry:
 
 ```bash
-git-prism hooks uninstall   # removes the hook file and settings.json entry
-git-prism hooks status      # shows whether the hook is installed and at which scope
+git-prism hooks uninstall   # removes the legacy git-prism-bash-redirect-v1 settings.json entry
+git-prism hooks status      # reports whether a legacy entry remains, and at which scope
 ```
 
-## PATH shim (experimental)
+## PATH shim
 
-> **Unix-only.** The shim relies on `execvp`-style process replacement that has no
-> clean Windows equivalent. `git-prism shim install` cleanly bails on
-> non-Unix platforms ("not supported on non-Unix platforms"), and the shim code
-> compiles as a no-op there. Everything below assumes macOS or Linux.
+> **Install is Unix-only.** `git-prism shim install` creates a symlink and relies
+> on process-level interception; it cleanly bails on non-Unix platforms
+> ("not supported on non-Unix platforms"). The passthrough code paths build and
+> run on Windows (see [#322](https://github.com/mikelane/git-prism/pull/332)), but
+> the install flow itself assumes macOS or Linux.
 
 ### What it does and why
 
-The bundled redirect hook above only fires inside Claude Code's `PreToolUse`
+A Claude Code `PreToolUse` hook only ever fires inside Claude Code's `PreToolUse`
 pipeline. Agents that shell out to `git` through other channels — a subprocess,
-a shell tool, a wrapper script — never hit it. The PATH shim closes that gap at
-the process level.
+a shell tool, a build script, a wrapper — never hit it. That blind spot is why
+the bundled redirect hook was removed in favor of the PATH shim, which closes the
+gap at the process level.
 
 When installed, `git-prism` is placed on your `PATH` as a binary literally named
 `git`, ahead of the real git. Every `git` invocation flows through git-prism
