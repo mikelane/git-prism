@@ -250,17 +250,12 @@ def step_seed_user_setting(context: Context, entry_id: str) -> None:
 def step_seed_user_settings_with_path(
     context: Context, entry_id: str, path: str
 ) -> None:
-    """Write a single PreToolUse entry with the given id+path to user settings."""
-    settings_path = context.user_settings_path
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = {
-        "hooks": {
-            "PreToolUse": [
-                {"id": entry_id, "matcher": "Bash", "command": path}
-            ]
-        }
-    }
-    settings_path.write_text(json.dumps(existing, indent=2))
+    """Append a PreToolUse entry with the given id+path to user settings.
+
+    Merges into the existing file so multiple Given steps can accumulate
+    entries without overwriting each other.
+    """
+    _write_redirect_entry(context.user_settings_path, entry_id)
 
 
 def _write_redirect_entry(settings_path: Path, sentinel_id: str) -> None:
