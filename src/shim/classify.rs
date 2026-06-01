@@ -81,6 +81,10 @@ fn classify_git<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
 }
 
 fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
+    // Scripted-output flags take priority — caller wants text, not JSON.
+    if has_scripted_output_flag(rest) {
+        return Classification::Passthrough;
+    }
     // Pickaxe check BEFORE ref-range check (mirrors Python order).
     if let Some(term) = pickaxe_term(rest) {
         let range = rest.iter().copied().find(|t| has_ref_range(t));
@@ -97,6 +101,10 @@ fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
 }
 
 fn classify_diff<'a>(rest: &[&'a str]) -> Classification<'a> {
+    // Scripted-output flags take priority — caller wants text, not JSON.
+    if has_scripted_output_flag(rest) {
+        return Classification::Passthrough;
+    }
     if let Some(range) = rest.iter().copied().find(|t| has_ref_range(t)) {
         return Classification::Manifest { range };
     }
@@ -104,6 +112,10 @@ fn classify_diff<'a>(rest: &[&'a str]) -> Classification<'a> {
 }
 
 fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
+    // Scripted-output flags mean the caller wants text, not JSON.
+    if has_scripted_output_flag(rest) {
+        return Classification::Passthrough;
+    }
     // First non-flag argument is the sha.
     if let Some(sha) = rest.iter().copied().find(|t| !t.starts_with('-')) {
         return Classification::ShowSnapshot { sha };
@@ -111,7 +123,47 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
     Classification::Passthrough
 }
 
+/// Return `true` when the argv slice contains any flag that requests
+/// scripted/machine-readable text output from git (the caller wants raw git
+/// output, not a JSON manifest).
+///
+/// Flags covered:
+/// - `--format=<val>` and `--format` (pretty-print format string)
+/// - `--pretty=<val>` and `--pretty` (pretty-print preset or format string)
+/// - `-s` / `--no-patch` (suppress diff, often paired with `--format`)
+/// - `--porcelain` (machine-readable output for `status`, `blame`, etc.)
+/// - `--stat` (diffstat text output)
+/// - `-z` (NUL-terminated output)
+///
+/// # SAFETY: `--` separator not honoured
+///
+/// git treats `--` as the end of flags and the start of pathspecs, so
+/// `git diff a..b -- --stat` passes `--stat` as a filename, not a flag.
+/// This scanner does not track `--` and would incorrectly treat that
+/// `--stat` as a scripted-output flag, causing passthrough when interception
+/// was correct.  This is a theoretical input (no real caller names a file
+/// `--stat`) and adding a runtime guard would complicate the hot path for
+/// no practical benefit.  If it becomes real, scan for `--` first and stop
+/// checking beyond it.
+fn has_scripted_output_flag(tokens: &[&str]) -> bool {
+    tokens.iter().any(|tok| {
+        tok.starts_with("--format=")
+            || tok.starts_with("--pretty=")
+            || *tok == "--format"
+            || *tok == "--pretty"
+            || *tok == "-s"
+            || *tok == "--no-patch"
+            || *tok == "--porcelain"
+            || *tok == "--stat"
+            || *tok == "-z"
+    })
+}
+
 fn classify_blame<'a>(rest: &[&'a str]) -> Classification<'a> {
+    // Scripted-output flags (e.g. --porcelain) mean the caller wants raw text.
+    if has_scripted_output_flag(rest) {
+        return Classification::Passthrough;
+    }
     // First non-flag argument is the path.
     if let Some(path) = rest.iter().copied().find(|t| !t.starts_with('-')) {
         return Classification::BlameSnapshot { path };
@@ -461,10 +513,133 @@ mod tests {
     }
 
     #[test]
-    fn it_classifies_git_show_with_flags_before_sha() {
+    fn it_classifies_git_show_with_non_scripted_flag_before_sha() {
+        // Flags that don't request scripted output still route to ShowSnapshot.
+        // --name-only requests filenames only — not a scripted format override.
+        assert_eq!(
+            classify(&["git", "show", "--name-only", "abc1234"]),
+            Classification::ShowSnapshot { sha: "abc1234" }
+        );
+    }
+
+    // --- Scripted-output passthrough (issue #338) ---
+
+    #[test]
+    fn it_passes_through_git_show_with_format_flag() {
+        // The exact case from the bug report: git show -s --format=%ct HEAD
+        assert_eq!(
+            classify(&["git", "show", "-s", "--format=%ct", "HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_bare_format_flag() {
+        // git show --format <value> HEAD  (space-separated form)
+        assert_eq!(
+            classify(&["git", "show", "--format", "%ct", "HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_pretty_equals_flag() {
+        // git show --pretty=format:%H HEAD
+        assert_eq!(
+            classify(&["git", "show", "--pretty=format:%H", "HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_bare_pretty_flag() {
+        // git show --pretty HEAD  (bare --pretty with separate value)
+        assert_eq!(
+            classify(&["git", "show", "--pretty", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_porcelain_flag() {
+        // git show --porcelain HEAD
+        assert_eq!(
+            classify(&["git", "show", "--porcelain", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_stat_flag() {
+        // git show --stat HEAD  (diffstat text output)
         assert_eq!(
             classify(&["git", "show", "--stat", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_z_flag() {
+        // git show -z HEAD  (NUL-separated output)
+        assert_eq!(
+            classify(&["git", "show", "-z", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_log_with_format_flag() {
+        // git log --format=%ct main..HEAD  (scripted log output)
+        assert_eq!(
+            classify(&["git", "log", "--format=%ct", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_log_with_pretty_flag() {
+        // git log --pretty=oneline main..HEAD
+        assert_eq!(
+            classify(&["git", "log", "--pretty=oneline", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_diff_with_stat_flag() {
+        // git diff --stat main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "--stat", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_no_patch_flag() {
+        // --no-patch is a synonym for -s; caller is requesting suppressed output
+        assert_eq!(
+            classify(&["git", "show", "--no-patch", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_still_classifies_plain_git_show_sha_as_snapshot() {
+        // Regression: plain git show without scripted-output flags must still be intercepted
+        assert_eq!(
+            classify(&["git", "show", "abc1234"]),
             Classification::ShowSnapshot { sha: "abc1234" }
+        );
+    }
+
+    #[test]
+    fn it_still_classifies_git_log_range_without_format_as_history() {
+        // Regression: git log with a range but no scripted-output flags must still be intercepted
+        assert_eq!(
+            classify(&["git", "log", "main..HEAD"]),
+            Classification::History {
+                range: "main..HEAD"
+            }
         );
     }
 
@@ -484,6 +659,64 @@ mod tests {
     fn it_classifies_git_blame_with_flags_before_path() {
         assert_eq!(
             classify(&["git", "blame", "-w", "src/main.rs"]),
+            Classification::BlameSnapshot {
+                path: "src/main.rs"
+            }
+        );
+    }
+
+    // --- Item 9: additional scripted-output classifier tests ---
+
+    #[test]
+    fn it_passes_through_git_diff_with_format_flag_and_range() {
+        // git diff --format=%H main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "--format=%H", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_diff_with_s_flag_and_range() {
+        // git diff -s main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "-s", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_diff_with_z_flag_and_range() {
+        // git diff -z main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "-z", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_bare_s_flag() {
+        // git show -s abc1234 (bare -s, no --format)
+        assert_eq!(
+            classify(&["git", "show", "-s", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_blame_with_porcelain_flag() {
+        // git blame --porcelain src/main.rs — scripted output, must passthrough.
+        assert_eq!(
+            classify(&["git", "blame", "--porcelain", "src/main.rs"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_still_classifies_plain_git_blame_as_blame_snapshot() {
+        // Regression: plain git blame without scripted-output flags must still be intercepted.
+        assert_eq!(
+            classify(&["git", "blame", "src/main.rs"]),
             Classification::BlameSnapshot {
                 path: "src/main.rs"
             }

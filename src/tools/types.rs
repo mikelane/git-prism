@@ -452,6 +452,76 @@ pub struct FunctionContextResponse {
     pub pagination: PaginationInfo,
 }
 
+// --- ShowManifest types (git show <ref> enriched response) ---
+
+/// Author or committer identity with timestamp fields.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommitSignature {
+    pub name: String,
+    pub email: String,
+    /// ISO-8601 timestamp (e.g. `"2026-01-01T00:00:00+00:00"`).
+    pub date_iso: String,
+    /// Unix epoch seconds — the scalar that `git show -s --format=%ct` returns.
+    pub date_epoch: i64,
+}
+
+/// Per-commit metadata emitted by the enriched `git show <ref>` handler.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowCommitDetail {
+    pub sha: String,
+    /// First 8 hex characters of the SHA.
+    pub short_sha: String,
+    /// Parent SHAs (empty for root commits, two entries for merge commits).
+    pub parents: Vec<String>,
+    pub author: CommitSignature,
+    pub committer: CommitSignature,
+    /// First line of the commit message.
+    pub subject: String,
+    /// Remainder of the commit message after the subject line, if any.
+    /// `None` when the message has no body.
+    pub body: Option<String>,
+}
+
+/// Top-level diff statistics for the commit.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowDiffstat {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+/// Per-file entry in the enriched `git show <ref>` response.
+///
+/// Carries the change-type and line-count fields that manifest entries have,
+/// named `additions`/`deletions` as the issue specification requires.
+/// Unlike `SnapshotFileEntry` this type does NOT include raw file content —
+/// callers that want content should follow up with `get_file_snapshots`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowFileEntry {
+    pub path: String,
+    /// Original path before a rename or copy. `None` for add/modify/delete.
+    pub old_path: Option<String>,
+    /// How this file was affected: `added`, `modified`, `deleted`, `renamed`, `copied`.
+    pub change_type: crate::git::diff::ChangeType,
+    /// Lines added in this file by this commit.
+    pub additions: usize,
+    /// Lines removed in this file by this commit.
+    pub deletions: usize,
+    pub is_binary: bool,
+}
+
+/// Enriched response for `git show <ref>`.
+///
+/// Combines commit metadata, a real diffstat (insertions/deletions from the
+/// manifest, not a net-line-delta), and the list of files changed by the commit.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowManifestResponse {
+    pub commit: ShowCommitDetail,
+    pub diffstat: ShowDiffstat,
+    pub files: Vec<ShowFileEntry>,
+    pub token_estimate: usize,
+}
+
 // --- Tool options (for internal use) ---
 
 #[derive(Debug, Clone)]
@@ -1055,5 +1125,89 @@ mod tests {
             1
         );
         assert_eq!(json["function_analysis_truncated"][0], "some_fn");
+    }
+
+    // --- Item 8: ShowFileEntry / ShowManifestResponse contract tests (Windows-safe) ---
+
+    #[test]
+    fn show_file_entry_renamed_serializes_change_type_snake_case_and_old_path() {
+        use crate::git::diff::ChangeType;
+        let entry = ShowFileEntry {
+            path: "new.txt".into(),
+            old_path: Some("old.txt".into()),
+            change_type: ChangeType::Renamed,
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["change_type"], "renamed");
+        assert_eq!(json["path"], "new.txt");
+        assert_eq!(json["old_path"], "old.txt");
+    }
+
+    #[test]
+    fn show_file_entry_added_serializes_with_null_old_path() {
+        use crate::git::diff::ChangeType;
+        let entry = ShowFileEntry {
+            path: "new.txt".into(),
+            old_path: None,
+            change_type: ChangeType::Added,
+            additions: 3,
+            deletions: 0,
+            is_binary: false,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["change_type"], "added");
+        assert!(
+            json["old_path"].is_null(),
+            "old_path must be null for Added"
+        );
+        assert_eq!(json["additions"], 3);
+        assert_eq!(json["deletions"], 0);
+    }
+
+    #[test]
+    fn show_diffstat_serializes_three_counts() {
+        let diffstat = ShowDiffstat {
+            files_changed: 2,
+            insertions: 10,
+            deletions: 5,
+        };
+        let json = serde_json::to_value(&diffstat).unwrap();
+        assert_eq!(json["files_changed"], 2);
+        assert_eq!(json["insertions"], 10);
+        assert_eq!(json["deletions"], 5);
+    }
+
+    #[test]
+    fn show_commit_detail_serializes_null_body_when_none_and_empty_parents() {
+        let detail = ShowCommitDetail {
+            sha: "a".repeat(40),
+            short_sha: "a".repeat(8),
+            parents: vec![],
+            author: CommitSignature {
+                name: "A".into(),
+                email: "a@a.com".into(),
+                date_iso: "2026-01-01T00:00:00+00:00".into(),
+                date_epoch: 1_000_000,
+            },
+            committer: CommitSignature {
+                name: "A".into(),
+                email: "a@a.com".into(),
+                date_iso: "2026-01-01T00:00:00+00:00".into(),
+                date_epoch: 1_000_000,
+            },
+            subject: "init".into(),
+            body: None,
+        };
+        let json = serde_json::to_value(&detail).unwrap();
+        assert!(json["body"].is_null(), "body must be null when None");
+        assert_eq!(
+            json["parents"].as_array().unwrap().len(),
+            0,
+            "parents must be empty array"
+        );
+        assert_eq!(json["subject"], "init");
     }
 }
