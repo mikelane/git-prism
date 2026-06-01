@@ -365,4 +365,150 @@ mod tests {
             "expected 'functions' key in function_context output, got: {json}"
         );
     }
+
+    #[test]
+    fn it_handles_show_snapshot_for_annotated_tag_without_error() {
+        // Before the peel fix, `git show <annotated-tag>` would panic or exit
+        // non-zero because peel_to_commit failed with "was kind tag". This test
+        // confirms the handler completes successfully (exit SUCCESS, valid JSON
+        // with a "files" array) after the fix.
+        let (_dir, path) = init_repo_with_two_commits();
+
+        Command::new("git")
+            .args(["tag", "-a", "v1.0", "-m", "release v1.0"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let classification = Classification::ShowSnapshot { sha: "v1.0" };
+        let mut out = Vec::new();
+        let code = handle(&classification, &path, &mut out);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "handle should exit SUCCESS for annotated tag, got non-zero"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(
+            json.get("files").and_then(|f| f.as_array()).is_some(),
+            "expected 'files' array in show output for annotated tag, got: {json}"
+        );
+    }
+
+    // ===== ADVERSARIAL QA PROBES (issue #337 pen-test) =====
+
+    // SUSPICIOUS (pre-existing, NOT a #337 regression): `git show <ref>` via the
+    // shim always returns files: [] because handle_show_snapshot calls
+    // build_snapshots with an empty `paths` slice (&[]). build_snapshots only
+    // processes files explicitly listed in `paths`; it never enumerates the
+    // changed files of the range. This is true for annotated tags, lightweight
+    // tags, AND raw SHAs identically — the empty `&[]` predates this PR
+    // (origin/main:src/shim/handlers.rs:134). The peel change is therefore
+    // correct and unaffected here; the dev's
+    // it_handles_show_snapshot_for_annotated_tag_without_error test passes only
+    // because the snapshot is empty for everything, which masks whether the
+    // peel actually surfaces the right commit's content. Reported as SUSPICIOUS,
+    // not blocked, because it is out of scope for the #337 peel fix.
+
+    /// Regression guard within #337 scope: `git show <annotated-tag>` and
+    /// `git show <target-sha>` produce IDENTICAL output (both empty today, but
+    /// must not diverge — peeling must map the tag to the same range the SHA
+    /// produces). This stays green and protects the equivalence the peel change
+    /// is supposed to guarantee.
+    #[test]
+    fn qa_show_annotated_tag_output_equals_target_sha_output() {
+        let (_dir, path) = init_repo_with_two_commits();
+        Command::new("git")
+            .args(["tag", "-a", "v1.0", "-m", "release v1.0"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        let target_sha = head_sha(&path);
+
+        let mut out_tag = Vec::new();
+        assert_eq!(
+            handle(
+                &Classification::ShowSnapshot { sha: "v1.0" },
+                &path,
+                &mut out_tag
+            ),
+            ExitCode::SUCCESS
+        );
+        let mut out_sha = Vec::new();
+        assert_eq!(
+            handle(
+                &Classification::ShowSnapshot { sha: &target_sha },
+                &path,
+                &mut out_sha
+            ),
+            ExitCode::SUCCESS
+        );
+
+        let json_tag: serde_json::Value = serde_json::from_slice(&out_tag).unwrap();
+        let json_sha: serde_json::Value = serde_json::from_slice(&out_sha).unwrap();
+        // Compare the `files` arrays (metadata.base_ref/head_ref legitimately
+        // differ: "v1.0^"/"v1.0" vs "<sha>^"/"<sha>"; generated_at also differs).
+        assert_eq!(
+            json_tag.get("files"),
+            json_sha.get("files"),
+            "annotated-tag show must produce the same files as target-sha show"
+        );
+    }
+
+    /// The `Classification::Manifest` path peels BOTH ends of a range.  This
+    /// test creates two annotated tags on consecutive commits and asserts that
+    /// the manifest over `v0.1..v0.2` returns a non-empty `files` array that
+    /// contains the file added in the second commit.  A "was kind tag" peel
+    /// failure would surface here as either an error exit or an empty file list.
+    #[test]
+    fn qa_manifest_over_annotated_tag_range_returns_changed_files() {
+        let (dir, path) = init_repo_with_two_commits();
+
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&path)
+                .output()
+                .unwrap()
+        };
+
+        // v0.1 tags the first commit (HEAD~1 after init_repo_with_two_commits)
+        git(&["tag", "-a", "v0.1", "-m", "v0.1 release", "HEAD~1"]);
+        // v0.2 tags the current HEAD (second commit, which added world.txt)
+        git(&["tag", "-a", "v0.2", "-m", "v0.2 release", "HEAD"]);
+
+        let classification = Classification::Manifest {
+            range: "v0.1..v0.2",
+        };
+        let mut out = Vec::new();
+        let code = handle(&classification, &path, &mut out);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "manifest over annotated tag range must exit SUCCESS"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let files = json
+            .get("files")
+            .and_then(|f| f.as_array())
+            .expect("expected 'files' array in manifest output");
+
+        assert!(
+            !files.is_empty(),
+            "manifest over v0.1..v0.2 must be non-empty (expected world.txt)"
+        );
+
+        let paths: Vec<&str> = files
+            .iter()
+            .filter_map(|f| f.get("path").and_then(|p| p.as_str()))
+            .collect();
+        assert!(
+            paths.contains(&"world.txt"),
+            "expected world.txt in manifest files, got: {paths:?}"
+        );
+
+        drop(dir);
+    }
 }
