@@ -365,4 +365,34 @@ mod tests {
             "expected 'functions' key in function_context output, got: {json}"
         );
     }
+
+    #[test]
+    fn it_handles_show_snapshot_for_annotated_tag_without_error() {
+        // Before the peel fix, `git show <annotated-tag>` would panic or exit
+        // non-zero because peel_to_commit failed with "was kind tag". This test
+        // confirms the handler completes successfully (exit SUCCESS, valid JSON
+        // with a "files" array) after the fix.
+        let (_dir, path) = init_repo_with_two_commits();
+
+        Command::new("git")
+            .args(["tag", "-a", "v1.0", "-m", "release v1.0"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let classification = Classification::ShowSnapshot { sha: "v1.0" };
+        let mut out = Vec::new();
+        let code = handle(&classification, &path, &mut out);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "handle should exit SUCCESS for annotated tag, got non-zero"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(
+            json.get("files").and_then(|f| f.as_array()).is_some(),
+            "expected 'files' array in show output for annotated tag, got: {json}"
+        );
+    }
 }

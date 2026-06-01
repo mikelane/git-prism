@@ -245,7 +245,7 @@ impl RepoReader {
             .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
         object
-            .try_into_commit()
+            .peel_to_commit()
             .map_err(|e| GitError::ReadObject(e.to_string()))
     }
 
@@ -892,5 +892,66 @@ mod tests {
 
         drop(local_dir);
         drop(remote_dir);
+    }
+
+    #[test]
+    fn it_peels_annotated_tag_to_commit() {
+        let (_dir, path) = create_test_repo();
+
+        Command::new("git")
+            .args(["tag", "-a", "v1.0", "-m", "release v1.0"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let result = reader.resolve_commit("v1.0");
+        assert!(
+            result.is_ok(),
+            "peel_to_commit failed for annotated tag: {:?}",
+            result.err()
+        );
+        let commit = result.unwrap();
+        assert_eq!(
+            commit.message, "initial commit",
+            "annotated tag should resolve to the tagged commit"
+        );
+    }
+
+    #[test]
+    fn it_resolves_lightweight_tag_to_commit() {
+        let (_dir, path) = create_test_repo();
+
+        Command::new("git")
+            .args(["tag", "v0.1"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let commit = reader.resolve_commit("v0.1").unwrap();
+        assert_eq!(
+            commit.message, "initial commit",
+            "lightweight tag should also resolve to the tagged commit"
+        );
+    }
+
+    #[test]
+    fn annotated_tag_and_branch_resolve_to_same_commit_sha() {
+        let (_dir, path) = create_test_repo();
+
+        Command::new("git")
+            .args(["tag", "-a", "v1.0", "-m", "release v1.0"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let via_tag = reader.resolve_commit("v1.0").unwrap();
+        let via_branch = reader.resolve_commit("main").unwrap();
+        assert_eq!(
+            via_tag.sha, via_branch.sha,
+            "annotated tag and branch should resolve to the same commit SHA"
+        );
     }
 }
