@@ -138,15 +138,18 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
             .collect()
     } else {
         // Normal commit: diff against first parent via the manifest pipeline.
+        // Use the resolved commit SHA (not the raw `sha` input) so that
+        // annotated tags — where `sha` is e.g. "v1.0" and "v1.0^" is not a
+        // resolvable ref — still produce a valid parent ref.
         let manifest_options = ManifestOptions {
             include_patterns: vec![],
             exclude_patterns: vec![],
             include_function_analysis: false,
             max_response_tokens: None,
         };
-        let base_ref = format!("{sha}^");
+        let base_ref = format!("{}^", commit.sha);
         let manifest =
-            collect_all_manifest_pages(repo_path, &base_ref, sha, &manifest_options, 500)?;
+            collect_all_manifest_pages(repo_path, &base_ref, &commit.sha, &manifest_options, 500)?;
         manifest
             .files
             .into_iter()
