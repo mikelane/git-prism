@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git-prism shim install` now creates a stable symlink target on Homebrew installs.** Previously `canonicalize()` resolved the full symlink chain, baking the version-pinned Cellar path (`/opt/homebrew/Cellar/git-prism/<version>/bin/git-prism`) into the shim. Every `brew upgrade` moved the binary to a new Cellar directory and GC'd the old one, leaving the shim pointing at a deleted file. The install logic now detects a Homebrew Cellar layout by looking for a `Cellar` component in the canonical exe path and maps it to `<prefix>/bin/git-prism` — the stable symlink Homebrew maintains across upgrades. Non-Homebrew installs (cargo, source builds) are unaffected. `git-prism shim status` now includes an advisory warning when the current shim target contains a `Cellar` path component, prompting the user to re-run `git-prism shim install`. (#343)
+
 ## [0.9.1] — 2026-06-01
 
 ### Fixed

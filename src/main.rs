@@ -237,7 +237,7 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             }
             let shim_status = hooks::path_shim_status(&home);
             match shim_status {
-                hooks::PathShimStatus::Installed { target } => {
+                hooks::PathShimStatus::Installed { target, .. } => {
                     println!("path-shim: installed @ {}", target.display());
                 }
                 hooks::PathShimStatus::NotInstalled => {
