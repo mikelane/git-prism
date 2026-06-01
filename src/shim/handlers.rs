@@ -12,6 +12,7 @@ use crate::git::reader::RepoReader;
 use crate::git::refs::RefRange;
 use crate::git::refs::parse_range;
 use crate::shim::classify::Classification;
+use crate::tools::size::estimate_response_tokens;
 use crate::tools::types::{
     CommitSignature, ShowCommitDetail, ShowDiffstat, ShowFileEntry, ShowManifestResponse,
 };
@@ -169,12 +170,13 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
         deletions,
     };
 
-    let result = ShowManifestResponse {
+    let mut result = ShowManifestResponse {
         commit,
         diffstat,
         files,
         token_estimate: 0,
     };
+    result.token_estimate = estimate_response_tokens(&result);
     serde_json::to_writer_pretty(out, &result)?;
     Ok(())
 }
@@ -215,8 +217,8 @@ fn build_show_commit_detail(repo_path: &Path, sha: &str) -> anyhow::Result<ShowC
         .committer()
         .map_err(|e| anyhow::anyhow!("failed to read committer: {e}"))?;
 
-    let author = signature_to_commit_signature(&author_sig);
-    let committer = signature_to_commit_signature(&committer_sig);
+    let author = signature_to_commit_signature(&author_sig)?;
+    let committer = signature_to_commit_signature(&committer_sig)?;
 
     let raw_message = commit
         .message_raw()
@@ -241,23 +243,29 @@ fn build_show_commit_detail(repo_path: &Path, sha: &str) -> anyhow::Result<ShowC
 /// `SignatureRef.time` is a raw `&str` like `"1780329644 +0000"`.
 /// We call `sig.time()` (the decode method) to get `gix_date::Time` with
 /// typed `seconds: i64` and `offset: i32` fields.
-fn signature_to_commit_signature(sig: &gix::actor::SignatureRef<'_>) -> CommitSignature {
-    // sig.time() decodes the raw time string; fall back to epoch 0 on parse failure.
-    let gix_time = sig.time().unwrap_or_default();
+///
+/// Returns an error instead of silently substituting epoch 0 so callers
+/// see a real failure instead of corrupted `%ct`-equivalent data.
+fn signature_to_commit_signature(
+    sig: &gix::actor::SignatureRef<'_>,
+) -> anyhow::Result<CommitSignature> {
+    let gix_time = sig
+        .time()
+        .map_err(|e| anyhow::anyhow!("failed to parse commit time for {}: {e}", sig.email))?;
     let epoch = gix_time.seconds;
     let offset_seconds = gix_time.offset;
     let naive = chrono::DateTime::from_timestamp(epoch, 0)
-        .unwrap_or_default()
+        .ok_or_else(|| anyhow::anyhow!("commit timestamp {epoch} out of representable range"))?
         .naive_utc();
     let offset = chrono::FixedOffset::east_opt(offset_seconds)
-        .unwrap_or(chrono::FixedOffset::east_opt(0).unwrap());
+        .ok_or_else(|| anyhow::anyhow!("commit tz offset {offset_seconds}s out of range"))?;
     let dt = chrono::DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(naive, offset);
-    CommitSignature {
+    Ok(CommitSignature {
         name: sig.name.to_string(),
         email: sig.email.to_string(),
         date_iso: dt.to_rfc3339(),
         date_epoch: epoch,
-    }
+    })
 }
 
 /// Split a raw commit message into (subject, body).
@@ -483,45 +491,38 @@ mod tests {
         assert_eq!(code, ExitCode::SUCCESS);
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        // Enriched show response must include a top-level "commit" object.
         let commit = json
             .get("commit")
             .expect("expected 'commit' key in show output");
-        assert!(
-            commit.get("sha").and_then(|v| v.as_str()).is_some(),
-            "commit.sha must be present, got: {json}"
+        // Exact-value assertions (F7: strengthen weak shape checks).
+        assert_eq!(
+            commit["author"]["name"].as_str().unwrap(),
+            "Test",
+            "commit.author.name must be 'Test'"
         );
-        assert!(
-            commit.get("short_sha").and_then(|v| v.as_str()).is_some(),
-            "commit.short_sha must be present"
+        assert_eq!(
+            commit["author"]["email"].as_str().unwrap(),
+            "test@test.com",
+            "commit.author.email must be 'test@test.com'"
         );
-        assert!(
-            commit.get("subject").and_then(|v| v.as_str()).is_some(),
-            "commit.subject must be present"
-        );
-        let author = commit.get("author").expect("commit.author must be present");
-        assert!(
-            author.get("name").and_then(|v| v.as_str()).is_some(),
-            "commit.author.name must be present"
-        );
-        assert!(
-            author.get("email").and_then(|v| v.as_str()).is_some(),
-            "commit.author.email must be present"
-        );
-        assert!(
-            author.get("date_epoch").and_then(|v| v.as_i64()).is_some(),
-            "commit.author.date_epoch must be an integer"
-        );
-        // Diffstat must be present.
+        // The fixture adds world.txt in the second commit (1 file, 1 insertion).
         let diffstat = json
             .get("diffstat")
             .expect("expected 'diffstat' key in show output");
-        assert!(
-            diffstat
-                .get("files_changed")
-                .and_then(|v| v.as_u64())
-                .is_some(),
-            "diffstat.files_changed must be present"
+        assert_eq!(
+            diffstat["files_changed"].as_u64().unwrap(),
+            1,
+            "diffstat.files_changed must be 1"
+        );
+        assert_eq!(
+            diffstat["insertions"].as_u64().unwrap(),
+            1,
+            "diffstat.insertions must be 1"
+        );
+        assert_eq!(
+            diffstat["deletions"].as_u64().unwrap(),
+            0,
+            "diffstat.deletions must be 0"
         );
     }
 
@@ -602,14 +603,19 @@ mod tests {
         handle(&classification, &path, &mut out);
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let committer = &json["commit"]["committer"];
-        assert!(committer.get("name").and_then(|v| v.as_str()).is_some());
-        assert!(committer.get("email").and_then(|v| v.as_str()).is_some());
-        assert!(committer.get("date_iso").and_then(|v| v.as_str()).is_some());
+        // Exact-value assertions — the fixture sets user.name=Test, user.email=test@test.com.
+        assert_eq!(committer["name"].as_str().unwrap(), "Test");
+        assert_eq!(committer["email"].as_str().unwrap(), "test@test.com");
+        // date_iso must be parseable as RFC-3339.
+        let date_iso = committer["date_iso"]
+            .as_str()
+            .expect("date_iso must be a string");
+        chrono::DateTime::parse_from_rfc3339(date_iso)
+            .unwrap_or_else(|e| panic!("date_iso '{date_iso}' must parse as RFC-3339: {e}"));
+        // date_epoch must be a positive unix timestamp.
         assert!(
-            committer
-                .get("date_epoch")
-                .and_then(|v| v.as_i64())
-                .is_some()
+            committer["date_epoch"].as_i64().unwrap() > 0,
+            "date_epoch must be a positive unix timestamp"
         );
     }
 
@@ -642,6 +648,111 @@ mod tests {
         assert!(
             json.get("files").and_then(|f| f.as_array()).is_some(),
             "expected 'files' array in blame output, got: {json}"
+        );
+    }
+
+    // --- Item 5: split_commit_message unit tests ---
+
+    #[test]
+    fn split_commit_message_single_line_has_no_body() {
+        let (subject, body) = split_commit_message("fix: correct the thing");
+        assert_eq!(subject, "fix: correct the thing");
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn split_commit_message_subject_and_single_paragraph_body() {
+        let (subject, body) = split_commit_message("feat: add widget\n\nThis adds the widget.");
+        assert_eq!(subject, "feat: add widget");
+        assert_eq!(body.as_deref(), Some("This adds the widget."));
+    }
+
+    #[test]
+    fn split_commit_message_multi_paragraph_body_preserves_internal_blank_line() {
+        let msg = "feat: multi\n\nParagraph one.\n\nParagraph two.";
+        let (subject, body) = split_commit_message(msg);
+        assert_eq!(subject, "feat: multi");
+        let b = body.expect("body must be Some");
+        assert!(b.contains("Paragraph one."), "body must contain first para");
+        assert!(
+            b.contains("Paragraph two."),
+            "body must contain second para"
+        );
+    }
+
+    #[test]
+    fn split_commit_message_trailing_blank_lines_only_gives_no_body() {
+        let (subject, body) = split_commit_message("fix: thing\n\n  \n  ");
+        assert_eq!(subject, "fix: thing");
+        assert!(body.is_none(), "trailing blanks only must yield None body");
+    }
+
+    #[test]
+    fn split_commit_message_empty_string_gives_empty_subject_no_body() {
+        let (subject, body) = split_commit_message("");
+        assert_eq!(subject, "");
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn split_commit_message_trims_subject_whitespace() {
+        let (subject, _) = split_commit_message("  padded subject  \n\nbody");
+        assert_eq!(subject, "padded subject");
+    }
+
+    // --- Item 6: e2e show with multi-paragraph body ---
+
+    #[test]
+    fn it_handles_show_snapshot_multi_paragraph_body_is_present_and_not_in_subject() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&path)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(path.join("a.txt"), "a\n").unwrap();
+        run(&["add", "a.txt"]);
+        // Commit with subject + two body paragraphs via multiple -m flags.
+        run(&[
+            "commit",
+            "-m",
+            "feat: the subject",
+            "-m",
+            "First paragraph of body.",
+            "-m",
+            "Second paragraph of body.",
+        ]);
+        let sha = head_sha(&path);
+        let classification = Classification::ShowSnapshot { sha: &sha };
+        let mut out = Vec::new();
+        let code = handle(&classification, &path, &mut out);
+        assert_eq!(code, ExitCode::SUCCESS);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            json["commit"]["subject"].as_str().unwrap(),
+            "feat: the subject",
+            "subject must not contain body paragraphs"
+        );
+        let body = json["commit"]["body"]
+            .as_str()
+            .expect("body must be non-null for multi-paragraph commit");
+        assert!(
+            body.contains("First paragraph"),
+            "body must contain first paragraph"
+        );
+        assert!(
+            body.contains("Second paragraph"),
+            "body must contain second paragraph"
+        );
+        assert!(
+            !body.contains("feat: the subject"),
+            "subject must not leak into body"
         );
     }
 

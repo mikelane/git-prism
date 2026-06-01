@@ -1126,4 +1126,88 @@ mod tests {
         );
         assert_eq!(json["function_analysis_truncated"][0], "some_fn");
     }
+
+    // --- Item 8: ShowFileEntry / ShowManifestResponse contract tests (Windows-safe) ---
+
+    #[test]
+    fn show_file_entry_renamed_serializes_change_type_snake_case_and_old_path() {
+        use crate::git::diff::ChangeType;
+        let entry = ShowFileEntry {
+            path: "new.txt".into(),
+            old_path: Some("old.txt".into()),
+            change_type: ChangeType::Renamed,
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["change_type"], "renamed");
+        assert_eq!(json["path"], "new.txt");
+        assert_eq!(json["old_path"], "old.txt");
+    }
+
+    #[test]
+    fn show_file_entry_added_serializes_with_null_old_path() {
+        use crate::git::diff::ChangeType;
+        let entry = ShowFileEntry {
+            path: "new.txt".into(),
+            old_path: None,
+            change_type: ChangeType::Added,
+            additions: 3,
+            deletions: 0,
+            is_binary: false,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["change_type"], "added");
+        assert!(
+            json["old_path"].is_null(),
+            "old_path must be null for Added"
+        );
+        assert_eq!(json["additions"], 3);
+        assert_eq!(json["deletions"], 0);
+    }
+
+    #[test]
+    fn show_diffstat_serializes_three_counts() {
+        let diffstat = ShowDiffstat {
+            files_changed: 2,
+            insertions: 10,
+            deletions: 5,
+        };
+        let json = serde_json::to_value(&diffstat).unwrap();
+        assert_eq!(json["files_changed"], 2);
+        assert_eq!(json["insertions"], 10);
+        assert_eq!(json["deletions"], 5);
+    }
+
+    #[test]
+    fn show_commit_detail_serializes_null_body_when_none_and_empty_parents() {
+        let detail = ShowCommitDetail {
+            sha: "a".repeat(40),
+            short_sha: "a".repeat(8),
+            parents: vec![],
+            author: CommitSignature {
+                name: "A".into(),
+                email: "a@a.com".into(),
+                date_iso: "2026-01-01T00:00:00+00:00".into(),
+                date_epoch: 1_000_000,
+            },
+            committer: CommitSignature {
+                name: "A".into(),
+                email: "a@a.com".into(),
+                date_iso: "2026-01-01T00:00:00+00:00".into(),
+                date_epoch: 1_000_000,
+            },
+            subject: "init".into(),
+            body: None,
+        };
+        let json = serde_json::to_value(&detail).unwrap();
+        assert!(json["body"].is_null(), "body must be null when None");
+        assert_eq!(
+            json["parents"].as_array().unwrap().len(),
+            0,
+            "parents must be empty array"
+        );
+        assert_eq!(json["subject"], "init");
+    }
 }

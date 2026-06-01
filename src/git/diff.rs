@@ -289,21 +289,18 @@ impl RepoReader {
             let entry = entry_ref.map_err(obj_err)?;
             let name = entry.filename().to_string();
             let path = if prefix.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{prefix}/{name}")
             };
             let mode = entry.mode();
             if mode.is_tree() {
-                let obj = entry.object().map_err(obj_err)?;
-                let sub_tree = obj.try_into_tree().map_err(obj_err)?;
-                let sub_tree_ref = self
-                    .repo()
-                    .find_object(sub_tree.id)
+                let sub_tree = entry
+                    .object()
                     .map_err(obj_err)?
                     .try_into_tree()
                     .map_err(obj_err)?;
-                self.walk_tree_as_additions(&sub_tree_ref, path, files)?;
+                self.walk_tree_as_additions(&sub_tree, path, files)?;
             } else if mode.is_blob() {
                 let obj = entry.object().map_err(obj_err)?;
                 let is_binary = obj.data.contains(&0);

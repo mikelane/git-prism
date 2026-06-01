@@ -160,6 +160,10 @@ fn has_scripted_output_flag(tokens: &[&str]) -> bool {
 }
 
 fn classify_blame<'a>(rest: &[&'a str]) -> Classification<'a> {
+    // Scripted-output flags (e.g. --porcelain) mean the caller wants raw text.
+    if has_scripted_output_flag(rest) {
+        return Classification::Passthrough;
+    }
     // First non-flag argument is the path.
     if let Some(path) = rest.iter().copied().find(|t| !t.starts_with('-')) {
         return Classification::BlameSnapshot { path };
@@ -655,6 +659,64 @@ mod tests {
     fn it_classifies_git_blame_with_flags_before_path() {
         assert_eq!(
             classify(&["git", "blame", "-w", "src/main.rs"]),
+            Classification::BlameSnapshot {
+                path: "src/main.rs"
+            }
+        );
+    }
+
+    // --- Item 9: additional scripted-output classifier tests ---
+
+    #[test]
+    fn it_passes_through_git_diff_with_format_flag_and_range() {
+        // git diff --format=%H main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "--format=%H", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_diff_with_s_flag_and_range() {
+        // git diff -s main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "-s", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_diff_with_z_flag_and_range() {
+        // git diff -z main..HEAD
+        assert_eq!(
+            classify(&["git", "diff", "-z", "main..HEAD"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_bare_s_flag() {
+        // git show -s abc1234 (bare -s, no --format)
+        assert_eq!(
+            classify(&["git", "show", "-s", "abc1234"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_blame_with_porcelain_flag() {
+        // git blame --porcelain src/main.rs — scripted output, must passthrough.
+        assert_eq!(
+            classify(&["git", "blame", "--porcelain", "src/main.rs"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_still_classifies_plain_git_blame_as_blame_snapshot() {
+        // Regression: plain git blame without scripted-output flags must still be intercepted.
+        assert_eq!(
+            classify(&["git", "blame", "src/main.rs"]),
             Classification::BlameSnapshot {
                 path: "src/main.rs"
             }
