@@ -237,8 +237,14 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             }
             let shim_status = hooks::path_shim_status(&home);
             match shim_status {
-                hooks::PathShimStatus::Installed { target, .. } => {
+                hooks::PathShimStatus::Installed {
+                    target,
+                    staleness_warning,
+                } => {
                     println!("path-shim: installed @ {}", target.display());
+                    if let Some(w) = staleness_warning {
+                        println!("warning: {w}");
+                    }
                 }
                 hooks::PathShimStatus::NotInstalled => {
                     println!("path-shim: not installed");
