@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-06-01
+
 ### Fixed
 
+- **Annotated tags now peel to their target commit during ref resolution.** `get_change_manifest`, `get_commit_history`, `get_file_snapshots`, and the shim's `git diff` / `git log` / `git show` interception previously failed on annotated-tag refs with the error `was supposed to be of kind commit, but was kind tag`. Ref resolution now peels tag objects to their target commit, so diffing or showing tagged releases (e.g. `v0.8.0..v0.9.0`) works. (#337)
 - **Shim now passes through scripted-output git invocations.** When `git show`, `git log`, or `git diff` is called with flags that request formatted text output (`--format=`, `--pretty=`, `--pretty`, `-s`, `--no-patch`, `--porcelain`, `--stat`, `-z`), the shim forwards the call to real git instead of returning a JSON manifest. This fixes `git show -s --format=%ct HEAD` silently returning a change-manifest JSON payload instead of the expected epoch integer. (#338)
 
 ### Added
