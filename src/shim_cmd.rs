@@ -173,13 +173,19 @@ pub fn run_status(home: &std::path::Path) -> Result<()> {
     let shim_dir = home.join(hooks::PATH_SHIM_REL_DIR);
     let shim_dir_str = shim_dir.to_string_lossy();
     match hooks::path_shim_status(home) {
-        hooks::PathShimStatus::Installed { target } => {
+        hooks::PathShimStatus::Installed {
+            target,
+            staleness_warning,
+        } => {
             println!(
                 "shim: installed at {} -> {}",
                 shim_dir.join(hooks::PATH_SHIM_LINK_NAME).display(),
                 target.display()
             );
             println!("shim directory: {shim_dir_str}");
+            if let Some(warning) = staleness_warning {
+                println!("warning: {warning}");
+            }
         }
         hooks::PathShimStatus::NotInstalled => {
             println!("shim: not installed");
