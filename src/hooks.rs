@@ -176,9 +176,8 @@ pub enum PathShimStatus {
     /// Symlink exists and resolves to `target`.
     ///
     /// `staleness_warning` is `Some` when the target is version-pinned (contains
-    /// a `Cellar` path component) and will break after `brew upgrade`, or when
-    /// the target is a dangling symlink chain. In both cases the user should
-    /// re-run `git-prism shim install` to update the shim to a stable path.
+    /// a `Cellar` path component) and will break after `brew upgrade`. The user
+    /// should re-run `git-prism shim install` to update the shim to a stable path.
     Installed {
         target: PathBuf,
         staleness_warning: Option<String>,
@@ -206,17 +205,36 @@ fn path_shim_link(home: &Path) -> PathBuf {
 /// non-existent stable paths all fall back to the canonical exe path).
 ///
 /// Does NOT shell out to `brew`; the prefix is derived purely from path
-/// structure by locating the `Cellar` component.
+/// structure. The Homebrew Cellar shape is validated strictly: the suffix
+/// after `Cellar` must be exactly `<formula>/<version>/bin/<bin>` (four
+/// components), so a stray directory named `Cellar` in a non-Homebrew path
+/// is never mistaken for a Homebrew install.
 pub(crate) fn stable_shim_target(canonical_exe: &Path) -> PathBuf {
-    // Walk the components to find the index of "Cellar".
     // Expected layout: <prefix>/Cellar/<formula>/<version>/bin/<bin>
+    //
+    // Validate the full suffix shape rather than just finding the first
+    // `Cellar` component. `Cellar` must be exactly 4 components from the end,
+    // with "bin" as the second-to-last component. This prevents a stray
+    // directory named `Cellar` in a non-Homebrew path from being mistaken for
+    // a Homebrew install and silently repointing the shim at an unrelated binary.
     let components: Vec<_> = canonical_exe.components().collect();
-    let cellar_idx = components.iter().position(|c| c.as_os_str() == "Cellar");
+    let n = components.len();
 
-    let cellar_idx = match cellar_idx {
-        Some(i) => i,
-        None => return canonical_exe.to_path_buf(),
-    };
+    // Need at least: <root> Cellar <formula> <version> bin <bin> = 6 components.
+    if n < 6 {
+        return canonical_exe.to_path_buf();
+    }
+
+    // `Cellar` must sit at index n-5 (exactly 4 components follow it).
+    let cellar_idx = n - 5;
+    if components[cellar_idx].as_os_str() != "Cellar" {
+        return canonical_exe.to_path_buf();
+    }
+
+    // The second-to-last component must be "bin" (index n-2).
+    if components[n - 2].as_os_str() != "bin" {
+        return canonical_exe.to_path_buf();
+    }
 
     // The prefix is everything before "Cellar".
     let prefix: PathBuf = components[..cellar_idx].iter().collect();
@@ -384,6 +402,11 @@ fn path_contains_cellar_component(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "Cellar")
 }
 
+/// The advisory message shown when a shim target is a version-pinned Cellar path.
+const CELLAR_STALENESS_ADVISORY: &str = "shim points at a version-pinned Homebrew Cellar path; \
+     run `git-prism shim install` to update to a stable path \
+     that survives `brew upgrade`";
+
 /// Query the current state of the path-shim symlink without modifying anything.
 pub fn path_shim_status(home: &Path) -> PathShimStatus {
     let link = path_shim_link(home);
@@ -392,6 +415,12 @@ pub fn path_shim_status(home: &Path) -> PathShimStatus {
     }
     match std::fs::read_link(&link) {
         Ok(target) => {
+            // Check for a Cellar-pinned target BEFORE resolving existence.
+            // A dangling Cellar target (brew upgrade GC\'d the old version) is
+            // the primary scenario this fix addresses; the advisory must fire
+            // even when the target no longer exists on disk.
+            let cellar_pinned = path_contains_cellar_component(&target);
+
             let resolved = if target.is_absolute() {
                 target.clone()
             } else {
@@ -399,20 +428,27 @@ pub fn path_shim_status(home: &Path) -> PathShimStatus {
                     .map(|p| p.join(&target))
                     .unwrap_or_else(|| target.clone())
             };
+
             if resolved.exists() {
-                let staleness_warning = if path_contains_cellar_component(&target) {
-                    Some(
-                        "shim points at a version-pinned Homebrew Cellar path; \
-                         run `git-prism shim install` to update to a stable path \
-                         that survives `brew upgrade`"
-                            .to_string(),
-                    )
+                let staleness_warning = if cellar_pinned {
+                    Some(CELLAR_STALENESS_ADVISORY.to_string())
                 } else {
                     None
                 };
                 PathShimStatus::Installed {
                     target,
                     staleness_warning,
+                }
+            } else if cellar_pinned {
+                // Dangling Cellar target: the exact post-upgrade scenario.
+                // Surface as BrokenLink but include the reinstall advisory so
+                // the user knows the remedy, not just the broken path.
+                PathShimStatus::BrokenLink {
+                    reason: format!(
+                        "symlink target does not exist: {} — {}",
+                        target.display(),
+                        CELLAR_STALENESS_ADVISORY
+                    ),
                 }
             } else {
                 PathShimStatus::BrokenLink {
@@ -689,7 +725,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
 
-        // Create a fake Cellar target so the symlink isn't dangling.
+        // Create a fake Cellar target so the symlink is not dangling.
         let cellar_bin = home.join("Cellar/git-prism/1.0.0/bin");
         std::fs::create_dir_all(&cellar_bin).unwrap();
         let cellar_exe = cellar_bin.join("git-prism");
@@ -766,8 +802,8 @@ mod tests {
     #[cfg(unix)]
     fn stable_shim_target_survives_brew_upgrade() {
         // Simulate a brew upgrade: the stable bin symlink is repointed from
-        // 1.0.0 to 1.1.0. A shim that was installed targeting <prefix>/bin/git-prism
-        // (rather than the Cellar path) still resolves correctly after the upgrade.
+        // 1.0.0 to 1.1.0. A shim installed targeting <prefix>/bin/git-prism
+        // still resolves correctly after the upgrade.
         let dir = TempDir::new().unwrap();
         let prefix = dir.path();
 
