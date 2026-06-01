@@ -9,14 +9,14 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use crate::git::reader::RepoReader;
-use crate::git::refs::parse_range;
 use crate::git::refs::RefRange;
+use crate::git::refs::parse_range;
 use crate::shim::classify::Classification;
 use crate::tools::types::{CommitSignature, ShowCommitDetail, ShowDiffstat, ShowManifestResponse};
 use crate::tools::{
-    build_function_context_with_options, build_snapshots, collect_all_history_pages,
-    collect_all_manifest_pages, collect_all_worktree_manifest_pages, ContextOptions,
-    ManifestOptions, SnapshotOptions,
+    ContextOptions, ManifestOptions, SnapshotOptions, build_function_context_with_options,
+    build_snapshots, collect_all_history_pages, collect_all_manifest_pages,
+    collect_all_worktree_manifest_pages,
 };
 
 /// Dispatch a classified git command to the appropriate tool function and
@@ -590,10 +590,12 @@ mod tests {
         assert!(committer.get("name").and_then(|v| v.as_str()).is_some());
         assert!(committer.get("email").and_then(|v| v.as_str()).is_some());
         assert!(committer.get("date_iso").and_then(|v| v.as_str()).is_some());
-        assert!(committer
-            .get("date_epoch")
-            .and_then(|v| v.as_i64())
-            .is_some());
+        assert!(
+            committer
+                .get("date_epoch")
+                .and_then(|v| v.as_i64())
+                .is_some()
+        );
     }
 
     #[test]
