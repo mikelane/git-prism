@@ -395,4 +395,64 @@ mod tests {
             "expected 'files' array in show output for annotated tag, got: {json}"
         );
     }
+
+    // ===== ADVERSARIAL QA PROBES (issue #337 pen-test) =====
+
+    // SUSPICIOUS (pre-existing, NOT a #337 regression): `git show <ref>` via the
+    // shim always returns files: [] because handle_show_snapshot calls
+    // build_snapshots with an empty `paths` slice (&[]). build_snapshots only
+    // processes files explicitly listed in `paths`; it never enumerates the
+    // changed files of the range. This is true for annotated tags, lightweight
+    // tags, AND raw SHAs identically — the empty `&[]` predates this PR
+    // (origin/main:src/shim/handlers.rs:134). The peel change is therefore
+    // correct and unaffected here; the dev's
+    // it_handles_show_snapshot_for_annotated_tag_without_error test passes only
+    // because the snapshot is empty for everything, which masks whether the
+    // peel actually surfaces the right commit's content. Reported as SUSPICIOUS,
+    // not blocked, because it is out of scope for the #337 peel fix.
+
+    /// Regression guard within #337 scope: `git show <annotated-tag>` and
+    /// `git show <target-sha>` produce IDENTICAL output (both empty today, but
+    /// must not diverge — peeling must map the tag to the same range the SHA
+    /// produces). This stays green and protects the equivalence the peel change
+    /// is supposed to guarantee.
+    #[test]
+    fn qa_show_annotated_tag_output_equals_target_sha_output() {
+        let (_dir, path) = init_repo_with_two_commits();
+        Command::new("git")
+            .args(["tag", "-a", "v1.0", "-m", "release v1.0"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        let target_sha = head_sha(&path);
+
+        let mut out_tag = Vec::new();
+        assert_eq!(
+            handle(
+                &Classification::ShowSnapshot { sha: "v1.0" },
+                &path,
+                &mut out_tag
+            ),
+            ExitCode::SUCCESS
+        );
+        let mut out_sha = Vec::new();
+        assert_eq!(
+            handle(
+                &Classification::ShowSnapshot { sha: &target_sha },
+                &path,
+                &mut out_sha
+            ),
+            ExitCode::SUCCESS
+        );
+
+        let json_tag: serde_json::Value = serde_json::from_slice(&out_tag).unwrap();
+        let json_sha: serde_json::Value = serde_json::from_slice(&out_sha).unwrap();
+        // Compare the `files` arrays (metadata.base_ref/head_ref legitimately
+        // differ: "v1.0^"/"v1.0" vs "<sha>^"/"<sha>"; generated_at also differs).
+        assert_eq!(
+            json_tag.get("files"),
+            json_sha.get("files"),
+            "annotated-tag show must produce the same files as target-sha show"
+        );
+    }
 }

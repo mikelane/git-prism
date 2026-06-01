@@ -954,4 +954,181 @@ mod tests {
             "annotated tag and branch should resolve to the same commit SHA"
         );
     }
+
+    // ===== ADVERSARIAL QA PROBES (issue #337 pen-test) =====
+
+    fn git(path: &std::path::Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap()
+    }
+
+    /// A tag pointing at ANOTHER annotated tag (`git tag -a v2 v1`). gix's
+    /// peel_to_commit must follow the full chain tag -> tag -> commit.
+    #[test]
+    fn qa_nested_annotated_tag_chain_resolves_to_commit() {
+        let (_dir, path) = create_test_repo();
+        git(&path, &["tag", "-a", "v1", "-m", "first tag"]);
+        git(&path, &["tag", "-a", "v2", "-m", "tag of a tag", "v1"]);
+
+        let reader = RepoReader::open(&path).unwrap();
+        let via_chain = reader.resolve_commit("v2");
+        assert!(
+            via_chain.is_ok(),
+            "nested annotated tag (tag->tag->commit) failed to peel: {:?}",
+            via_chain.err()
+        );
+        let head = reader.resolve_commit("HEAD").unwrap();
+        assert_eq!(
+            via_chain.unwrap().sha,
+            head.sha,
+            "nested annotated tag must resolve to the underlying commit"
+        );
+    }
+
+    /// An annotated tag whose target is a TREE (not a commit). peel_to_commit
+    /// cannot reach a commit, so it must return a clean GitError::ReadObject —
+    /// NOT panic and NOT silently succeed.
+    #[test]
+    fn qa_annotated_tag_pointing_at_tree_errors_cleanly() {
+        let (_dir, path) = create_test_repo();
+        // Resolve HEAD's tree SHA, then create an annotated tag pointing at it.
+        let tree_sha = String::from_utf8(git(&path, &["rev-parse", "HEAD^{tree}"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let out = git(
+            &path,
+            &["tag", "-a", "treetag", "-m", "points at a tree", &tree_sha],
+        );
+        assert!(
+            out.status.success(),
+            "fixture setup failed (could not tag a tree): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let reader = RepoReader::open(&path).unwrap();
+        // Must not panic; must be an Err.
+        let result = reader.resolve_commit("treetag");
+        assert!(
+            result.is_err(),
+            "annotated tag pointing at a tree must NOT resolve to a commit, got: {:?}",
+            result.ok()
+        );
+        assert!(
+            matches!(result.unwrap_err(), GitError::ReadObject(_)),
+            "tag->tree peel failure must surface as GitError::ReadObject"
+        );
+    }
+
+    /// An annotated tag whose target is a BLOB. Same contract: clean error.
+    #[test]
+    fn qa_annotated_tag_pointing_at_blob_errors_cleanly() {
+        let (_dir, path) = create_test_repo();
+        let blob_sha = String::from_utf8(git(&path, &["rev-parse", "HEAD:README.md"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let out = git(
+            &path,
+            &["tag", "-a", "blobtag", "-m", "points at a blob", &blob_sha],
+        );
+        assert!(
+            out.status.success(),
+            "fixture setup failed (could not tag a blob): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let reader = RepoReader::open(&path).unwrap();
+        let result = reader.resolve_commit("blobtag");
+        assert!(
+            result.is_err(),
+            "annotated tag pointing at a blob must NOT resolve to a commit, got: {:?}",
+            result.ok()
+        );
+        assert!(
+            matches!(result.unwrap_err(), GitError::ReadObject(_)),
+            "tag->blob peel failure must surface as GitError::ReadObject"
+        );
+    }
+
+    /// Regression guard: a raw full SHA must still resolve to itself after the
+    /// peel change (peel_to_commit on an already-commit object is a no-op).
+    #[test]
+    fn qa_raw_full_sha_still_resolves_unchanged() {
+        let (_dir, path) = create_test_repo();
+        let full_sha = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let reader = RepoReader::open(&path).unwrap();
+        let by_sha = reader.resolve_commit(&full_sha).unwrap();
+        assert_eq!(by_sha.sha, full_sha, "raw full SHA must resolve to itself");
+        assert_eq!(by_sha.message, "initial commit");
+    }
+
+    /// tag..tag manifest (annotated) must equal the equivalent commit..commit
+    /// manifest and be non-empty. This is the real-world reviewer use case:
+    /// `git-prism manifest v_old..v_new` over annotated release tags.
+    #[test]
+    fn qa_annotated_tag_range_manifest_matches_commit_range_and_is_nonempty() {
+        let (_dir, path) = create_test_repo();
+        // base = initial commit (tagged v_old)
+        git(&path, &["tag", "-a", "v_old", "-m", "old release"]);
+        let base_sha = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        // add a second commit, tag it v_new
+        std::fs::write(path.join("feature.rs"), "fn added() {}\n").unwrap();
+        git(&path, &["add", "feature.rs"]);
+        git(&path, &["commit", "-m", "add feature"]);
+        git(&path, &["tag", "-a", "v_new", "-m", "new release"]);
+        let head_sha = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let reader = RepoReader::open(&path).unwrap();
+
+        let via_tags = reader.diff_commits("v_old", "v_new").unwrap();
+        let via_commits = reader.diff_commits(&base_sha, &head_sha).unwrap();
+
+        let tag_files: Vec<String> = via_tags.files.iter().map(|f| f.path.clone()).collect();
+        let commit_files: Vec<String> = via_commits.files.iter().map(|f| f.path.clone()).collect();
+
+        assert!(
+            !tag_files.is_empty(),
+            "annotated tag..tag diff must be non-empty (expected feature.rs)"
+        );
+        assert_eq!(
+            tag_files, commit_files,
+            "annotated tag range must produce the same file set as the commit range"
+        );
+        assert!(
+            tag_files.iter().any(|p| p == "feature.rs"),
+            "expected feature.rs in tag-range diff, got: {tag_files:?}"
+        );
+    }
+
+    /// Mixed range: annotated tag .. branch must resolve both ends and produce
+    /// the correct diff (regression that peel didn't break non-tag end).
+    #[test]
+    fn qa_mixed_annotated_tag_dotdot_branch_range() {
+        let (_dir, path) = create_test_repo();
+        git(&path, &["tag", "-a", "v_old", "-m", "old release"]);
+        std::fs::write(path.join("feature.rs"), "fn added() {}\n").unwrap();
+        git(&path, &["add", "feature.rs"]);
+        git(&path, &["commit", "-m", "add feature"]);
+
+        let reader = RepoReader::open(&path).unwrap();
+        let via_mixed = reader.diff_commits("v_old", "main").unwrap();
+        let files: Vec<String> = via_mixed.files.iter().map(|f| f.path.clone()).collect();
+        assert!(
+            files.iter().any(|p| p == "feature.rs"),
+            "mixed tag..branch range must include feature.rs, got: {files:?}"
+        );
+    }
 }
