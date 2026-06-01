@@ -403,7 +403,7 @@ fn path_contains_cellar_component(path: &Path) -> bool {
 }
 
 /// The advisory message shown when a shim target is a version-pinned Cellar path.
-const CELLAR_STALENESS_ADVISORY: &str = "shim points at a version-pinned Homebrew Cellar path; \
+pub(crate) const CELLAR_STALENESS_ADVISORY: &str = "shim points at a version-pinned Homebrew Cellar path; \
      run `git-prism shim install` to update to a stable path \
      that survives `brew upgrade`";
 
@@ -738,10 +738,18 @@ mod tests {
         std::os::unix::fs::symlink(&cellar_exe, &link).unwrap();
 
         let status = path_shim_status(home);
-        assert!(
-            matches!(status, PathShimStatus::Installed { ref staleness_warning, .. } if staleness_warning.is_some()),
-            "expected Installed with a staleness warning for Cellar target; got {status:?}"
-        );
+        match status {
+            PathShimStatus::Installed {
+                staleness_warning: Some(ref w),
+                ..
+            } => {
+                assert_eq!(
+                    w, CELLAR_STALENESS_ADVISORY,
+                    "staleness warning must equal the canonical advisory string"
+                );
+            }
+            other => panic!("expected Installed with exact staleness warning; got {other:?}"),
+        }
     }
 
     #[test]
@@ -833,12 +841,16 @@ mod tests {
         std::fs::remove_file(&stable_exe).unwrap();
         std::os::unix::fs::symlink(&cellar_exe_110, &stable_exe).unwrap();
 
-        // The stable path still exists and now resolves to 1.1.0.
-        // Canonicalize both sides: on macOS /tmp is a symlink to /private/tmp,
-        // so TempDir paths need normalizing before comparison.
-        let resolved = std::fs::canonicalize(&stable_exe).unwrap();
+        // The install-time target (`target_before`) must re-resolve to the
+        // post-upgrade Cellar exe, proving a stable-path shim automatically
+        // follows `brew upgrade` without reinstalling.
+        // Canonicalize both sides: on macOS /tmp is a symlink to /private/tmp.
+        let resolved = std::fs::canonicalize(&target_before).unwrap();
         let expected = std::fs::canonicalize(&cellar_exe_110).unwrap();
-        assert_eq!(resolved, expected, "stable path should follow the upgrade");
+        assert_eq!(
+            resolved, expected,
+            "shim target chosen at install time must re-resolve to the post-upgrade version"
+        );
     }
 
     #[test]
@@ -875,6 +887,67 @@ mod tests {
         assert_eq!(
             result, cellar_exe,
             "should fall back to canonical exe when stable bin does not exist"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // stable_shim_target — positional boundary unit tests (hand-built paths,
+    // no canonicalize, so the arithmetic is tested directly)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn cellar_at_n_minus_6_via_libexec_is_not_rewritten() {
+        // Layout: <root>/Cellar/<formula>/<version>/libexec/bin/<bin>
+        // Cellar sits at n-6 (5 trailing components), NOT n-5.
+        // A trap <root>/bin/<bin> exists to catch a false rewrite.
+        let dir = tempfile::TempDir::new().unwrap();
+        let r = dir.path();
+        let cellar_exe = r.join("Cellar/git-prism/1.0.0/libexec/bin/git-prism");
+        std::fs::create_dir_all(cellar_exe.parent().unwrap()).unwrap();
+        std::fs::write(&cellar_exe, b"binary").unwrap();
+        let trap = r.join("bin/git-prism");
+        std::fs::create_dir_all(trap.parent().unwrap()).unwrap();
+        std::fs::write(&trap, b"trap").unwrap();
+
+        let result = stable_shim_target(&cellar_exe);
+        assert_eq!(
+            result, cellar_exe,
+            "Cellar at n-6 (libexec/bin layout) must not be rewritten; got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cellar_at_n_minus_5_with_sbin_not_bin_is_not_rewritten() {
+        // Layout: <root>/Cellar/<formula>/<version>/sbin/<bin>
+        // Cellar is at n-5 but "sbin" ≠ "bin" at n-2.
+        let dir = tempfile::TempDir::new().unwrap();
+        let r = dir.path();
+        let cellar_exe = r.join("Cellar/git-prism/1.0.0/sbin/git-prism");
+        std::fs::create_dir_all(cellar_exe.parent().unwrap()).unwrap();
+        std::fs::write(&cellar_exe, b"binary").unwrap();
+        let trap = r.join("bin/git-prism");
+        std::fs::create_dir_all(trap.parent().unwrap()).unwrap();
+        std::fs::write(&trap, b"trap").unwrap();
+
+        let result = stable_shim_target(&cellar_exe);
+        assert_eq!(
+            result, cellar_exe,
+            "sbin (not bin) at n-2 must not be rewritten; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn path_with_fewer_than_six_components_is_not_rewritten() {
+        // A path with exactly 5 components hits the n<6 guard.
+        // Hand-built as an absolute path so we control component count exactly.
+        // Layout: /a/Cellar/x/bin/git-prism — 5 components total.
+        let short = std::path::PathBuf::from("/a/Cellar/x/bin/git-prism");
+        let result = stable_shim_target(&short);
+        assert_eq!(
+            result, short,
+            "path with n<6 components must be returned unchanged; got {result:?}"
         );
     }
 
