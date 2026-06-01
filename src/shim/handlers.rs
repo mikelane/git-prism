@@ -12,7 +12,9 @@ use crate::git::reader::RepoReader;
 use crate::git::refs::RefRange;
 use crate::git::refs::parse_range;
 use crate::shim::classify::Classification;
-use crate::tools::types::{CommitSignature, ShowCommitDetail, ShowDiffstat, ShowManifestResponse};
+use crate::tools::types::{
+    CommitSignature, ShowCommitDetail, ShowDiffstat, ShowFileEntry, ShowManifestResponse,
+};
 use crate::tools::{
     ContextOptions, ManifestOptions, SnapshotOptions, build_function_context_with_options,
     build_snapshots, collect_all_history_pages, collect_all_manifest_pages,
@@ -119,50 +121,50 @@ fn handle_function_context<W: Write>(
 }
 
 fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
-    // `git show <sha>` maps to get_file_snapshots with range `<sha>^..<sha>`.
-    let base = format!("{sha}^");
-    let range_str = format!("{base}..{sha}");
-    let (base_ref, head_ref) = match parse_range(&range_str) {
-        RefRange::CommitRange { base, head } => (base.to_string(), head.to_string()),
-        RefRange::WorktreeCompare { .. } => unreachable!("range_str always has .."),
-    };
-    let options = SnapshotOptions {
-        include_before: true,
-        include_after: true,
-        max_file_size_bytes: 100_000,
-        line_range: None,
-        include_diff_hunks: false,
-    };
-    let snapshot = build_snapshots(repo_path, &base_ref, &head_ref, &[], &options)?;
     let commit = build_show_commit_detail(repo_path, sha)?;
 
-    let files_changed = snapshot.files.len();
-    let insertions = snapshot
-        .files
-        .iter()
-        .map(|f| f.after.as_ref().map_or(0, |c| c.line_count))
-        .sum::<usize>()
-        .saturating_sub(
-            snapshot
-                .files
-                .iter()
-                .map(|f| f.before.as_ref().map_or(0, |c| c.line_count))
-                .sum::<usize>(),
-        );
-    let deletions = snapshot
-        .files
-        .iter()
-        .map(|f| f.before.as_ref().map_or(0, |c| c.line_count))
-        .sum::<usize>()
-        .saturating_sub(
-            snapshot
-                .files
-                .iter()
-                .map(|f| f.after.as_ref().map_or(0, |c| c.line_count))
-                .sum::<usize>(),
-        );
+    let files: Vec<ShowFileEntry> = if commit.parents.is_empty() {
+        // Root commit: no parent, so `<sha>^` doesn't resolve.  Walk the
+        // commit tree directly and report every blob as Added.
+        let reader =
+            RepoReader::open(repo_path).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
+        let diff = reader
+            .diff_root_commit(sha)
+            .map_err(|e| anyhow::anyhow!("failed to diff root commit: {e}"))?;
+        diff.files
+            .into_iter()
+            .map(file_change_to_show_entry)
+            .collect()
+    } else {
+        // Normal commit: diff against first parent via the manifest pipeline.
+        let manifest_options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: false,
+            max_response_tokens: None,
+        };
+        let base_ref = format!("{sha}^");
+        let manifest =
+            collect_all_manifest_pages(repo_path, &base_ref, sha, &manifest_options, 500)?;
+        manifest
+            .files
+            .into_iter()
+            .map(|f| ShowFileEntry {
+                path: f.path,
+                old_path: f.old_path,
+                change_type: f.change_type,
+                additions: f.lines_added,
+                deletions: f.lines_removed,
+                is_binary: f.is_binary,
+            })
+            .collect()
+    };
+
+    // Derive diffstat directly from per-file counts — no net-delta arithmetic.
+    let insertions: usize = files.iter().map(|f| f.additions).sum();
+    let deletions: usize = files.iter().map(|f| f.deletions).sum();
     let diffstat = ShowDiffstat {
-        files_changed,
+        files_changed: files.len(),
         insertions,
         deletions,
     };
@@ -170,11 +172,24 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
     let result = ShowManifestResponse {
         commit,
         diffstat,
-        files: snapshot.files,
-        token_estimate: snapshot.token_estimate,
+        files,
+        token_estimate: 0,
     };
     serde_json::to_writer_pretty(out, &result)?;
     Ok(())
+}
+
+/// Map a raw `FileChange` (from `diff_root_commit`) to the show-specific
+/// `ShowFileEntry` shape.
+fn file_change_to_show_entry(f: crate::git::diff::FileChange) -> ShowFileEntry {
+    ShowFileEntry {
+        path: f.path,
+        old_path: f.old_path,
+        change_type: f.change_type,
+        additions: f.lines_added,
+        deletions: f.lines_removed,
+        is_binary: f.is_binary,
+    }
 }
 
 /// Extract structured commit metadata for `sha` using gix (no shell out).

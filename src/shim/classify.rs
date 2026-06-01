@@ -134,6 +134,28 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
 /// - `--porcelain` (machine-readable output for `status`, `blame`, etc.)
 /// - `--stat` (diffstat text output)
 /// - `-z` (NUL-terminated output)
+/// Return `true` when the argv slice contains any flag that requests
+/// scripted/machine-readable text output from git.  When these flags are
+/// present the caller wants the raw git output — not a JSON manifest.
+///
+/// Flags covered:
+/// - `--format=<val>` and `--format` (pretty-print format string)
+/// - `--pretty=<val>` and `--pretty` (pretty-print preset or format string)
+/// - `-s` / `--no-patch` (suppress diff, often paired with `--format`)
+/// - `--porcelain` (machine-readable output for `status`, `blame`, etc.)
+/// - `--stat` (diffstat text output)
+/// - `-z` (NUL-terminated output)
+///
+/// # SAFETY: `--` separator not honoured
+///
+/// git treats `--` as the end of flags and the start of pathspecs, so
+/// `git diff a..b -- --stat` passes `--stat` as a filename, not a flag.
+/// This scanner does not track `--` and would incorrectly treat that
+/// `--stat` as a scripted-output flag, causing passthrough when interception
+/// was correct.  This is a theoretical input (no real caller names a file
+/// `--stat`) and adding a runtime guard would complicate the hot path for
+/// no practical benefit.  If it becomes real, scan for `--` first and stop
+/// checking beyond it.
 fn has_scripted_output_flag(tokens: &[&str]) -> bool {
     tokens.iter().any(|tok| {
         tok.starts_with("--format=")

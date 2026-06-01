@@ -490,15 +490,35 @@ pub struct ShowDiffstat {
     pub deletions: usize,
 }
 
+/// Per-file entry in the enriched `git show <ref>` response.
+///
+/// Carries the change-type and line-count fields that manifest entries have,
+/// named `additions`/`deletions` as the issue specification requires.
+/// Unlike `SnapshotFileEntry` this type does NOT include raw file content —
+/// callers that want content should follow up with `get_file_snapshots`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowFileEntry {
+    pub path: String,
+    /// Original path before a rename or copy. `None` for add/modify/delete.
+    pub old_path: Option<String>,
+    /// How this file was affected: `added`, `modified`, `deleted`, `renamed`, `copied`.
+    pub change_type: crate::git::diff::ChangeType,
+    /// Lines added in this file by this commit.
+    pub additions: usize,
+    /// Lines removed in this file by this commit.
+    pub deletions: usize,
+    pub is_binary: bool,
+}
+
 /// Enriched response for `git show <ref>`.
 ///
-/// Extends the raw `SnapshotResponse` with structured commit metadata and a
-/// diffstat so JSON-aware callers no longer need to parse git text output.
+/// Combines commit metadata, a real diffstat (insertions/deletions from the
+/// manifest, not a net-line-delta), and the list of files changed by the commit.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShowManifestResponse {
     pub commit: ShowCommitDetail,
     pub diffstat: ShowDiffstat,
-    pub files: Vec<SnapshotFileEntry>,
+    pub files: Vec<ShowFileEntry>,
     pub token_estimate: usize,
 }
 

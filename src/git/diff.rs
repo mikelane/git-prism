@@ -260,6 +260,70 @@ impl RepoReader {
 
         Ok(DiffResult { files })
     }
+
+    /// Diff a root (parentless) commit against the empty tree by walking its
+    /// tree and reporting every blob as an `Added` file.
+    ///
+    /// This exists because `diff_commits` calls `peel_to_commit` on the base
+    /// ref, which fails for the well-known empty-tree SHA
+    /// (`4b825dc642cb6eb9a060e54bf8d69288fbee4904`) — that SHA is a tree
+    /// object, not a commit.
+    pub fn diff_root_commit(&self, head_ref: &str) -> Result<DiffResult, GitError> {
+        let _span = tracing::info_span!("git.diff_root_commit").entered();
+        let head_commit = self.peel_to_commit(head_ref)?;
+        let head_tree = head_commit.tree().map_err(obj_err)?;
+
+        let mut files: Vec<FileChange> = Vec::new();
+        self.walk_tree_as_additions(&head_tree, String::new(), &mut files)?;
+        Ok(DiffResult { files })
+    }
+
+    /// Recursively walk a tree object, emitting every blob as an `Added` file.
+    fn walk_tree_as_additions(
+        &self,
+        tree: &gix::Tree<'_>,
+        prefix: String,
+        files: &mut Vec<FileChange>,
+    ) -> Result<(), GitError> {
+        for entry_ref in tree.iter() {
+            let entry = entry_ref.map_err(obj_err)?;
+            let name = entry.filename().to_string();
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let mode = entry.mode();
+            if mode.is_tree() {
+                let obj = entry.object().map_err(obj_err)?;
+                let sub_tree = obj.try_into_tree().map_err(obj_err)?;
+                let sub_tree_ref = self
+                    .repo()
+                    .find_object(sub_tree.id)
+                    .map_err(obj_err)?
+                    .try_into_tree()
+                    .map_err(obj_err)?;
+                self.walk_tree_as_additions(&sub_tree_ref, path, files)?;
+            } else if mode.is_blob() {
+                let obj = entry.object().map_err(obj_err)?;
+                let is_binary = obj.data.contains(&0);
+                let lines = if is_binary { 0 } else { count_lines(&obj.data) };
+                files.push(FileChange {
+                    path,
+                    old_path: None,
+                    change_type: ChangeType::Added,
+                    change_scope: ChangeScope::Committed,
+                    is_binary,
+                    lines_added: lines,
+                    lines_removed: 0,
+                    size_before: 0,
+                    size_after: obj.data.len(),
+                    staged_blob_id: None,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn obj_err(e: impl std::fmt::Display) -> GitError {
