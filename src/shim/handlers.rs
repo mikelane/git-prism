@@ -455,4 +455,60 @@ mod tests {
             "annotated-tag show must produce the same files as target-sha show"
         );
     }
+
+    /// The `Classification::Manifest` path peels BOTH ends of a range.  This
+    /// test creates two annotated tags on consecutive commits and asserts that
+    /// the manifest over `v0.1..v0.2` returns a non-empty `files` array that
+    /// contains the file added in the second commit.  A "was kind tag" peel
+    /// failure would surface here as either an error exit or an empty file list.
+    #[test]
+    fn qa_manifest_over_annotated_tag_range_returns_changed_files() {
+        let (dir, path) = init_repo_with_two_commits();
+
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&path)
+                .output()
+                .unwrap()
+        };
+
+        // v0.1 tags the first commit (HEAD~1 after init_repo_with_two_commits)
+        git(&["tag", "-a", "v0.1", "-m", "v0.1 release", "HEAD~1"]);
+        // v0.2 tags the current HEAD (second commit, which added world.txt)
+        git(&["tag", "-a", "v0.2", "-m", "v0.2 release", "HEAD"]);
+
+        let classification = Classification::Manifest {
+            range: "v0.1..v0.2",
+        };
+        let mut out = Vec::new();
+        let code = handle(&classification, &path, &mut out);
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "manifest over annotated tag range must exit SUCCESS"
+        );
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let files = json
+            .get("files")
+            .and_then(|f| f.as_array())
+            .expect("expected 'files' array in manifest output");
+
+        assert!(
+            !files.is_empty(),
+            "manifest over v0.1..v0.2 must be non-empty (expected world.txt)"
+        );
+
+        let paths: Vec<&str> = files
+            .iter()
+            .filter_map(|f| f.get("path").and_then(|p| p.as_str()))
+            .collect();
+        assert!(
+            paths.contains(&"world.txt"),
+            "expected world.txt in manifest files, got: {paths:?}"
+        );
+
+        drop(dir);
+    }
 }

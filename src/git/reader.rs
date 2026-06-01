@@ -89,10 +89,7 @@ impl RepoReader {
             .lookup_entry_by_path(file_path)
             .map_err(|e| GitError::ReadObject(e.to_string()))?
             .ok_or_else(|| {
-                GitError::ReadObject(format!(
-                    "file '{}' not found at ref '{}'",
-                    file_path, refspec
-                ))
+                GitError::ReadObject(format!("file '{file_path}' not found at ref '{refspec}'"))
             })?;
 
         let blob = entry
@@ -238,7 +235,7 @@ impl RepoReader {
             .repo
             .rev_parse_single(refspec)
             // Raw gix error omitted — see OpenRepo for rationale.
-            .map_err(|_| Self::resolve_ref_with_fallback(self, refspec))?;
+            .map_err(|_| self.resolve_ref_with_fallback(refspec))?;
 
         let object = rev
             .object()
@@ -999,14 +996,14 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
-        let out = git(
+        let tag_result = git(
             &path,
             &["tag", "-a", "treetag", "-m", "points at a tree", &tree_sha],
         );
         assert!(
-            out.status.success(),
+            tag_result.status.success(),
             "fixture setup failed (could not tag a tree): {}",
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&tag_result.stderr)
         );
 
         let reader = RepoReader::open(&path).unwrap();
@@ -1031,14 +1028,14 @@ mod tests {
             .unwrap()
             .trim()
             .to_string();
-        let out = git(
+        let tag_result = git(
             &path,
             &["tag", "-a", "blobtag", "-m", "points at a blob", &blob_sha],
         );
         assert!(
-            out.status.success(),
+            tag_result.status.success(),
             "fixture setup failed (could not tag a blob): {}",
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&tag_result.stderr)
         );
 
         let reader = RepoReader::open(&path).unwrap();
