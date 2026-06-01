@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shim now passes through scripted-output git invocations.** When `git show`, `git log`, or `git diff` is called with flags that request formatted text output (`--format=`, `--pretty=`, `--pretty`, `-s`, `--no-patch`, `--porcelain`, `--stat`, `-z`), the shim forwards the call to real git instead of returning a JSON manifest. This fixes `git show -s --format=%ct HEAD` silently returning a change-manifest JSON payload instead of the expected epoch integer. (#338)
+
+### Added
+
+- **Enriched `git show <ref>` response.** The shim's `git show <sha>` handler now returns a `ShowManifestResponse` with structured commit metadata (`commit.sha`, `commit.short_sha`, `commit.parents`, `commit.author`, `commit.committer`, `commit.subject`, `commit.body`) and a top-level `diffstat` object (`files_changed`, `insertions`, `deletions`). JSON-aware callers no longer need to parse git text output to get per-commit author, timestamp, or diffstat data. (#338)
+
 ## [0.9.0] — 2026-05-31
 
 ### Breaking Changes

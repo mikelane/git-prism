@@ -452,6 +452,56 @@ pub struct FunctionContextResponse {
     pub pagination: PaginationInfo,
 }
 
+// --- ShowManifest types (git show <ref> enriched response) ---
+
+/// Author or committer identity with timestamp fields.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommitSignature {
+    pub name: String,
+    pub email: String,
+    /// ISO-8601 timestamp (e.g. `"2026-01-01T00:00:00+00:00"`).
+    pub date_iso: String,
+    /// Unix epoch seconds — the scalar that `git show -s --format=%ct` returns.
+    pub date_epoch: i64,
+}
+
+/// Per-commit metadata emitted by the enriched `git show <ref>` handler.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowCommitDetail {
+    pub sha: String,
+    /// First 8 hex characters of the SHA.
+    pub short_sha: String,
+    /// Parent SHAs (empty for root commits, two entries for merge commits).
+    pub parents: Vec<String>,
+    pub author: CommitSignature,
+    pub committer: CommitSignature,
+    /// First line of the commit message.
+    pub subject: String,
+    /// Remainder of the commit message after the subject line, if any.
+    /// `None` when the message has no body.
+    pub body: Option<String>,
+}
+
+/// Top-level diff statistics for the commit.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowDiffstat {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+/// Enriched response for `git show <ref>`.
+///
+/// Extends the raw `SnapshotResponse` with structured commit metadata and a
+/// diffstat so JSON-aware callers no longer need to parse git text output.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowManifestResponse {
+    pub commit: ShowCommitDetail,
+    pub diffstat: ShowDiffstat,
+    pub files: Vec<SnapshotFileEntry>,
+    pub token_estimate: usize,
+}
+
 // --- Tool options (for internal use) ---
 
 #[derive(Debug, Clone)]
@@ -988,11 +1038,9 @@ mod tests {
         assert_eq!(json["metadata"]["token_estimate"], 42);
         assert!(json["metadata"]["next_cursor"].is_null());
         // function_analysis_truncated skipped when empty
-        assert!(
-            json["metadata"]
-                .get("function_analysis_truncated")
-                .is_none()
-        );
+        assert!(json["metadata"]
+            .get("function_analysis_truncated")
+            .is_none());
         assert_eq!(json["functions"].as_array().unwrap().len(), 0);
         assert_eq!(json["pagination"]["total_items"], 0);
         assert_eq!(json["pagination"]["page_size"], 25);
