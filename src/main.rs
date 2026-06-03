@@ -285,7 +285,14 @@ async fn main() -> std::process::ExitCode {
         let mut telemetry_guard = telemetry::init();
         // run_shim either exec-replaces the process (passthrough, never returns)
         // or returns ExitCode after printing structured JSON or an error.
-        let exit_code = shim::run_shim(&args, &agent_detection::StdEnvSource, &exec);
+        // On passthrough paths force_flush is called inside run_shim before execvp.
+        // On the structured-output path the guard is flushed here after run_shim returns.
+        let exit_code = shim::run_shim(
+            &args,
+            &agent_detection::StdEnvSource,
+            &exec,
+            &mut telemetry_guard,
+        );
         telemetry_guard.force_flush();
         return exit_code;
     }

@@ -73,6 +73,44 @@ impl TelemetryGuard {
             eprintln!("git-prism: failed to force-flush traces: {e}");
         }
     }
+
+    /// Best-effort flush with a wall-clock deadline.
+    ///
+    /// Runs `force_flush` on a background thread and waits at most `timeout`
+    /// for it to complete.  If the collector is unreachable and the flush
+    /// blocks (up to `EXPORT_TIMEOUT = 5 s`), this method returns after
+    /// `timeout` without blocking the caller.
+    ///
+    /// Use this on the shim passthrough path where every intercepted git
+    /// command pays the flush cost: a DOWN OTLP endpoint must not stall the
+    /// developer's shell for 5 s per invocation.
+    ///
+    /// Safe to call on a no-op guard: completes immediately with no overhead.
+    pub fn force_flush_bounded(&mut self, timeout: Duration) {
+        if self.meter_provider.is_none() && self.tracer_provider.is_none() {
+            return;
+        }
+        // Clone the Arc-backed provider handles so they can be moved into the thread.
+        let mp = self.meter_provider.clone();
+        let tp = self.tracer_provider.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if let Some(mp) = mp
+                && let Err(e) = mp.force_flush()
+            {
+                eprintln!("git-prism: failed to force-flush metrics: {e}");
+            }
+            if let Some(tp) = tp
+                && let Err(e) = tp.force_flush()
+            {
+                eprintln!("git-prism: failed to force-flush traces: {e}");
+            }
+            let _ = tx.send(());
+        });
+        // Wait up to `timeout`; if the flush thread is still blocked, abandon it.
+        // The thread will be torn down with the process on execvp or normal exit.
+        let _ = rx.recv_timeout(timeout);
+    }
 }
 
 /// The design spec targets a 5s flush on shutdown. The SDK's `.shutdown()` handles
@@ -129,6 +167,24 @@ pub fn init() -> TelemetryGuard {
     init_with_attacher(attach_tracing_subscriber_default)
 }
 
+/// Read the service name from the environment, falling back to the default
+/// when the variable is absent **or empty**.
+fn resolve_service_name() -> String {
+    match std::env::var(ENV_SERVICE_NAME) {
+        Ok(v) if !v.is_empty() => v,
+        _ => DEFAULT_SERVICE_NAME.to_string(),
+    }
+}
+
+/// Read the service version from the environment, falling back to the crate
+/// version when the variable is absent **or empty**.
+fn resolve_service_version() -> String {
+    match std::env::var(ENV_SERVICE_VERSION) {
+        Ok(v) if !v.is_empty() => v,
+        _ => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 /// Core telemetry initialization body, parameterized by a subscriber-attach
 /// function so tests can inject a failure without touching tracing's
 /// process-global state.
@@ -156,10 +212,8 @@ where
     let base = endpoint.trim_end_matches('/');
     let (traces_endpoint, metrics_endpoint) = signal_endpoints(base);
 
-    let service_name =
-        std::env::var(ENV_SERVICE_NAME).unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string());
-    let service_version = std::env::var(ENV_SERVICE_VERSION)
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+    let service_name = resolve_service_name();
+    let service_version = resolve_service_version();
 
     // Build the OTLP trace exporter.
     let trace_exporter = match opentelemetry_otlp::SpanExporter::builder()
@@ -244,6 +298,25 @@ where
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
         meter_provider: Some(meter_provider),
+    }
+}
+
+/// Test-only constructors for `TelemetryGuard`.
+///
+/// Placed in a `#[cfg(test)]` impl block so the dead-code lint does not fire
+/// in non-test builds — the methods are invisible outside test compilation.
+#[cfg(test)]
+impl TelemetryGuard {
+    /// Construct a no-op guard with no providers attached.
+    ///
+    /// Used in unit tests that need to pass a `TelemetryGuard` to functions
+    /// under test without initializing real OTLP providers.  `force_flush`,
+    /// `force_flush_bounded`, and `Drop` on this guard are zero-cost no-ops.
+    pub(crate) fn noop() -> Self {
+        Self {
+            tracer_provider: None,
+            meter_provider: None,
+        }
     }
 }
 
@@ -387,6 +460,52 @@ mod tests {
         drop(guard);
     }
 
+    /// Verify that an empty `GIT_PRISM_SERVICE_VERSION` falls back to the crate
+    /// version rather than passing an empty string as the service.version attribute.
+    ///
+    /// The production code path under test is in `init_with_attacher`:
+    ///   `std::env::var(ENV_SERVICE_VERSION).unwrap_or_else(|_| env!(...).to_string())`
+    /// Without the `is_empty()` guard, `Ok("")` is returned and the empty string
+    /// is used as the service version.  This test calls `resolve_service_version`
+    /// which is the extracted helper that applies the guard.
+    #[test]
+    fn it_uses_crate_version_when_service_version_env_is_empty_string() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_SERVICE_VERSION, "");
+        }
+        let version = resolve_service_version();
+        unsafe {
+            std::env::remove_var(ENV_SERVICE_VERSION);
+        }
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "empty GIT_PRISM_SERVICE_VERSION must fall back to crate version"
+        );
+    }
+
+    /// Verify that an empty `GIT_PRISM_SERVICE_NAME` falls back to `"git-prism"`.
+    #[test]
+    fn it_uses_default_service_name_when_service_name_env_is_empty_string() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_SERVICE_NAME, "");
+        }
+        let name = resolve_service_name();
+        unsafe {
+            std::env::remove_var(ENV_SERVICE_NAME);
+        }
+        assert_eq!(
+            name, DEFAULT_SERVICE_NAME,
+            "empty GIT_PRISM_SERVICE_NAME must fall back to default 'git-prism'"
+        );
+    }
+
     #[test]
     fn it_uses_crate_version_when_service_version_env_is_unset() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -415,6 +534,13 @@ mod tests {
             crate_version, "0.9.0",
             "version must not be the old hardcoded value 0.9.0; got {crate_version}"
         );
+    }
+
+    #[test]
+    fn it_force_flushes_bounded_noop_guard_without_panic() {
+        let mut guard = TelemetryGuard::noop();
+        // force_flush_bounded on a no-op guard must complete immediately with no panic.
+        guard.force_flush_bounded(Duration::from_millis(200));
     }
 
     #[test]
