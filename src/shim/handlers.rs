@@ -289,46 +289,6 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
     (subject, body)
 }
 
-/// Check whether `sha` is present in the local object store at `repo_path`.
-/// If it is absent, fetch it from `origin` using the real git binary at
-/// `real_git`.
-///
-/// Used by tests to exercise the fetch path with a concrete SHA.  Production
-/// code calls [`ensure_sha_present_for_pr`] which fetches via the more
-/// reliable `refs/pull/<N>/head` refspec.
-fn ensure_sha_present(
-    repo_path: &std::path::Path,
-    head_sha: &str,
-    real_git: &std::path::Path,
-) -> anyhow::Result<()> {
-    // Use gix to check object presence — avoids a subprocess for the common case.
-    let repo = gix::open(repo_path)
-        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", repo_path.display()))?;
-
-    if repo.rev_parse_single(head_sha).is_ok() {
-        return Ok(());
-    }
-
-    // SHA absent locally — fetch it directly by SHA from origin.
-    // Note: bare SHA fetch requires uploadpack.allowReachableSHA1InWant on the
-    // server; when the PR number is known, prefer ensure_sha_present_for_pr.
-    let status = std::process::Command::new(real_git)
-        .args(["fetch", "origin", head_sha])
-        .current_dir(repo_path)
-        .env("GIT_PRISM_INSIDE_SHIM", "1")
-        .status()
-        .map_err(|e| anyhow::anyhow!("failed to spawn git fetch: {e}"))?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    anyhow::bail!(
-        "git fetch origin {head_sha} failed with status {status} — \
-         check network connectivity and that 'origin' remote is configured"
-    )
-}
-
 /// Ensure `head_sha` is present locally, fetching `refs/pull/<pr_number>/head`
 /// from `origin` via the real git binary if needed.
 ///
@@ -405,9 +365,19 @@ fn handle_gh_pr_diff<W: Write>(
         // No real git found — attempt the manifest anyway; if the object is
         // missing the manifest pipeline will surface a clear "Could not find
         // ref" error that tells the user what to do.
-        tracing::warn!(
+        //
+        // Use eprintln! (not tracing::warn!) because the shim entrypoint never
+        // installs a tracing subscriber (src/main.rs returns into run_shim
+        // before telemetry::init(), and that only attaches an OTel layer gated
+        // on an OTLP endpoint — there is no stderr layer). A tracing event here
+        // would vanish, leaving the operator to chase the downstream "Could not
+        // find ref" error with no hint that a missing git binary was the real
+        // cause. stderr is the only channel that works on the shim path.
+        eprintln!(
             "git-prism shim: could not locate real git binary; \
-             skipping pre-fetch for PR #{pr_number}"
+             skipping pre-fetch for PR #{pr_number} — if the diff fails with \
+             a missing-ref error, fetch the PR head manually \
+             (git fetch origin refs/pull/{pr_number}/head)"
         );
     }
 
@@ -743,7 +713,7 @@ mod tests {
         );
     }
 
-    // ---- ensure_sha_present tests ----
+    // ---- PR-object fetch fixtures + tests ----
 
     /// Build a bare remote + clone fixture where the clone is missing one commit.
     ///
@@ -862,78 +832,6 @@ mod tests {
         (remote_dir, clone_dir, head_sha)
     }
 
-    #[test]
-    fn ensure_sha_present_fetches_missing_object_and_succeeds() {
-        let (remote_dir, clone_dir, head_sha) = make_clone_missing_head();
-        let clone_path = clone_dir.path();
-
-        // Confirm the SHA is genuinely absent before calling ensure_sha_present.
-        let check = Command::new("git")
-            .args(["cat-file", "-e", &head_sha])
-            .current_dir(clone_path)
-            .status()
-            .unwrap();
-        assert!(
-            !check.success(),
-            "head SHA must be absent from the clone before the fetch"
-        );
-
-        let real_git = crate::shim::real_git::find_real_git()
-            .expect("real git binary must be locatable for this test");
-
-        ensure_sha_present(clone_path, &head_sha, &real_git)
-            .expect("ensure_sha_present must succeed when objects are fetchable");
-
-        // Confirm the SHA is now present.
-        let check_after = Command::new("git")
-            .args(["cat-file", "-e", &head_sha])
-            .current_dir(clone_path)
-            .status()
-            .unwrap();
-        assert!(
-            check_after.success(),
-            "head SHA must be present after ensure_sha_present"
-        );
-
-        drop(remote_dir);
-        drop(clone_dir);
-    }
-
-    #[test]
-    fn ensure_sha_present_is_noop_when_sha_already_present() {
-        let (_dir, path) = init_repo_with_two_commits();
-        let sha = head_sha(&path);
-
-        let real_git = crate::shim::real_git::find_real_git()
-            .expect("real git binary must be locatable for this test");
-
-        // Must not error even though no remote fetch is needed.
-        ensure_sha_present(&path, &sha, &real_git)
-            .expect("ensure_sha_present must be a no-op when SHA is already present");
-    }
-
-    #[test]
-    fn ensure_sha_present_returns_error_when_fetch_fails() {
-        // A repo with no remote configured — fetch must fail with a clear error.
-        let (_dir, path) = init_repo_with_two_commits();
-        // Use a fake SHA that is absent locally.
-        let fake_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-
-        let real_git = crate::shim::real_git::find_real_git()
-            .expect("real git binary must be locatable for this test");
-
-        let result = ensure_sha_present(&path, fake_sha, &real_git);
-        assert!(
-            result.is_err(),
-            "ensure_sha_present must return an error when fetch fails (no remote)"
-        );
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("fetch") || msg.contains("failed"),
-            "error message must mention fetch failure, got: {msg}"
-        );
-    }
-
     // ===== ADVERSARIAL QA PROBES (issue #349 pen-test) =====
 
     /// ensure_sha_present_for_pr: SHA already present → genuine no-op, no fetch.
@@ -997,9 +895,18 @@ mod tests {
             "fetch with no origin remote must return an error"
         );
         let msg = result.unwrap_err().to_string();
+        // The error must name the exact refspec it tried to fetch AND mention
+        // the failed fetch against origin — a generic "something went wrong" is
+        // not actionable. The bail! template always embeds both, so assert both
+        // concretely rather than an either/or that a degraded message could
+        // still satisfy.
         assert!(
-            msg.contains("origin") || msg.contains("failed"),
-            "error must be actionable (mention origin/failure), got: {msg}"
+            msg.contains("refs/pull/1/head"),
+            "error must name the failing PR refspec, got: {msg}"
+        );
+        assert!(
+            msg.contains("failed") && msg.contains("origin"),
+            "error must mention the failed fetch against origin, got: {msg}"
         );
     }
 

@@ -569,44 +569,65 @@ mod tests {
 
     // ===== ADVERSARIAL QA PROBES (issue #349 pen-test) =====
 
-    /// RECURSION SAFETY: PATH contains ONLY a `git` symlink that points at the
-    /// shim binary. The resolver MUST NOT return that symlink (returning it
-    /// would make `ensure_sha_present_for_pr` re-invoke the shim → recursion).
-    /// With no real git anywhere on this synthetic PATH, the resolver may fall
-    /// back to a real system git path, but it must NEVER return the shim symlink.
+    /// RECURSION SAFETY (deterministic): PATH has a `git` symlink to the shim
+    /// in the FIRST entry, and a real (non-shim) `git` in the SECOND entry. The
+    /// resolver MUST skip the shim symlink and return the real git — not the
+    /// symlink, and not anything that canonicalizes to the shim binary.
+    /// Returning the symlink would make `ensure_sha_present_for_pr` re-invoke
+    /// the shim → infinite recursion.
+    ///
+    /// This is a positive assertion (`assert_eq!` on the real git) so it cannot
+    /// pass vacuously: the resolver is forced to return Some, and that Some must
+    /// be the real binary in the second PATH entry. It does NOT depend on a
+    /// system git existing, because the synthetic PATH always contains a real
+    /// (non-shim) candidate.
     #[cfg(unix)]
     #[test]
-    fn qa_recursion_resolver_never_returns_shim_symlink_when_only_shim_on_path() {
+    fn qa_recursion_resolver_skips_shim_symlink_and_returns_real_git() {
         let cellar_dir = TempDir::new().unwrap();
         let link_dir = TempDir::new().unwrap();
+        let real_dir = TempDir::new().unwrap();
 
-        // The shim binary (this is what `git` symlinks resolve to).
+        // The shim binary (this is what the `git` symlink resolves to).
         let shim_binary = make_executable_file(cellar_dir.path(), "git-prism");
 
-        // <link_dir>/git -> <cellar_dir>/git-prism  (the only `git` on PATH)
+        // <link_dir>/git -> <cellar_dir>/git-prism  (a shim symlink on PATH)
         let symlink_git = link_dir.path().join("git");
         std::os::unix::fs::symlink(&shim_binary, &symlink_git).unwrap();
 
-        // PATH contains ONLY the shim-symlink directory.
-        let env = env_with_path(&link_dir.path().display().to_string());
+        // <real_dir>/git — a genuine, non-shim git binary in a later PATH entry.
+        let real_git = make_executable_file(real_dir.path(), "git");
+
+        // PATH: shim-symlink dir FIRST, real git dir SECOND. The resolver must
+        // skip the first and select the second.
+        let path_val = format!(
+            "{}:{}",
+            link_dir.path().display(),
+            real_dir.path().display()
+        );
+        let env = env_with_path(&path_val);
         let argv0 = shim_binary.to_string_lossy().into_owned();
 
         let result = resolve_real_git(&argv0, &env);
 
-        // Whatever is returned, it must not be the shim symlink, and must not
-        // canonicalize to the shim binary.
-        if let Some(p) = result {
-            assert_ne!(
-                p, symlink_git,
-                "resolver returned the shim symlink — this would recurse"
-            );
-            let canon = p.canonicalize().unwrap_or(p.clone());
-            let shim_canon = shim_binary.canonicalize().unwrap();
-            assert_ne!(
-                canon, shim_canon,
-                "resolver returned a path that canonicalizes to the shim binary — recursion"
-            );
-        }
+        // Positive assertion: must resolve to the real git, never the shim.
+        assert_eq!(
+            result.as_ref(),
+            Some(&real_git),
+            "resolver must skip the shim symlink and return the real git \
+             in the next PATH entry"
+        );
+        let returned = result.expect("resolver must return a binary");
+        assert_ne!(
+            returned, symlink_git,
+            "resolver returned the shim symlink — this would recurse"
+        );
+        let canon = returned.canonicalize().unwrap_or(returned.clone());
+        let shim_canon = shim_binary.canonicalize().unwrap();
+        assert_ne!(
+            canon, shim_canon,
+            "resolver returned a path that canonicalizes to the shim binary — recursion"
+        );
     }
 
     /// FALLBACK-CHAIN RECURSION GAP: the hardcoded fallback chain in
