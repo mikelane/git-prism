@@ -11,9 +11,6 @@ use anyhow::Result;
 
 use crate::hooks;
 
-/// The export line fragment used to detect existing entries and compute the shim dir.
-const SHIM_EXPORT_FRAGMENT: &str = ".local/share/git-prism/bin";
-
 /// The full export line written to shell rc files.
 const SHIM_EXPORT_LINE: &str = r#"export PATH="$HOME/.local/share/git-prism/bin:$PATH""#;
 
@@ -50,12 +47,11 @@ pub fn run_install_with_io(
     rc_path: &std::path::Path,
 ) -> Result<()> {
     hooks::install_path_shim(home, force)?;
-    let shim_bin = home.join(hooks::PATH_SHIM_REL_DIR);
+    let shim_dir = home.join(hooks::PATH_SHIM_REL_DIR);
     for name in hooks::PATH_SHIM_LINK_NAMES {
-        writeln!(stdout, "Created symlink: {}", shim_bin.join(name).display())?;
+        writeln!(stdout, "Created symlink: {}", shim_dir.join(name).display())?;
     }
 
-    let shim_dir = home.join(SHIM_EXPORT_FRAGMENT);
     let shim_dir_str = shim_dir.to_string_lossy().into_owned();
 
     if shim_dir_is_in_path(&shim_dir_str) {
@@ -236,6 +232,11 @@ mod tests {
 
     use super::*;
     use tempfile::TempDir;
+
+    /// The shim-dir path fragment, derived from the canonical constant in
+    /// `hooks` so these assertions track the real install location instead of a
+    /// drifting literal copy.
+    const SHIM_EXPORT_FRAGMENT: &str = hooks::PATH_SHIM_REL_DIR;
 
     /// Install with consent, using an explicit `.zshrc` path so the test is
     /// independent of the CI runner's `$SHELL`.

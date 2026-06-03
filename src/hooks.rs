@@ -497,8 +497,15 @@ fn is_uninstallable_shim(link: &Path, current_exe: &Path, shim_dir: &Path) -> Re
                 }
             }
         }
-        Err(_) => {
+        Err(e) => {
             // read_link itself failed — treat as broken/dangling, same as above.
+            // Surface the underlying errno so that if the subsequent remove_file
+            // also fails, the user has the original cause (e.g. EACCES on the
+            // parent dir) instead of a bare "broken link" assumption with no trail.
+            eprintln!(
+                "git-prism: could not read symlink {} ({e}); treating as broken and removing",
+                link.display()
+            );
             Ok(true)
         }
     }
@@ -797,6 +804,13 @@ mod tests {
             "expected a symlink at {}",
             link.display()
         );
+        // is_symlink() alone passes even for a symlink pointing at nowhere.
+        // The link must point at the running git-prism binary.
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            expected_shim_target(),
+            "git symlink must point at the git-prism binary"
+        );
     }
 
     #[test]
@@ -806,12 +820,21 @@ mod tests {
         let home = dir.path();
 
         install_path_shim(home, false).unwrap();
+        let link = home.join(".local/share/git-prism/bin/git");
+        let target_before = std::fs::read_link(&link).unwrap();
+
         install_path_shim(home, false).unwrap();
 
-        let link = home.join(".local/share/git-prism/bin/git");
         assert!(
             link.is_symlink(),
             "symlink must still exist after second install"
+        );
+        // Idempotency means the target is UNCHANGED, not merely that some
+        // symlink survives. A second install must leave the git target alone.
+        let target_after = std::fs::read_link(&link).unwrap();
+        assert_eq!(
+            target_before, target_after,
+            "idempotent re-install must not change the git symlink target"
         );
     }
 
@@ -836,6 +859,28 @@ mod tests {
         assert!(link.is_symlink());
         let target = std::fs::read_link(&link).unwrap();
         assert_ne!(target, std::path::Path::new(stale_target));
+        // assert_ne! alone is satisfied by ANY non-stale target (even garbage).
+        // Pin it: the replacement must point at the running git-prism binary,
+        // i.e. exactly the target install_path_shim computes for a fresh install.
+        let expected = expected_shim_target();
+        assert_eq!(
+            target, expected,
+            "stale replacement must repoint at the current git-prism binary, not just away from the stale path"
+        );
+    }
+
+    /// The shim target `install_path_shim` writes for a fresh install: the
+    /// canonicalized current executable, mapped through `stable_shim_target`.
+    /// Tests use this to assert the symlink points at the RIGHT binary, not
+    /// merely that it points somewhere (which a `assert_ne!` against a stale
+    /// path would tolerate even for a garbage target).
+    #[cfg(unix)]
+    fn expected_shim_target() -> PathBuf {
+        let canonical = std::env::current_exe()
+            .expect("current_exe")
+            .canonicalize()
+            .expect("canonicalize current_exe");
+        stable_shim_target(&canonical)
     }
 
     #[test]
@@ -847,10 +892,26 @@ mod tests {
         install_path_shim(home, false).unwrap();
 
         let status = path_shim_status(home);
-        assert!(
-            matches!(status, PathShimStatus::Installed { .. }),
-            "expected Installed, got {status:?}"
-        );
+        // Don't just match the variant — verify the REPORTED target (the CLI
+        // surfaces this) is the real binary and that a fresh install carries no
+        // spurious staleness warning.
+        match status {
+            PathShimStatus::Installed {
+                target,
+                staleness_warning,
+            } => {
+                assert_eq!(
+                    target,
+                    expected_shim_target(),
+                    "status must report the actual shim target"
+                );
+                assert!(
+                    staleness_warning.is_none(),
+                    "a fresh non-Cellar install must not carry a staleness warning; got {staleness_warning:?}"
+                );
+            }
+            other => panic!("expected Installed, got {other:?}"),
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1160,6 +1221,13 @@ mod tests {
             "expected a gh symlink at {}",
             link.display()
         );
+        // is_symlink() alone passes even for a symlink pointing at nowhere.
+        // The link must point at the running git-prism binary.
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            expected_shim_target(),
+            "gh symlink must point at the git-prism binary"
+        );
     }
 
     #[test]
@@ -1216,6 +1284,55 @@ mod tests {
         assert_eq!(
             target_before, target_after,
             "idempotent re-install must not change the gh symlink target"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn path_shim_status_for_gh_reports_installed_target() {
+        // path_shim_status_for is per-name; `gh` is the new name added in #347.
+        // Exercise the gh branch directly, not just the default `git` wrapper.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        install_path_shim(home, false).unwrap();
+
+        match path_shim_status_for(home, "gh") {
+            PathShimStatus::Installed {
+                target,
+                staleness_warning,
+            } => {
+                assert_eq!(
+                    target,
+                    expected_shim_target(),
+                    "gh status must report the actual shim target"
+                );
+                assert!(
+                    staleness_warning.is_none(),
+                    "fresh gh install must not warn; got {staleness_warning:?}"
+                );
+            }
+            other => panic!("expected gh Installed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn path_shim_status_for_gh_reports_not_installed_when_only_git_present() {
+        // Installing only a `git` symlink by hand must leave `gh` reporting
+        // NotInstalled — status is genuinely per-name, not a shared verdict.
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(PATH_SHIM_REL_DIR);
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let exe = shim_dir.join("git-prism-fake");
+        std::fs::write(&exe, b"binary").unwrap();
+        std::os::unix::fs::symlink(&exe, shim_dir.join("git")).unwrap();
+
+        assert_eq!(
+            path_shim_status_for(home, "gh"),
+            PathShimStatus::NotInstalled,
+            "gh must report NotInstalled when only git is present"
         );
     }
 
@@ -1475,6 +1592,13 @@ mod tests {
         assert_ne!(
             new_target, foreign_target,
             "install --force must replace foreign symlink with git-prism shim"
+        );
+        // assert_ne! alone tolerates a garbage replacement. Pin the exact target:
+        // --force must repoint at the running git-prism binary.
+        assert_eq!(
+            new_target,
+            expected_shim_target(),
+            "install --force must repoint gh at the git-prism binary, not just away from the foreign target"
         );
     }
 
