@@ -51,6 +51,28 @@ impl TelemetryGuard {
     pub fn is_active(&self) -> bool {
         self.tracer_provider.is_some()
     }
+
+    /// Force-flush pending telemetry to the exporter immediately.
+    ///
+    /// The `PeriodicReader` used by the metrics provider only fires on its
+    /// configured interval (default 60 s). A short-lived process — such as the
+    /// shim — exits before the reader ticks, so `Drop` alone never delivers
+    /// metrics. Calling `force_flush` before process exit ensures buffered
+    /// measurements reach the OTLP endpoint.
+    ///
+    /// Safe to call on a no-op guard: it is a documented zero-cost no-op.
+    pub fn force_flush(&mut self) {
+        if let Some(mp) = &self.meter_provider {
+            if let Err(e) = mp.force_flush() {
+                eprintln!("git-prism: failed to force-flush metrics: {e}");
+            }
+        }
+        if let Some(tp) = &self.tracer_provider {
+            if let Err(e) = tp.force_flush() {
+                eprintln!("git-prism: failed to force-flush traces: {e}");
+            }
+        }
+    }
 }
 
 /// The design spec targets a 5s flush on shutdown. The SDK's `.shutdown()` handles
@@ -361,6 +383,38 @@ mod tests {
         unsafe {
             std::env::remove_var(ENV_OTLP_ENDPOINT);
             std::env::remove_var(ENV_SERVICE_NAME);
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn it_force_flushes_noop_guard_without_panic() {
+        let mut guard = TelemetryGuard {
+            tracer_provider: None,
+            meter_provider: None,
+        };
+        // force_flush on a no-op guard must be a no-op with zero overhead.
+        guard.force_flush();
+    }
+
+    #[tokio::test]
+    async fn it_force_flushes_active_guard_without_panic() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
+        }
+        let mut guard = init();
+        assert!(
+            guard.is_active(),
+            "guard must be active for this test to exercise flush"
+        );
+        // force_flush on an active guard must not panic even when no exporter is reachable.
+        guard.force_flush();
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
         }
         drop(guard);
     }
