@@ -190,20 +190,20 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
     Scenario: Accepting PATH setup appends the export line to the shell rc
       Given an isolated HOME directory
       And the shim directory is not in PATH
-      And a shell rc file exists at ".zshrc" under HOME
+      And a shell rc file exists at ".zprofile" under HOME
       When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
       Then the exit code is 0
-      And the rc file ".zshrc" under HOME contains the shim directory export line
+      And the rc file ".zprofile" under HOME contains the shim directory export line
       And the output contains "restart"
 
     @ISSUE-325
     Scenario: Re-running install does not append the export line a second time
       Given an isolated HOME directory
       And the shim directory is not in PATH
-      And a shell rc file exists at ".zshrc" under HOME
+      And a shell rc file exists at ".zprofile" under HOME
       When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
       And I run "git-prism shim install" and consent to PATH setup with the isolated HOME again
-      Then the rc file ".zshrc" under HOME contains the shim export line exactly once
+      Then the rc file ".zprofile" under HOME contains the shim export line exactly once
 
   Rule: User declines auto-PATH setup — rc file is not modified
 
@@ -211,10 +211,10 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
     Scenario: Declining PATH setup prints manual instructions and leaves rc unchanged
       Given an isolated HOME directory
       And the shim directory is not in PATH
-      And a shell rc file exists at ".zshrc" under HOME
+      And a shell rc file exists at ".zprofile" under HOME
       When I run "git-prism shim install" and decline PATH setup with the isolated HOME
       Then the exit code is 0
-      And the rc file ".zshrc" under HOME is unchanged
+      And the rc file ".zprofile" under HOME is unchanged
       And the output contains ".local/share/git-prism/bin"
 
   Rule: Shim directory already in PATH — no prompt, no rc modification
@@ -223,10 +223,10 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
     Scenario: No PATH prompt when shim directory is already in PATH
       Given an isolated HOME directory
       And the shim directory is already in PATH
-      And a shell rc file exists at ".zshrc" under HOME
+      And a shell rc file exists at ".zprofile" under HOME
       When I run "git-prism shim install" with the isolated HOME
       Then the exit code is 0
-      And the rc file ".zshrc" under HOME is unchanged
+      And the rc file ".zprofile" under HOME is unchanged
 
   # ===========================================================================
   # @ISSUE-326 — redirect hook removal (hard removal, no deprecation phase)
