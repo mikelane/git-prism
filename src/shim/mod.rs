@@ -89,7 +89,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
         Some(p) => p,
         None => {
             metrics.record_shim_invocation(ShimOutcome::Passthrough);
-            telemetry_guard.force_flush();
+            telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
             return exec.passthrough(argv);
         }
     };

@@ -164,7 +164,19 @@ fn attach_tracing_subscriber_default(_tracer_provider: &SdkTracerProvider) -> Re
 /// When `GIT_PRISM_OTLP_ENDPOINT` is not set, this returns a no-op guard
 /// with zero overhead.
 pub fn init() -> TelemetryGuard {
-    init_with_attacher(attach_tracing_subscriber_default)
+    init_with_attacher(attach_tracing_subscriber_default, true)
+}
+
+/// Like [`init`], but suppresses the one-line "telemetry initialized" success
+/// banner on stderr.
+///
+/// The shim runs once per intercepted `git`/`gh` invocation, so emitting the
+/// success line every time would flood the developer's shell with one stderr
+/// line per git command. Failure paths still log (a misconfigured endpoint must
+/// remain visible) and the endpoint is still recorded in the exported resource;
+/// only the per-invocation success banner is silenced.
+pub fn init_quiet() -> TelemetryGuard {
+    init_with_attacher(attach_tracing_subscriber_default, false)
 }
 
 /// Read the service name from the environment, falling back to the default
@@ -194,7 +206,11 @@ fn resolve_service_version() -> String {
 /// user-visible "telemetry initialized" message. Every failure path must
 /// return a no-op `TelemetryGuard` AND suppress the success message —
 /// otherwise operators see "initialized" while spans silently disappear.
-fn init_with_attacher<F>(attach_subscriber: F) -> TelemetryGuard
+///
+/// `emit_success_banner` controls only the one-line success message printed
+/// when initialization fully succeeds. Failure paths log unconditionally so a
+/// misconfigured endpoint is never silently swallowed regardless of caller.
+fn init_with_attacher<F>(attach_subscriber: F, emit_success_banner: bool) -> TelemetryGuard
 where
     F: FnOnce(&SdkTracerProvider) -> Result<(), String>,
 {
@@ -293,7 +309,9 @@ where
         };
     }
 
-    eprintln!("git-prism: telemetry initialized (HTTP/protobuf, endpoint={base})");
+    if emit_success_banner {
+        eprintln!("git-prism: telemetry initialized (HTTP/protobuf, endpoint={base})");
+    }
 
     TelemetryGuard {
         tracer_provider: Some(tracer_provider),
@@ -378,6 +396,41 @@ mod tests {
         unsafe {
             std::env::remove_var(ENV_OTLP_ENDPOINT);
         }
+    }
+
+    #[test]
+    fn test_init_quiet_without_env_returns_noop() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+        }
+        let guard = init_quiet();
+        assert!(
+            !guard.is_active(),
+            "init_quiet must produce a no-op guard when no endpoint is set, same as init"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_quiet_with_endpoint_creates_providers() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
+        }
+        let guard = init_quiet();
+        assert!(
+            guard.is_active(),
+            "init_quiet must still create active providers when an endpoint is set; \
+             suppressing the banner must not suppress telemetry itself"
+        );
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        drop(guard);
     }
 
     #[tokio::test]
@@ -487,6 +540,57 @@ mod tests {
         );
     }
 
+    /// Verify a non-empty `GIT_PRISM_SERVICE_NAME` is returned verbatim — the
+    /// resolver must actually read the env var, not always return the default.
+    /// Kills the mutation where the custom-value branch is dropped.
+    #[test]
+    fn it_uses_custom_service_name_when_service_name_env_is_set() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_SERVICE_NAME, "custom-prism");
+        }
+        let name = resolve_service_name();
+        unsafe {
+            std::env::remove_var(ENV_SERVICE_NAME);
+        }
+        assert_eq!(
+            name, "custom-prism",
+            "a non-empty GIT_PRISM_SERVICE_NAME must be used verbatim, not replaced by the default"
+        );
+        assert_ne!(
+            name, DEFAULT_SERVICE_NAME,
+            "the custom name must not collapse to the default"
+        );
+    }
+
+    /// Verify a non-empty `GIT_PRISM_SERVICE_VERSION` is returned verbatim
+    /// rather than the crate-version fallback. Kills the mutation where the
+    /// custom-value branch is dropped in favor of always returning the fallback.
+    #[test]
+    fn it_uses_custom_service_version_when_service_version_env_is_set() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_SERVICE_VERSION, "9.9.9-custom");
+        }
+        let version = resolve_service_version();
+        unsafe {
+            std::env::remove_var(ENV_SERVICE_VERSION);
+        }
+        assert_eq!(
+            version, "9.9.9-custom",
+            "a non-empty GIT_PRISM_SERVICE_VERSION must be used verbatim"
+        );
+        assert_ne!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "the custom version must not collapse to the crate-version fallback"
+        );
+    }
+
     /// Verify that an empty `GIT_PRISM_SERVICE_NAME` falls back to `"git-prism"`.
     #[test]
     fn it_uses_default_service_name_when_service_name_env_is_empty_string() {
@@ -513,26 +617,59 @@ mod tests {
         unsafe {
             clear_telemetry_env();
         }
-        // When GIT_PRISM_SERVICE_VERSION is not set, the guard should still
-        // initialize (no-op when no endpoint), and the crate version constant
-        // must equal the Cargo.toml version. We verify the constant is wired
-        // by checking it matches the package version used at compile time.
-        let crate_version = env!("CARGO_PKG_VERSION");
-        assert!(
-            !crate_version.is_empty(),
-            "CARGO_PKG_VERSION must be non-empty"
+        // With GIT_PRISM_SERVICE_VERSION unset, the resolver must return exactly
+        // the compiled-in crate version — not an empty string, not a stale
+        // hardcoded constant. Asserting equality against CARGO_PKG_VERSION binds
+        // the test to the live package version, so a regression to a literal
+        // string (the original bug this guards) fails immediately.
+        let version = resolve_service_version();
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "unset GIT_PRISM_SERVICE_VERSION must fall back to the crate version"
         );
-        // Verify the fallback value matches by checking the env var is absent.
         assert!(
-            std::env::var(ENV_SERVICE_VERSION).is_err(),
-            "ENV_SERVICE_VERSION must be unset for this test"
+            !version.is_empty(),
+            "the crate-version fallback must never be empty"
         );
-        // The guard init path uses env!("CARGO_PKG_VERSION") as fallback —
-        // confirmed by reading telemetry.rs:162. This test guards against
-        // regression to a hardcoded string.
-        assert_ne!(
-            crate_version, "0.9.0",
-            "version must not be the old hardcoded value 0.9.0; got {crate_version}"
+    }
+
+    /// `init_quiet` must produce the same guard semantics as `init` — it only
+    /// suppresses the success banner, not provider construction. An active
+    /// endpoint must still yield an active guard.
+    #[tokio::test]
+    async fn it_quiet_init_still_activates_providers_when_endpoint_is_set() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
+        }
+        let guard = init_quiet();
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        assert!(
+            guard.is_active(),
+            "init_quiet must still create providers when an endpoint is configured; \
+             it only suppresses the stderr success banner"
+        );
+        drop(guard);
+    }
+
+    /// With no endpoint, `init_quiet` degrades to a no-op guard just like `init`.
+    #[test]
+    fn it_quiet_init_returns_noop_without_endpoint() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+        }
+        let guard = init_quiet();
+        assert!(
+            !guard.is_active(),
+            "init_quiet must be a no-op guard when no endpoint is set"
         );
     }
 
@@ -575,6 +712,89 @@ mod tests {
         drop(guard);
     }
 
+    /// Double-flush must be idempotent: `force_flush` borrows the providers
+    /// (`&mut self`) rather than taking them, so a second call — and a
+    /// subsequent `Drop` — must still succeed without panic or double-free.
+    /// This is the real shim sequence: flush before exec, then Drop on exit.
+    #[tokio::test]
+    async fn it_tolerates_double_force_flush_then_drop_on_active_guard() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
+        }
+        let mut guard = init();
+        assert!(
+            guard.is_active(),
+            "guard must be active for this test to exercise repeated flush"
+        );
+        guard.force_flush();
+        // Second flush must remain a no-panic no-op: providers are still owned.
+        guard.force_flush();
+        // Guard must still be active after repeated flushes — flush does not
+        // consume the providers the way Drop does.
+        assert!(
+            guard.is_active(),
+            "force_flush must not consume the providers; guard stays active"
+        );
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        // Drop after two flushes must not double-free or panic.
+        drop(guard);
+    }
+
+    /// Double-flush on a no-op guard must remain a zero-cost no-op across
+    /// repeated calls and a final Drop.
+    #[test]
+    fn it_tolerates_double_force_flush_on_noop_guard() {
+        let mut guard = TelemetryGuard::noop();
+        guard.force_flush();
+        guard.force_flush();
+        assert!(
+            !guard.is_active(),
+            "a no-op guard must stay inactive across repeated force_flush calls"
+        );
+        drop(guard);
+    }
+
+    /// `force_flush_bounded` on an active guard must return within the deadline
+    /// even when the configured OTLP endpoint is unreachable. The 5 s exporter
+    /// timeout must NOT leak through: we cap the wait at 200 ms and assert the
+    /// call returns in well under the exporter timeout. This is the property the
+    /// shim relies on so a DOWN collector never stalls the developer's shell.
+    #[tokio::test]
+    async fn it_force_flushes_bounded_active_guard_within_deadline() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            // Unroutable TEST-NET-1 address (RFC 5737): connections hang/fail,
+            // exercising the bounded-wait path rather than a fast local refusal.
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://192.0.2.1:4318");
+        }
+        let mut guard = init();
+        assert!(
+            guard.is_active(),
+            "guard must be active to exercise the bounded-flush wait path"
+        );
+        let start = std::time::Instant::now();
+        guard.force_flush_bounded(Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+        drop(guard);
+        assert!(
+            elapsed < EXPORT_TIMEOUT,
+            "bounded flush must abandon a stalled exporter well before the {EXPORT_TIMEOUT:?} \
+             export timeout; took {elapsed:?}"
+        );
+    }
+
     /// Regression test for PR #210 blocker B1.
     ///
     /// Before the fix: when `Registry::default().with(otel_layer).try_init()`
@@ -598,8 +818,10 @@ mod tests {
             clear_telemetry_env();
             std::env::set_var(ENV_OTLP_ENDPOINT, "http://localhost:4318");
         }
-        let guard =
-            init_with_attacher(|_tp| Err("subscriber already registered (simulated)".to_string()));
+        let guard = init_with_attacher(
+            |_tp| Err("subscriber already registered (simulated)".to_string()),
+            true,
+        );
         // SAFETY: cleanup
         unsafe {
             std::env::remove_var(ENV_OTLP_ENDPOINT);

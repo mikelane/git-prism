@@ -282,7 +282,12 @@ async fn main() -> std::process::ExitCode {
         // structured-output path run_shim returns an ExitCode, and we
         // force_flush before returning so metrics reach the exporter even
         // though the PeriodicReader hasn't ticked yet.
-        let mut telemetry_guard = telemetry::init();
+        //
+        // Use `init_quiet`: the shim runs once per intercepted git/gh command,
+        // so the per-invocation "telemetry initialized" banner would flood the
+        // developer's shell with one stderr line per git call. Failure paths
+        // still log, so a misconfigured endpoint stays visible.
+        let mut telemetry_guard = telemetry::init_quiet();
         // run_shim either exec-replaces the process (passthrough, never returns)
         // or returns ExitCode after printing structured JSON or an error.
         // On passthrough paths force_flush is called inside run_shim before execvp.
