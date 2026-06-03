@@ -273,6 +273,7 @@ enum InstallObstacle {
 fn classify_install_obstacle(
     link: &Path,
     target: &Path,
+    shim_dir: &Path,
     force: bool,
 ) -> Result<Option<InstallObstacle>> {
     if !link.exists() && !link.is_symlink() {
@@ -324,7 +325,21 @@ fn classify_install_obstacle(
                     Ok(Some(InstallObstacle::NeedsReplacement))
                 }
                 Err(_) => {
-                    // Dangling symlink — target is gone, always safe to replace.
+                    // Dangling symlink — target no longer exists on disk.
+                    // Check raw target provenance: only treat the link as
+                    // git-prism-owned (safe to replace) when its raw target
+                    // is recognisably ours. A dangling link whose raw target
+                    // is foreign is treated like a live foreign symlink —
+                    // refuse without --force.
+                    if !dangling_target_is_git_prism_owned(&existing_target, shim_dir) && !force {
+                        anyhow::bail!(
+                            "{} is a dangling symlink pointing at {} which is outside \
+                             the git-prism managed directory; remove it manually or \
+                             re-run with --force",
+                            link.display(),
+                            existing_target.display()
+                        );
+                    }
                     Ok(Some(InstallObstacle::NeedsReplacement))
                 }
             }
@@ -377,7 +392,9 @@ pub fn install_path_shim(home: &Path, force: bool) -> Result<PathBuf> {
     // second name must not leave the first name half-installed.
     let obstacles: Vec<Option<InstallObstacle>> = PATH_SHIM_LINK_NAMES
         .iter()
-        .map(|name| classify_install_obstacle(&path_shim_link(home, name), &target, force))
+        .map(|name| {
+            classify_install_obstacle(&path_shim_link(home, name), &target, &shim_dir, force)
+        })
         .collect::<Result<_>>()?;
 
     // Apply mutations only after all pre-flight checks passed.
@@ -458,18 +475,24 @@ fn is_uninstallable_shim(link: &Path, current_exe: &Path, shim_dir: &Path) -> Re
                 }
                 Err(_) => {
                     // Dangling symlink: the target no longer exists on disk.
-                    // The link lives in our managed bin dir, which we own
-                    // exclusively. A dangling link here was created by
-                    // git-prism (e.g. brew upgrade GC'd the Cellar binary)
-                    // and should be cleaned up.
-                    //
-                    // Safety: only links inside `shim_dir` are passed here;
-                    // we never remove dangling symlinks outside our managed
-                    // directory.
+                    // Check raw target provenance: only remove the link when
+                    // its raw target is recognisably git-prism-owned (the
+                    // brew-upgrade GC scenario). A dangling link whose raw
+                    // target is foreign is treated like a live foreign
+                    // symlink — refuse to remove it.
                     debug_assert!(
                         link.parent() == Some(shim_dir),
                         "is_uninstallable_shim called for a link outside the managed shim dir"
                     );
+                    if !dangling_target_is_git_prism_owned(&raw_target, shim_dir) {
+                        anyhow::bail!(
+                            "{} is a dangling symlink pointing at {} which is outside \
+                             the git-prism managed directory; remove it manually if \
+                             you want to clean up this path",
+                            link.display(),
+                            raw_target.display()
+                        );
+                    }
                     Ok(true)
                 }
             }
@@ -535,6 +558,26 @@ pub fn uninstall_path_shim(home: &Path) -> Result<()> {
 /// version-pinned Homebrew Cellar path that will break after `brew upgrade`.
 fn path_contains_cellar_component(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "Cellar")
+}
+
+/// Return true when a dangling symlink's raw (unresolved) `target` is
+/// recognisably owned by git-prism and therefore safe to remove or replace.
+///
+/// A target is git-prism-owned when it either:
+/// - Lives inside `shim_dir` itself (e.g. a relative shim pointing back into
+///   the managed bin directory), or
+/// - Contains a `git-prism` path component (covers `brew`-installed Cellar
+///   paths such as `.../Cellar/git-prism/0.9.0/bin/git-prism` that get GC'd
+///   after `brew upgrade`).
+///
+/// Any other dangling target (e.g. a user's own wrapper that has since been
+/// moved) is treated as a foreign symlink that must not be touched without
+/// explicit user action.
+fn dangling_target_is_git_prism_owned(raw_target: &Path, shim_dir: &Path) -> bool {
+    raw_target.starts_with(shim_dir)
+        || raw_target
+            .components()
+            .any(|c| c.as_os_str() == "git-prism")
 }
 
 /// The advisory message shown when a shim target is a version-pinned Cellar path.
@@ -781,13 +824,18 @@ mod tests {
         let shim_dir = home.join(".local/share/git-prism/bin");
         std::fs::create_dir_all(&shim_dir).unwrap();
         let link = shim_dir.join("git");
-        std::os::unix::fs::symlink("/nonexistent/old-binary", &link).unwrap();
+        // Simulate a previously-installed git-prism shim whose target was GC'd
+        // by `brew upgrade` — the raw target contains "git-prism" in its path,
+        // making it recognisably ours.  The dangling-ownership check must allow
+        // this to be replaced without --force.
+        let stale_target = "/nonexistent/Cellar/git-prism/0.8.0/bin/git-prism";
+        std::os::unix::fs::symlink(stale_target, &link).unwrap();
 
         install_path_shim(home, false).unwrap();
 
         assert!(link.is_symlink());
         let target = std::fs::read_link(&link).unwrap();
-        assert_ne!(target, std::path::Path::new("/nonexistent/old-binary"));
+        assert_ne!(target, std::path::Path::new(stale_target));
     }
 
     #[test]
@@ -1464,6 +1512,106 @@ mod tests {
             "install silently replaced a user's foreign gh symlink without --force \
              (result={result:?}); the --force guard only protects regular files, not \
              foreign symlinks"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Adversarial QA pass 2 — probing the validate-then-apply refactor
+    // -------------------------------------------------------------------------
+
+    /// PASS-2 PROBE (install asymmetry — dangling foreign symlink): the pass-1
+    /// fix made `install_path_shim` REFUSE to clobber a *live* foreign symlink
+    /// without `--force` (matching uninstall). But `classify_install_obstacle`
+    /// treats a symlink whose target fails to canonicalize (a DANGLING symlink)
+    /// as `NeedsReplacement` UNCONDITIONALLY — ignoring `force`. So a user's
+    /// pre-existing foreign symlink that happens to be dangling (its target was
+    /// renamed/removed) is silently deleted and replaced on a plain
+    /// `install_path_shim(home, false)`, with no error.
+    ///
+    /// This is the same asymmetry the pass-1 "clobber foreign symlink" fix
+    /// closed for live links, but left open for dangling ones. A live foreign
+    /// link is protected; a dangling foreign link is not.
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_install_must_not_clobber_dangling_foreign_symlink_without_force() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        // A user's foreign symlink at `gh` whose target does NOT exist (dangling).
+        // e.g. they symlinked their own gh wrapper which they later moved.
+        let users_missing_target = dir.path().join("users-own-gh-wrapper-now-moved");
+        let gh_link = shim_dir.join("gh");
+        std::os::unix::fs::symlink(&users_missing_target, &gh_link).unwrap();
+        assert!(
+            gh_link.is_symlink(),
+            "precondition: dangling foreign gh link"
+        );
+        assert!(!gh_link.exists(), "precondition: its target is gone");
+
+        let result = install_path_shim(home, false);
+
+        // Without --force, install must NOT silently clobber the user's foreign
+        // symlink just because it happens to be dangling. Either it errors, or it
+        // leaves the user's symlink pointing where it was.
+        let still_points_at_users_target = std::fs::read_link(&gh_link)
+            .map(|t| t == users_missing_target)
+            .unwrap_or(false);
+        assert!(
+            result.is_err() || still_points_at_users_target,
+            "install silently replaced a user's DANGLING foreign gh symlink without \
+             --force (result={result:?}); classify_install_obstacle treats any \
+             canonicalize-failure as NeedsReplacement, bypassing the --force guard \
+             that protects live foreign symlinks"
+        );
+    }
+
+    /// PASS-2 PROBE (uninstall over-correction — dangling link pointing OUTSIDE
+    /// the managed dir at a non-git-prism path): the pass-1 fix for bug 3 made
+    /// `uninstall_path_shim` remove dangling symlinks inside the managed bin
+    /// dir, on the theory that git-prism owns that dir exclusively. But the
+    /// dangling branch removes the link regardless of where it POINTED — so a
+    /// foreign dangling symlink (a user's own link to an external wrapper that
+    /// later vanished) is deleted by `uninstall`, even though uninstall REFUSES
+    /// to remove a *live* foreign symlink. The `debug_assert` only checks the
+    /// link's parent dir, never the target's provenance.
+    ///
+    /// This test documents the over-correction the task asked about: does the
+    /// fix delete something it shouldn't? It removes a dangling link that points
+    /// at a clearly non-git-prism external path.
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_uninstall_removes_dangling_link_pointing_outside_managed_dir() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        // A user's own foreign symlink at `git`, pointing at an EXTERNAL wrapper
+        // outside the managed dir, whose target has since been removed (dangling).
+        let external_target = dir.path().join("opt/some-tool/bin/git-wrapper");
+        let git_link = shim_dir.join("git");
+        std::os::unix::fs::symlink(&external_target, &git_link).unwrap();
+        assert!(
+            git_link.is_symlink(),
+            "precondition: dangling foreign git link"
+        );
+        assert!(!git_link.exists(), "precondition: external target is gone");
+
+        let _ = uninstall_path_shim(home);
+
+        // Symmetry expectation: uninstall refuses to remove a LIVE foreign
+        // symlink (it errors). A dangling foreign symlink that points outside
+        // the managed dir should be treated with the same caution rather than
+        // silently deleted. Currently it is deleted unconditionally.
+        assert!(
+            git_link.is_symlink(),
+            "uninstall removed a dangling symlink that points OUTSIDE the managed dir \
+             at a non-git-prism path ({}); the dangling branch removes by directory \
+             membership alone, ignoring the target's provenance — over-correcting the \
+             bug-3 fix",
+            external_target.display()
         );
     }
 }
