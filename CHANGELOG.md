@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`gh pr diff <N>` now works when the PR head commit is not present locally.** Previously the shim resolved the PR's base and head SHAs via `gh pr view` then attempted to build the diff from local objects, failing with `Could not find ref '<sha>'` for PRs whose head commit had never been fetched (e.g. squash-merged branches or first-time clones). The handler now checks local object presence via gix before building the manifest; when the head SHA is absent it fetches `refs/pull/<N>/head` from `origin` using the real git binary (the sanctioned shim-scoped exception to the gix-only rule — gix lacks network capability without optional features this project deliberately omits). The fetch is skipped entirely when the objects are already present, so existing workflows have no overhead. (#349)
+
 ## [0.9.2] — 2026-06-01
 
 ### Fixed

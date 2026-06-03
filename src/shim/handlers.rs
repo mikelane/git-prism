@@ -289,6 +289,49 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
     (subject, body)
 }
 
+/// Ensure `head_sha` is present locally, fetching `refs/pull/<pr_number>/head`
+/// from `origin` via the real git binary if needed.
+///
+/// NOTE: This is the sanctioned shim-scoped exception to the gix-only rule.
+/// The shim already hard-depends on and execs the real git binary for
+/// passthrough; requiring it for a fetch adds no new runtime dependency.
+/// A pure-gix fetch would require enabling `blocking-network-client` /
+/// `async-network-client` Cargo features that this project deliberately omits.
+///
+/// The `refs/pull/<N>/head` refspec covers both same-repo and fork PRs because
+/// GitHub populates it for every PR regardless of where the head branch lives.
+fn ensure_sha_present_for_pr(
+    repo_path: &std::path::Path,
+    pr_number: &str,
+    head_sha: &str,
+    real_git: &std::path::Path,
+) -> anyhow::Result<()> {
+    // Fast path: SHA already present.
+    let repo = gix::open(repo_path)
+        .map_err(|e| anyhow::anyhow!("failed to open repo at {}: {e}", repo_path.display()))?;
+    if repo.rev_parse_single(head_sha).is_ok() {
+        return Ok(());
+    }
+
+    // Fetch via PR refspec — covers same-repo and fork PRs.
+    let pr_refspec = format!("refs/pull/{pr_number}/head");
+    let status = std::process::Command::new(real_git)
+        .args(["fetch", "origin", &pr_refspec])
+        .current_dir(repo_path)
+        .env("GIT_PRISM_INSIDE_SHIM", "1")
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to spawn git fetch: {e}"))?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "git fetch origin {pr_refspec} failed with status {status} — \
+         check network connectivity and that 'origin' remote is configured"
+    )
+}
+
 /// Handle `gh pr diff <N>` by resolving the PR's base..head ref range via the
 /// `gh` CLI, then feeding it through the existing manifest pipeline.
 ///
@@ -306,6 +349,38 @@ fn handle_gh_pr_diff<W: Write>(
     let range = resolve_pr_range(pr_number)?;
     // Discover the real git root so gix::open() doesn't fail on subdirectories.
     let git_root = discover_git_root(repo_path)?;
+
+    // Extract the head SHA from "base_sha..head_sha" so we can check local
+    // object presence before calling handle_manifest.
+    let head_sha = range
+        .split("..")
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("unexpected range format from resolve_pr_range: {range}"))?;
+
+    // Locate the real git binary for the potential fetch.
+    // find_real_git() uses current_exe() + $PATH so it works outside passthrough.
+    if let Some(real_git) = crate::shim::real_git::find_real_git() {
+        ensure_sha_present_for_pr(&git_root, pr_number, head_sha, &real_git)?;
+    } else {
+        // No real git found — attempt the manifest anyway; if the object is
+        // missing the manifest pipeline will surface a clear "Could not find
+        // ref" error that tells the user what to do.
+        //
+        // Use eprintln! (not tracing::warn!) because the shim entrypoint never
+        // installs a tracing subscriber (src/main.rs returns into run_shim
+        // before telemetry::init(), and that only attaches an OTel layer gated
+        // on an OTLP endpoint — there is no stderr layer). A tracing event here
+        // would vanish, leaving the operator to chase the downstream "Could not
+        // find ref" error with no hint that a missing git binary was the real
+        // cause. stderr is the only channel that works on the shim path.
+        eprintln!(
+            "git-prism shim: could not locate real git binary; \
+             skipping pre-fetch for PR #{pr_number} — if the diff fails with \
+             a missing-ref error, fetch the PR head manually \
+             (git fetch origin refs/pull/{pr_number}/head)"
+        );
+    }
+
     handle_manifest(&range, &git_root, out)
 }
 
@@ -636,6 +711,250 @@ mod tests {
             files_changed, files_count,
             "diffstat.files_changed must equal files array length"
         );
+    }
+
+    // ---- PR-object fetch fixtures + tests ----
+
+    /// Build a bare remote + clone fixture where the clone is missing one commit.
+    ///
+    /// Returns (remote_dir, clone_dir, missing_sha):
+    ///   - remote has two commits
+    ///   - clone has only the first commit (head SHA is absent locally)
+    fn make_clone_missing_head() -> (TempDir, TempDir, String) {
+        let remote_dir = TempDir::new().unwrap();
+        let remote_path = remote_dir.path().to_path_buf();
+
+        // Create a bare remote with two commits.
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "--bare", "-b", "main"], &remote_path);
+
+        // Work repo to push two commits into the bare remote.
+        let work_dir = TempDir::new().unwrap();
+        let work_path = work_dir.path().to_path_buf();
+        git(&["init", "-b", "main"], &work_path);
+        git(&["config", "user.email", "t@t.com"], &work_path);
+        git(&["config", "user.name", "T"], &work_path);
+        git(
+            &["remote", "add", "origin", &remote_path.to_string_lossy()],
+            &work_path,
+        );
+        std::fs::write(work_path.join("a.txt"), "hello\n").unwrap();
+        git(&["add", "a.txt"], &work_path);
+        git(&["commit", "-m", "first"], &work_path);
+        git(&["push", "origin", "main"], &work_path);
+
+        std::fs::write(work_path.join("b.txt"), "world\n").unwrap();
+        git(&["add", "b.txt"], &work_path);
+        git(&["commit", "-m", "second"], &work_path);
+
+        // Capture the head SHA (second commit) before pushing.
+        let head_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        let head_sha = String::from_utf8(head_out.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Push the second commit to the remote.
+        git(&["push", "origin", "main"], &work_path);
+
+        // Get the SHA of the first commit so we can clone shallowly at that ref.
+        let first_sha_out = Command::new("git")
+            .args(["rev-parse", "HEAD~1"])
+            .current_dir(&work_path)
+            .output()
+            .unwrap();
+        let first_sha = String::from_utf8(first_sha_out.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Clone shallowly at the first commit only — the second commit's objects
+        // are never downloaded, so head_sha is genuinely absent from the clone.
+        let clone_dir = TempDir::new().unwrap();
+        let clone_path = clone_dir.path().to_path_buf();
+        Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "--branch",
+                "main",
+                &remote_path.to_string_lossy(),
+                &clone_path.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+
+        // Reset the shallow clone to the first commit. The shallow clone already
+        // has HEAD at the tip (second commit) — reset back to first_sha so the
+        // second commit object was never needed.
+        // Actually with --depth=1 we only get the latest commit (second commit).
+        // We need a clone that stopped BEFORE the second commit. The reliable
+        // approach: clone fully but then expire reflog + gc to remove the object.
+        // First expire the reflog to make the second commit unreachable:
+        Command::new("git")
+            .args(["update-ref", "-d", "refs/remotes/origin/main"])
+            .current_dir(&clone_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["update-ref", "-d", "refs/heads/main"])
+            .current_dir(&clone_path)
+            .output()
+            .unwrap();
+        // Point HEAD at first commit instead.
+        Command::new("git")
+            .args(["update-ref", "refs/heads/main", &first_sha])
+            .current_dir(&clone_path)
+            .output()
+            .unwrap();
+        // Expire all reflogs so gc can prune the second commit.
+        Command::new("git")
+            .args(["reflog", "expire", "--expire=now", "--all"])
+            .current_dir(&clone_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["gc", "--prune=now", "--aggressive"])
+            .current_dir(&clone_path)
+            .output()
+            .unwrap();
+
+        (remote_dir, clone_dir, head_sha)
+    }
+
+    // ===== ADVERSARIAL QA PROBES (issue #349 pen-test) =====
+
+    /// ensure_sha_present_for_pr: SHA already present → genuine no-op, no fetch.
+    /// (A repo with NO remote configured: if the function tried to fetch it
+    /// would error; success proves the fast path returned before any fetch.)
+    #[test]
+    fn qa_ensure_sha_present_for_pr_is_noop_when_sha_present_no_remote() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let sha = head_sha(&path);
+        let real_git = crate::shim::real_git::find_real_git()
+            .expect("real git binary must be locatable for this test");
+        // No `origin` remote exists. If this attempted a fetch it would fail;
+        // it must short-circuit on the present-SHA fast path instead.
+        ensure_sha_present_for_pr(&path, "349", &sha, &real_git)
+            .expect("must be a no-op when the SHA is already present, even with no remote");
+    }
+
+    /// ensure_sha_present_for_pr: origin exists (local bare remote) but the
+    /// requested PR ref `refs/pull/<N>/head` does NOT exist (closed/deleted PR,
+    /// or wrong number). The fetch must fail with a clear, actionable error —
+    /// not hang and not silently succeed.
+    #[test]
+    fn qa_ensure_sha_present_for_pr_errors_when_pr_ref_absent() {
+        // Build a clone that is missing a SHA, with a working `origin` remote,
+        // but ask for a PR refspec that the remote does not publish.
+        let (remote_dir, clone_dir, missing_sha) = make_clone_missing_head();
+        let clone_path = clone_dir.path();
+
+        let real_git = crate::shim::real_git::find_real_git()
+            .expect("real git binary must be locatable for this test");
+
+        // PR 999999 has no refs/pull/999999/head on this bare remote.
+        let result = ensure_sha_present_for_pr(clone_path, "999999", &missing_sha, &real_git);
+
+        assert!(
+            result.is_err(),
+            "fetch of a non-existent PR ref must return an error, not succeed"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("refs/pull/999999/head") && msg.contains("failed"),
+            "error must name the failing refspec and indicate failure, got: {msg}"
+        );
+
+        drop(remote_dir);
+        drop(clone_dir);
+    }
+
+    /// ensure_sha_present_for_pr: no `origin` remote at all → clear error,
+    /// non-zero (Err), no hang.
+    #[test]
+    fn qa_ensure_sha_present_for_pr_errors_when_no_origin_remote() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let fake_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let real_git = crate::shim::real_git::find_real_git()
+            .expect("real git binary must be locatable for this test");
+
+        let result = ensure_sha_present_for_pr(&path, "1", fake_sha, &real_git);
+        assert!(
+            result.is_err(),
+            "fetch with no origin remote must return an error"
+        );
+        let msg = result.unwrap_err().to_string();
+        // The error must name the exact refspec it tried to fetch AND mention
+        // the failed fetch against origin — a generic "something went wrong" is
+        // not actionable. The bail! template always embeds both, so assert both
+        // concretely rather than an either/or that a degraded message could
+        // still satisfy.
+        assert!(
+            msg.contains("refs/pull/1/head"),
+            "error must name the failing PR refspec, got: {msg}"
+        );
+        assert!(
+            msg.contains("failed") && msg.contains("origin"),
+            "error must mention the failed fetch against origin, got: {msg}"
+        );
+    }
+
+    /// ensure_sha_present_for_pr SUCCESS via PR refspec: a local bare remote
+    /// that publishes `refs/pull/<N>/head` pointing at the missing commit.
+    /// Proves the production fetch path actually retrieves the object and that
+    /// the test stays hermetic (local bare remote, never github.com).
+    #[test]
+    fn qa_ensure_sha_present_for_pr_fetches_via_pr_refspec() {
+        let (remote_dir, clone_dir, missing_sha) = make_clone_missing_head();
+        let remote_path = remote_dir.path();
+        let clone_path = clone_dir.path();
+
+        // Publish refs/pull/42/head -> missing_sha on the bare remote.
+        // The remote already has the object (it was pushed there); we only need
+        // to create the ref that GitHub would normally create for a PR.
+        Command::new("git")
+            .args(["update-ref", "refs/pull/42/head", &missing_sha])
+            .current_dir(remote_path)
+            .output()
+            .unwrap();
+
+        // Confirm absent locally first.
+        let check = Command::new("git")
+            .args(["cat-file", "-e", &missing_sha])
+            .current_dir(clone_path)
+            .status()
+            .unwrap();
+        assert!(!check.success(), "SHA must be absent before the fetch");
+
+        let real_git = crate::shim::real_git::find_real_git()
+            .expect("real git binary must be locatable for this test");
+
+        ensure_sha_present_for_pr(clone_path, "42", &missing_sha, &real_git)
+            .expect("fetch via refs/pull/42/head must retrieve the missing object");
+
+        let check_after = Command::new("git")
+            .args(["cat-file", "-e", &missing_sha])
+            .current_dir(clone_path)
+            .status()
+            .unwrap();
+        assert!(
+            check_after.success(),
+            "SHA must be present after fetching the PR refspec"
+        );
+
+        drop(remote_dir);
+        drop(clone_dir);
     }
 
     #[test]
