@@ -49,8 +49,11 @@ pub fn run_install_with_io(
     stdout: &mut dyn Write,
     rc_path: &std::path::Path,
 ) -> Result<()> {
-    let symlink_path = hooks::install_path_shim(home, force)?;
-    writeln!(stdout, "Created symlink: {}", symlink_path.display())?;
+    hooks::install_path_shim(home, force)?;
+    let shim_bin = home.join(hooks::PATH_SHIM_REL_DIR);
+    for name in hooks::PATH_SHIM_LINK_NAMES {
+        writeln!(stdout, "Created symlink: {}", shim_bin.join(name).display())?;
+    }
 
     let shim_dir = home.join(SHIM_EXPORT_FRAGMENT);
     let shim_dir_str = shim_dir.to_string_lossy().into_owned();
@@ -147,13 +150,23 @@ fn print_manual_instructions(stdout: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-/// Determine the shell rc file based on `$SHELL`, defaulting to `.zshrc`.
+/// Determine the login-shell rc file based on `$SHELL`, defaulting to `.zprofile`.
+///
+/// Non-interactive login shells (like Claude Code's) source `.zprofile` / `.bash_profile`
+/// but skip `.zshrc` / `.bashrc`. macOS `path_helper` also demotes PATH entries inherited
+/// from the environment behind `/usr/bin`, so writing to `.zshrc` has no effect in that
+/// context. Use login-shell rc files to ensure the export takes effect.
 fn detect_rc_file(home: &std::path::Path) -> std::path::PathBuf {
     let shell = std::env::var("SHELL").unwrap_or_default();
+    detect_rc_file_for(home, &shell)
+}
+
+/// Testable rc-file detection with an injected shell string.
+pub(crate) fn detect_rc_file_for(home: &std::path::Path, shell: &str) -> std::path::PathBuf {
     let rc_name = if shell.contains("bash") {
-        ".bashrc"
+        ".bash_profile"
     } else {
-        ".zshrc"
+        ".zprofile"
     };
     home.join(rc_name)
 }
@@ -168,34 +181,43 @@ pub fn run_uninstall(home: &std::path::Path) -> Result<()> {
 /// Report whether the PATH shim is installed, not installed, or broken.
 ///
 /// Output always includes the shim directory path so the user knows where
-/// to add to `$PATH` regardless of install state.
+/// to add to `$PATH` regardless of install state. Each managed symlink name
+/// (`git`, `gh`) is reported on a separate line.
 pub fn run_status(home: &std::path::Path) -> Result<()> {
+    run_status_with_io(home, &mut std::io::stdout())
+}
+
+/// Testable status implementation with injected output writer.
+pub fn run_status_with_io(home: &std::path::Path, out: &mut dyn std::io::Write) -> Result<()> {
     let shim_dir = home.join(hooks::PATH_SHIM_REL_DIR);
     let shim_dir_str = shim_dir.to_string_lossy();
-    match hooks::path_shim_status(home) {
-        hooks::PathShimStatus::Installed {
-            target,
-            staleness_warning,
-        } => {
-            println!(
-                "shim: installed at {} -> {}",
-                shim_dir.join(hooks::PATH_SHIM_LINK_NAME).display(),
-                target.display()
-            );
-            println!("shim directory: {shim_dir_str}");
-            if let Some(warning) = staleness_warning {
-                println!("warning: {warning}");
+
+    for name in hooks::PATH_SHIM_LINK_NAMES {
+        match hooks::path_shim_status_for(home, name) {
+            hooks::PathShimStatus::Installed {
+                target,
+                staleness_warning,
+            } => {
+                writeln!(
+                    out,
+                    "shim {name}: installed at {} -> {}",
+                    shim_dir.join(name).display(),
+                    target.display()
+                )?;
+                if let Some(warning) = staleness_warning {
+                    writeln!(out, "warning ({name}): {warning}")?;
+                }
+            }
+            hooks::PathShimStatus::NotInstalled => {
+                writeln!(out, "shim {name}: not installed")?;
+            }
+            hooks::PathShimStatus::BrokenLink { reason } => {
+                writeln!(out, "shim {name}: broken link ({reason})")?;
             }
         }
-        hooks::PathShimStatus::NotInstalled => {
-            println!("shim: not installed");
-            println!("shim directory: {shim_dir_str}");
-        }
-        hooks::PathShimStatus::BrokenLink { reason } => {
-            println!("shim: broken link ({reason})");
-            println!("shim directory: {shim_dir_str}");
-        }
     }
+
+    writeln!(out, "shim directory: {shim_dir_str}")?;
     Ok(())
 }
 
@@ -337,5 +359,56 @@ mod tests {
         let dir = TempDir::new().unwrap();
         install_with_decline(dir.path());
         run_status(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn detect_rc_file_returns_zprofile_for_zsh() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Simulate SHELL=zsh by calling detect_rc_file directly.
+        // We need to test the logic without relying on the CI runner's $SHELL.
+        // detect_rc_file_for lets us inject the shell string.
+        let rc = detect_rc_file_for(home, "zsh");
+        assert!(
+            rc.ends_with(".zprofile"),
+            "zsh rc must be .zprofile (login-shell sourced), got: {}",
+            rc.display()
+        );
+    }
+
+    #[test]
+    fn detect_rc_file_returns_bash_profile_for_bash() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let rc = detect_rc_file_for(home, "bash");
+        assert!(
+            rc.ends_with(".bash_profile"),
+            "bash rc must be .bash_profile (login-shell sourced), got: {}",
+            rc.display()
+        );
+    }
+
+    #[test]
+    fn detect_rc_file_defaults_to_zprofile_when_shell_unknown() {
+        let dir = TempDir::new().unwrap();
+        let rc = detect_rc_file_for(dir.path(), "");
+        assert!(
+            rc.ends_with(".zprofile"),
+            "unknown shell must default to .zprofile, got: {}",
+            rc.display()
+        );
+    }
+
+    #[test]
+    fn run_status_output_mentions_gh_symlink() {
+        let dir = TempDir::new().unwrap();
+        install_with_decline(dir.path());
+        let mut out = Vec::new();
+        run_status_with_io(dir.path(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("gh"),
+            "status output must mention the gh symlink; got: {text:?}"
+        );
     }
 }

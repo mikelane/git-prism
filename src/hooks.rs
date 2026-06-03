@@ -167,8 +167,11 @@ pub fn uninstall_redirect_hook(scope: Scope, home: &Path, cwd: &Path) -> Result<
 /// Relative to `$HOME`.
 pub const PATH_SHIM_REL_DIR: &str = ".local/share/git-prism/bin";
 
-/// Name of the git shim symlink inside `PATH_SHIM_REL_DIR`.
-pub const PATH_SHIM_LINK_NAME: &str = "git";
+/// Names of the shim symlinks managed inside `PATH_SHIM_REL_DIR`.
+///
+/// Both `git` and `gh` are intercepted by the running `git-prism` binary.
+/// Install/status/uninstall iterate over every name in this slice.
+pub const PATH_SHIM_LINK_NAMES: &[&str] = &["git", "gh"];
 
 /// Status of the path-shim symlink reported by `hooks status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,9 +191,9 @@ pub enum PathShimStatus {
     BrokenLink { reason: String },
 }
 
-/// Return the expected path to the shim symlink: `$HOME/.local/share/git-prism/bin/git`.
-fn path_shim_link(home: &Path) -> PathBuf {
-    home.join(PATH_SHIM_REL_DIR).join(PATH_SHIM_LINK_NAME)
+/// Return the expected path to a shim symlink: `$HOME/.local/share/git-prism/bin/<name>`.
+fn path_shim_link(home: &Path, name: &str) -> PathBuf {
+    home.join(PATH_SHIM_REL_DIR).join(name)
 }
 
 /// Given the canonicalized current-exe path, return a stable shim target.
@@ -253,13 +256,15 @@ pub(crate) fn stable_shim_target(canonical_exe: &Path) -> PathBuf {
     }
 }
 
-/// Create `~/.local/share/git-prism/bin/git` as a symlink pointing at the
-/// running `git-prism` binary.
+/// Create shim symlinks under `~/.local/share/git-prism/bin/` for every name
+/// in [`PATH_SHIM_LINK_NAMES`] (`git` and `gh`), each pointing at the running
+/// `git-prism` binary.
 ///
-/// Idempotent: if the symlink already exists and points at the current binary,
-/// this is a no-op. Returns the symlink path so callers can report it.
+/// Idempotent: symlinks that already point at the current binary are left
+/// unchanged. Returns the path of the first symlink (`git`) so callers can
+/// report it.
 ///
-/// If a regular file (not a symlink) already exists at the target path, this
+/// If a regular file (not a symlink) already exists at any target path, this
 /// function returns an error rather than overwriting it — unless `force` is
 /// `true`, in which case the file is removed and the symlink is created.
 pub fn install_path_shim(home: &Path, force: bool) -> Result<PathBuf> {
@@ -286,98 +291,114 @@ pub fn install_path_shim(home: &Path, force: bool) -> Result<PathBuf> {
     // up-to-date. For cargo-install / source builds the path is unchanged.
     let target = stable_shim_target(&canonical_exe);
 
-    let link = path_shim_link(home);
+    let mut first_link: Option<PathBuf> = None;
 
-    if link.exists() || link.is_symlink() {
-        let meta = link
-            .symlink_metadata()
-            .with_context(|| format!("failed to stat {}", link.display()))?;
+    for name in PATH_SHIM_LINK_NAMES {
+        let link = path_shim_link(home, name);
 
-        if !meta.file_type().is_symlink() {
-            if !force {
-                anyhow::bail!(
-                    "{} is a regular file, not a symlink; remove it manually or re-run with --force",
-                    link.display()
-                );
-            }
-            std::fs::remove_file(&link)
-                .with_context(|| format!("failed to remove existing file {}", link.display()))?;
-        } else {
-            match std::fs::read_link(&link) {
-                Ok(existing_target) => {
-                    if existing_target == target {
-                        return Ok(link);
+        if link.exists() || link.is_symlink() {
+            let meta = link
+                .symlink_metadata()
+                .with_context(|| format!("failed to stat {}", link.display()))?;
+
+            if !meta.file_type().is_symlink() {
+                if !force {
+                    anyhow::bail!(
+                        "{} is a regular file, not a symlink; remove it manually or re-run with --force",
+                        link.display()
+                    );
+                }
+                std::fs::remove_file(&link).with_context(|| {
+                    format!("failed to remove existing file {}", link.display())
+                })?;
+            } else {
+                match std::fs::read_link(&link) {
+                    Ok(existing_target) => {
+                        if existing_target == target {
+                            // Already correct — skip creation for this name.
+                            if first_link.is_none() {
+                                first_link = Some(link);
+                            }
+                            continue;
+                        }
+                        std::fs::remove_file(&link).with_context(|| {
+                            format!("failed to remove stale symlink {}", link.display())
+                        })?;
                     }
-                    std::fs::remove_file(&link).with_context(|| {
-                        format!("failed to remove stale symlink {}", link.display())
-                    })?;
-                }
-                Err(e) => {
-                    std::fs::remove_file(&link).with_context(|| {
-                        format!("failed to remove broken symlink {}: {e}", link.display())
-                    })?;
+                    Err(e) => {
+                        std::fs::remove_file(&link).with_context(|| {
+                            format!("failed to remove broken symlink {}: {e}", link.display())
+                        })?;
+                    }
                 }
             }
+        }
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link)
+            .with_context(|| format!("failed to create symlink {}", link.display()))?;
+
+        #[cfg(not(unix))]
+        anyhow::bail!("path-shim install is not supported on non-Unix platforms");
+
+        if first_link.is_none() {
+            first_link = Some(link);
         }
     }
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&target, &link)
-        .with_context(|| format!("failed to create symlink {}", link.display()))?;
-
-    #[cfg(not(unix))]
-    anyhow::bail!("path-shim install is not supported on non-Unix platforms");
-
-    Ok(link)
+    Ok(first_link.unwrap_or_else(|| path_shim_link(home, PATH_SHIM_LINK_NAMES[0])))
 }
 
-/// Remove `~/.local/share/git-prism/bin/git` if it exists, then remove the
-/// parent directory if it is empty.
+/// Remove all shim symlinks under `~/.local/share/git-prism/bin/` (one per
+/// entry in [`PATH_SHIM_LINK_NAMES`]), then remove the parent directory if it
+/// is empty.
 ///
-/// Only removes the path when it is a symlink pointing at the running
+/// Only removes a path when it is a symlink pointing at the running
 /// `git-prism` binary. If the path is a regular file (not owned by us) this
 /// function returns an error rather than silently deleting it.
 pub fn uninstall_path_shim(home: &Path) -> Result<()> {
-    let link = path_shim_link(home);
+    let current_exe = std::env::current_exe()
+        .context("failed to resolve current executable path")?
+        .canonicalize()
+        .context("failed to canonicalize current executable path")?;
 
-    if link.exists() || link.is_symlink() {
-        let meta = link
-            .symlink_metadata()
-            .with_context(|| format!("failed to stat {}", link.display()))?;
+    for name in PATH_SHIM_LINK_NAMES {
+        let link = path_shim_link(home, name);
 
-        if !meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "{} is a regular file, not a symlink managed by git-prism; \
-                 remove it manually if you want to clean up this path",
-                link.display()
-            );
-        }
+        if link.exists() || link.is_symlink() {
+            let meta = link
+                .symlink_metadata()
+                .with_context(|| format!("failed to stat {}", link.display()))?;
 
-        let current_exe = std::env::current_exe()
-            .context("failed to resolve current executable path")?
-            .canonicalize()
-            .context("failed to canonicalize current executable path")?;
+            if !meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "{} is a regular file, not a symlink managed by git-prism; \
+                     remove it manually if you want to clean up this path",
+                    link.display()
+                );
+            }
 
-        match std::fs::read_link(&link) {
-            Ok(target) => {
-                let canonical_target = target.canonicalize().unwrap_or(target);
-                if canonical_target != current_exe {
-                    anyhow::bail!(
-                        "{} is a symlink pointing at {} which is not the running git-prism binary ({}); \
-                         remove it manually if you want to clean up this path",
-                        link.display(),
-                        canonical_target.display(),
-                        current_exe.display()
-                    );
+            match std::fs::read_link(&link) {
+                Ok(target) => {
+                    let canonical_target = target.canonicalize().unwrap_or(target);
+                    if canonical_target != current_exe {
+                        anyhow::bail!(
+                            "{} is a symlink pointing at {} which is not the running git-prism binary ({}); \
+                             remove it manually if you want to clean up this path",
+                            link.display(),
+                            canonical_target.display(),
+                            current_exe.display()
+                        );
+                    }
+                }
+                Err(_) => {
+                    // Broken symlink — safe to remove (target doesn't exist anyway).
                 }
             }
-            Err(_) => {
-                // Broken symlink — safe to remove (target doesn't exist anyway).
-            }
-        }
 
-        std::fs::remove_file(&link)
-            .with_context(|| format!("failed to remove symlink {}", link.display()))?;
+            std::fs::remove_file(&link)
+                .with_context(|| format!("failed to remove symlink {}", link.display()))?;
+        }
     }
 
     let shim_dir = home.join(PATH_SHIM_REL_DIR);
@@ -407,9 +428,17 @@ pub(crate) const CELLAR_STALENESS_ADVISORY: &str = "shim points at a version-pin
      run `git-prism shim install` to update to a stable path \
      that survives `brew upgrade`";
 
-/// Query the current state of the path-shim symlink without modifying anything.
+/// Query the current state of the `git` shim symlink without modifying anything.
+///
+/// This is a convenience wrapper around [`path_shim_status_for`] for the `git`
+/// symlink, used by tests and the legacy CLI path.
 pub fn path_shim_status(home: &Path) -> PathShimStatus {
-    let link = path_shim_link(home);
+    path_shim_status_for(home, PATH_SHIM_LINK_NAMES[0])
+}
+
+/// Query the current state of the named shim symlink without modifying anything.
+pub fn path_shim_status_for(home: &Path, name: &str) -> PathShimStatus {
+    let link = path_shim_link(home, name);
     if !link.exists() && !link.is_symlink() {
         return PathShimStatus::NotInstalled;
     }
@@ -734,7 +763,7 @@ mod tests {
         // Install the shim pointing directly at the Cellar path.
         let shim_dir = home.join(PATH_SHIM_REL_DIR);
         std::fs::create_dir_all(&shim_dir).unwrap();
-        let link = shim_dir.join(PATH_SHIM_LINK_NAME);
+        let link = shim_dir.join(PATH_SHIM_LINK_NAMES[0]);
         std::os::unix::fs::symlink(&cellar_exe, &link).unwrap();
 
         let status = path_shim_status(home);
@@ -766,7 +795,7 @@ mod tests {
 
         let shim_dir = home.join(PATH_SHIM_REL_DIR);
         std::fs::create_dir_all(&shim_dir).unwrap();
-        let link = shim_dir.join(PATH_SHIM_LINK_NAME);
+        let link = shim_dir.join(PATH_SHIM_LINK_NAMES[0]);
         std::os::unix::fs::symlink(&stable_exe, &link).unwrap();
 
         let status = path_shim_status(home);
@@ -948,6 +977,83 @@ mod tests {
         assert_eq!(
             result, short,
             "path with n<6 components must be returned unchanged; got {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // gh symlink — install/status/uninstall manage both git and gh
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn install_path_shim_creates_gh_symlink() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        install_path_shim(home, false).unwrap();
+
+        let link = home.join(".local/share/git-prism/bin/gh");
+        assert!(
+            link.is_symlink(),
+            "expected a gh symlink at {}",
+            link.display()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_path_shim_creates_both_symlinks_pointing_at_same_target() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        install_path_shim(home, false).unwrap();
+
+        let git_link = home.join(".local/share/git-prism/bin/git");
+        let gh_link = home.join(".local/share/git-prism/bin/gh");
+        assert!(git_link.is_symlink(), "git symlink must exist");
+        assert!(gh_link.is_symlink(), "gh symlink must exist");
+        assert_eq!(
+            std::fs::read_link(&git_link).unwrap(),
+            std::fs::read_link(&gh_link).unwrap(),
+            "git and gh symlinks must point at the same target"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn uninstall_path_shim_removes_both_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        install_path_shim(home, false).unwrap();
+        uninstall_path_shim(home).unwrap();
+
+        let git_link = home.join(".local/share/git-prism/bin/git");
+        let gh_link = home.join(".local/share/git-prism/bin/gh");
+        assert!(
+            !git_link.exists() && !git_link.is_symlink(),
+            "git symlink must be removed"
+        );
+        assert!(
+            !gh_link.exists() && !gh_link.is_symlink(),
+            "gh symlink must be removed"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn install_path_shim_is_idempotent_for_gh_symlink() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        install_path_shim(home, false).unwrap();
+        let target_before = std::fs::read_link(home.join(".local/share/git-prism/bin/gh")).unwrap();
+        install_path_shim(home, false).unwrap();
+        let target_after = std::fs::read_link(home.join(".local/share/git-prism/bin/gh")).unwrap();
+
+        assert_eq!(
+            target_before, target_after,
+            "idempotent re-install must not change the gh symlink target"
         );
     }
 
