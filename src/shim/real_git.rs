@@ -347,6 +347,38 @@ pub(crate) fn resolve_real_binary(
     None
 }
 
+/// Locate the real `git` binary using the live process environment.
+///
+/// Uses `std::env::current_exe()` as the shim identity (so the PATH-walking
+/// skip logic correctly excludes the shim even when called outside of a
+/// `passthrough` context) and reads `$PATH` from the process environment.
+///
+/// Returns `None` only when no `git` binary can be found anywhere on PATH or
+/// in the standard fallback locations.
+///
+/// Intended for use by shim handler code that needs to shell out to the real
+/// git binary (e.g. `ensure_sha_present`) without access to an `argv0` or
+/// `EnvSource`.
+#[cfg(unix)]
+pub(crate) fn find_real_git() -> Option<PathBuf> {
+    use crate::agent_detection::StdEnvSource;
+    let argv0 = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_default();
+    resolve_real_git(&argv0, &StdEnvSource)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn find_real_git() -> Option<PathBuf> {
+    use crate::agent_detection::StdEnvSource;
+    let argv0 = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_default();
+    resolve_real_git(&argv0, &StdEnvSource)
+}
+
 /// Return the canonicalized path of the shim binary.
 ///
 /// Tries `argv0` first (works when the shim is invoked with a full path).
