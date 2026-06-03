@@ -12,11 +12,22 @@ pub(crate) mod shadow;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use crate::agent_detection::EnvSource;
 use crate::metrics::{ShimOutcome, ShimSubcommand};
 use crate::shim::classify::{Classification, classify};
 use crate::shim::real_git::RealGitExec;
+use crate::telemetry::TelemetryGuard;
+
+/// Flush deadline used on passthrough paths (before execvp).
+///
+/// A DOWN OTLP collector makes `force_flush()` block up to `EXPORT_TIMEOUT`
+/// (5 s).  That would stall the shell on every intercepted git command even
+/// when the collector is unreachable.  This cap bounds the wait; the flush
+/// thread is abandoned if it hasn't completed in time and will be torn down
+/// when the process image is replaced by execvp.
+const PASSTHROUGH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Main entry point for shim mode.
 ///
@@ -33,18 +44,34 @@ use crate::shim::real_git::RealGitExec;
 /// structured-dispatch path (step 4) — never on passthrough or loop-break
 /// paths.  This invariant ensures dashboards that aggregate
 /// `shim_invocations_total` get an accurate per-call count.
-pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exec: &G) -> ExitCode {
+///
+/// # Telemetry flush on passthrough
+///
+/// On passthrough paths `exec.passthrough()` calls `execvp`, which replaces
+/// the process image and never returns.  `Drop` glue and the flush in
+/// `main.rs` are unreachable on those paths.  `telemetry_guard.force_flush()`
+/// is called on every passthrough branch **before** `exec.passthrough()` so
+/// the buffered metric reaches the OTLP endpoint.  A second flush / `Drop`
+/// is a documented no-op (`TelemetryGuard::force_flush` is idempotent).
+pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
+    argv: &[&str],
+    env: &E,
+    exec: &G,
+    telemetry_guard: &mut TelemetryGuard,
+) -> ExitCode {
     let metrics = crate::metrics::get();
 
     // 1. Loop-break sentinel: a nested git call from within the shim.
     if env.get("GIT_PRISM_INSIDE_SHIM").is_some() {
         metrics.record_shim_invocation(ShimOutcome::LoopBreak);
+        telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
         return exec.passthrough(argv);
     }
 
     // 2. Only intercept when an AI agent is the caller.
     if crate::agent_detection::detect_calling_agent(env).is_none() {
         metrics.record_shim_invocation(ShimOutcome::NoAgent);
+        telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
         return exec.passthrough(argv);
     }
 
@@ -53,6 +80,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exe
     let subcommand = classification_to_subcommand(&classification);
     if classification == Classification::Passthrough {
         metrics.record_shim_invocation(ShimOutcome::Passthrough);
+        telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
         return exec.passthrough(argv);
     }
 
@@ -61,6 +89,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(argv: &[&str], env: &E, exe
         Some(p) => p,
         None => {
             metrics.record_shim_invocation(ShimOutcome::Passthrough);
+            telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
             return exec.passthrough(argv);
         }
     };
@@ -171,8 +200,9 @@ mod tests {
             ("CLAUDECODE", "1"),
         ]));
         let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec);
+        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
 
         assert!(
             exec.called.get(),
@@ -185,8 +215,9 @@ mod tests {
         // No CLAUDECODE, no AI_AGENT — detect_calling_agent returns None.
         let env = MapEnv(HashMap::new());
         let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec);
+        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
 
         assert!(
             exec.called.get(),
@@ -198,8 +229,9 @@ mod tests {
     fn it_passes_through_when_subcommand_is_not_on_watch_list() {
         let env = MapEnv(HashMap::from([("CLAUDECODE", "1")]));
         let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "status"], &env, &exec);
+        run_shim(&["git", "status"], &env, &exec, &mut guard);
 
         assert!(
             exec.called.get(),
@@ -215,8 +247,9 @@ mod tests {
             ("CLAUDECODE", "1"),
         ]));
         let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec);
+        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
 
         assert!(
             exec.called.get(),
@@ -258,9 +291,10 @@ mod tests {
             ("GIT_PRISM_REPO", repo_str),
         ]));
         let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
 
         // git diff main..HEAD is a classified command that routes to handle_manifest.
-        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec);
+        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
 
         // SpyExec must NOT have been called — the handler ran instead.
         assert!(
@@ -306,10 +340,11 @@ mod tests {
             ("GIT_PRISM_CWD_UNAVAILABLE", "1"),
         ]));
         let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
 
         // argv is a classified command so it would normally dispatch — but
         // the cwd failure must cause passthrough instead.
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec);
+        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
 
         assert!(
             exec.called.get(),

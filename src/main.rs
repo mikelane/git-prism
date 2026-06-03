@@ -275,9 +275,31 @@ async fn main() -> std::process::ExitCode {
             env: &agent_detection::StdEnvSource,
             argv0: args.first().copied().unwrap_or("git"),
         };
+        // Initialize telemetry when an OTLP endpoint is configured. The guard
+        // must live until after run_shim returns — on the exec-replace
+        // (passthrough) path the process is replaced and Rust's drop glue
+        // never runs anyway, so no flush is needed there. On the
+        // structured-output path run_shim returns an ExitCode, and we
+        // force_flush before returning so metrics reach the exporter even
+        // though the PeriodicReader hasn't ticked yet.
+        //
+        // Use `init_quiet`: the shim runs once per intercepted git/gh command,
+        // so the per-invocation "telemetry initialized" banner would flood the
+        // developer's shell with one stderr line per git call. Failure paths
+        // still log, so a misconfigured endpoint stays visible.
+        let mut telemetry_guard = telemetry::init_quiet();
         // run_shim either exec-replaces the process (passthrough, never returns)
         // or returns ExitCode after printing structured JSON or an error.
-        return shim::run_shim(&args, &agent_detection::StdEnvSource, &exec);
+        // On passthrough paths force_flush is called inside run_shim before execvp.
+        // On the structured-output path the guard is flushed here after run_shim returns.
+        let exit_code = shim::run_shim(
+            &args,
+            &agent_detection::StdEnvSource,
+            &exec,
+            &mut telemetry_guard,
+        );
+        telemetry_guard.force_flush();
+        return exit_code;
     }
 
     if let Err(e) = run().await {
