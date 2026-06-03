@@ -5,10 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.3] — 2026-06-03
 
 ### Fixed
 
+- **`git-prism shim install` now creates and manages a `gh` symlink alongside `git`, and the PATH-setup line targets a login-shell rc file.** The `gh` interception added in v0.9.0 never took effect because `install` only ever created the `git` symlink, so `gh pr diff` reached the real `gh`. Install, status, and uninstall now manage both `git` and `gh` as a unit, with validate-then-apply atomicity (a refusal on one name no longer leaves the other half-installed) and provenance-aware handling of foreign and dangling symlinks (a user's own symlink — live or dangling — is no longer clobbered or removed without `--force`). The PATH-setup consent flow now appends the `export PATH` line to a file sourced by non-interactive **login** shells (`.zprofile` / `.zshenv`) rather than `.zshrc`, which those shells (including agent shells) skip. (#347)
+- **The PATH shim now emits OpenTelemetry telemetry from intercepted `git` / `gh` commands.** Shim mode previously returned without ever calling `telemetry::init()`, so the `record_shim_*` counters wrote nothing and `GIT_PRISM_OTLP_ENDPOINT` was never read — only the long-lived `serve` process emitted telemetry. The shim now initializes telemetry (quietly — no per-command banner on stderr) when an endpoint is configured and force-flushes before the process exits, including before the `execvp` on passthrough paths where a recorded metric would otherwise be lost. The flush is bounded (300 ms) so an unreachable collector cannot stall every intercepted git command. The reported `service.version` defaults to the crate version when `GIT_PRISM_SERVICE_VERSION` is unset or empty. (#348)
 - **`gh pr diff <N>` now works when the PR head commit is not present locally.** Previously the shim resolved the PR's base and head SHAs via `gh pr view` then attempted to build the diff from local objects, failing with `Could not find ref '<sha>'` for PRs whose head commit had never been fetched (e.g. squash-merged branches or first-time clones). The handler now checks local object presence via gix before building the manifest; when the head SHA is absent it fetches `refs/pull/<N>/head` from `origin` using the real git binary (the sanctioned shim-scoped exception to the gix-only rule — gix lacks network capability without optional features this project deliberately omits). The fetch is skipped entirely when the objects are already present, so existing workflows have no overhead. (#349)
 
 ## [0.9.2] — 2026-06-01
