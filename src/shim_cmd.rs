@@ -162,8 +162,16 @@ fn detect_rc_file(home: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Testable rc-file detection with an injected shell string.
+///
+/// Matches on the basename of the shell path so that a path which merely
+/// contains "bash" as a substring (e.g. `/usr/local/bin/newbash`) is not
+/// misidentified as bash.
 pub(crate) fn detect_rc_file_for(home: &std::path::Path, shell: &str) -> std::path::PathBuf {
-    let rc_name = if shell.contains("bash") {
+    let basename = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(shell);
+    let rc_name = if basename == "bash" {
         ".bash_profile"
     } else {
         ".zprofile"
@@ -395,6 +403,20 @@ mod tests {
         assert!(
             rc.ends_with(".zprofile"),
             "unknown shell must default to .zprofile, got: {}",
+            rc.display()
+        );
+    }
+
+    /// A path that merely CONTAINS "bash" as a substring (e.g. `/usr/local/newbash`)
+    /// must not be misidentified as bash — only a path whose final component IS
+    /// "bash" (or the bare string "bash") should select `.bash_profile`.
+    #[test]
+    fn detect_rc_file_does_not_misroute_shell_path_containing_bash_as_substring() {
+        let dir = TempDir::new().unwrap();
+        let rc = detect_rc_file_for(dir.path(), "/usr/local/bin/newbash");
+        assert!(
+            rc.ends_with(".zprofile"),
+            "shell whose basename is 'newbash' (not 'bash') must default to .zprofile, got: {}",
             rc.display()
         );
     }

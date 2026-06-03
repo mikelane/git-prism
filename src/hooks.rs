@@ -256,6 +256,86 @@ pub(crate) fn stable_shim_target(canonical_exe: &Path) -> PathBuf {
     }
 }
 
+/// Classify what kind of obstacle (if any) sits at `link` before an install.
+///
+/// Returns:
+/// - `Ok(None)` — path is absent, proceed with creation.
+/// - `Ok(Some(AlreadyOwned))` — symlink already points at `target`, skip.
+/// - `Ok(Some(NeedsReplacement))` — stale/broken git-prism symlink or `force`
+///   is true; safe to remove and recreate.
+/// - `Err(_)` — foreign regular file or foreign symlink without `force`.
+#[derive(Debug)]
+enum InstallObstacle {
+    AlreadyOwned,
+    NeedsReplacement,
+}
+
+fn classify_install_obstacle(
+    link: &Path,
+    target: &Path,
+    force: bool,
+) -> Result<Option<InstallObstacle>> {
+    if !link.exists() && !link.is_symlink() {
+        return Ok(None);
+    }
+
+    let meta = link
+        .symlink_metadata()
+        .with_context(|| format!("failed to stat {}", link.display()))?;
+
+    if !meta.file_type().is_symlink() {
+        // Regular file — only allow clobber with --force.
+        if !force {
+            anyhow::bail!(
+                "{} is a regular file, not a symlink; remove it manually or re-run with --force",
+                link.display()
+            );
+        }
+        return Ok(Some(InstallObstacle::NeedsReplacement));
+    }
+
+    // Symlink — inspect the target.
+    match std::fs::read_link(link) {
+        Ok(existing_target) => {
+            if existing_target == target {
+                // Already correct — idempotent skip.
+                return Ok(Some(InstallObstacle::AlreadyOwned));
+            }
+            // A symlink pointing at something else.
+            // If the target is dangling (canonicalize fails), it is safe to
+            // replace unconditionally — the target is gone regardless of who
+            // originally owned it.
+            // If the target is live but not ours, it is a foreign symlink:
+            // refuse without --force, matching how we treat regular files.
+            match existing_target.canonicalize() {
+                Ok(canonical) if canonical != *target => {
+                    if !force {
+                        anyhow::bail!(
+                            "{} is a symlink pointing at {} which is not the git-prism \
+                             shim target; remove it manually or re-run with --force",
+                            link.display(),
+                            existing_target.display()
+                        );
+                    }
+                    Ok(Some(InstallObstacle::NeedsReplacement))
+                }
+                Ok(_) => {
+                    // Canonical target matches — git-prism-owned, stale raw path.
+                    Ok(Some(InstallObstacle::NeedsReplacement))
+                }
+                Err(_) => {
+                    // Dangling symlink — target is gone, always safe to replace.
+                    Ok(Some(InstallObstacle::NeedsReplacement))
+                }
+            }
+        }
+        Err(_) => {
+            // Broken symlink — always safe to replace.
+            Ok(Some(InstallObstacle::NeedsReplacement))
+        }
+    }
+}
+
 /// Create shim symlinks under `~/.local/share/git-prism/bin/` for every name
 /// in [`PATH_SHIM_LINK_NAMES`] (`git` and `gh`), each pointing at the running
 /// `git-prism` binary.
@@ -264,9 +344,11 @@ pub(crate) fn stable_shim_target(canonical_exe: &Path) -> PathBuf {
 /// unchanged. Returns the path of the first symlink (`git`) so callers can
 /// report it.
 ///
-/// If a regular file (not a symlink) already exists at any target path, this
-/// function returns an error rather than overwriting it — unless `force` is
-/// `true`, in which case the file is removed and the symlink is created.
+/// If a regular file (not a symlink) or a foreign symlink already exists at
+/// any target path, this function returns an error rather than overwriting it
+/// — unless `force` is `true`. The pre-flight check runs for ALL names before
+/// any filesystem mutation, so a refusal on `gh` never leaves `git` partially
+/// installed.
 pub fn install_path_shim(home: &Path, force: bool) -> Result<PathBuf> {
     let shim_dir = home.join(PATH_SHIM_REL_DIR);
     std::fs::create_dir_all(&shim_dir)
@@ -291,47 +373,32 @@ pub fn install_path_shim(home: &Path, force: bool) -> Result<PathBuf> {
     // up-to-date. For cargo-install / source builds the path is unchanged.
     let target = stable_shim_target(&canonical_exe);
 
+    // Pre-flight: validate ALL names before mutating any.  A refusal on the
+    // second name must not leave the first name half-installed.
+    let obstacles: Vec<Option<InstallObstacle>> = PATH_SHIM_LINK_NAMES
+        .iter()
+        .map(|name| classify_install_obstacle(&path_shim_link(home, name), &target, force))
+        .collect::<Result<_>>()?;
+
+    // Apply mutations only after all pre-flight checks passed.
     let mut first_link: Option<PathBuf> = None;
 
-    for name in PATH_SHIM_LINK_NAMES {
+    for (name, obstacle) in PATH_SHIM_LINK_NAMES.iter().zip(obstacles) {
         let link = path_shim_link(home, name);
 
-        if link.exists() || link.is_symlink() {
-            let meta = link
-                .symlink_metadata()
-                .with_context(|| format!("failed to stat {}", link.display()))?;
-
-            if !meta.file_type().is_symlink() {
-                if !force {
-                    anyhow::bail!(
-                        "{} is a regular file, not a symlink; remove it manually or re-run with --force",
-                        link.display()
-                    );
+        match obstacle {
+            Some(InstallObstacle::AlreadyOwned) => {
+                if first_link.is_none() {
+                    first_link = Some(link);
                 }
-                std::fs::remove_file(&link).with_context(|| {
-                    format!("failed to remove existing file {}", link.display())
-                })?;
-            } else {
-                match std::fs::read_link(&link) {
-                    Ok(existing_target) => {
-                        if existing_target == target {
-                            // Already correct — skip creation for this name.
-                            if first_link.is_none() {
-                                first_link = Some(link);
-                            }
-                            continue;
-                        }
-                        std::fs::remove_file(&link).with_context(|| {
-                            format!("failed to remove stale symlink {}", link.display())
-                        })?;
-                    }
-                    Err(e) => {
-                        std::fs::remove_file(&link).with_context(|| {
-                            format!("failed to remove broken symlink {}: {e}", link.display())
-                        })?;
-                    }
-                }
+                continue;
             }
+            Some(InstallObstacle::NeedsReplacement) => {
+                std::fs::remove_file(&link).with_context(|| {
+                    format!("failed to remove existing path {}", link.display())
+                })?;
+            }
+            None => {}
         }
 
         #[cfg(unix)]
@@ -349,59 +416,106 @@ pub fn install_path_shim(home: &Path, force: bool) -> Result<PathBuf> {
     Ok(first_link.unwrap_or_else(|| path_shim_link(home, PATH_SHIM_LINK_NAMES[0])))
 }
 
+/// Classify whether a shim link is safe to remove during uninstall.
+///
+/// Returns `Ok(true)` when the link should be removed, `Ok(false)` when it is
+/// absent (nothing to do), and `Err` when it exists but is not git-prism-owned.
+fn is_uninstallable_shim(link: &Path, current_exe: &Path, shim_dir: &Path) -> Result<bool> {
+    if !link.exists() && !link.is_symlink() {
+        return Ok(false);
+    }
+
+    let meta = link
+        .symlink_metadata()
+        .with_context(|| format!("failed to stat {}", link.display()))?;
+
+    if !meta.file_type().is_symlink() {
+        anyhow::bail!(
+            "{} is a regular file, not a symlink managed by git-prism; \
+             remove it manually if you want to clean up this path",
+            link.display()
+        );
+    }
+
+    match std::fs::read_link(link) {
+        Ok(raw_target) => {
+            // Try to canonicalize the target.  For a live symlink this resolves
+            // the real path; for a dangling symlink canonicalize fails.
+            match raw_target.canonicalize() {
+                Ok(canonical_target) => {
+                    if canonical_target != current_exe {
+                        anyhow::bail!(
+                            "{} is a symlink pointing at {} which is not the running \
+                             git-prism binary ({}); remove it manually if you want to \
+                             clean up this path",
+                            link.display(),
+                            canonical_target.display(),
+                            current_exe.display()
+                        );
+                    }
+                    // Canonical target matches — git-prism-owned.
+                    Ok(true)
+                }
+                Err(_) => {
+                    // Dangling symlink: the target no longer exists on disk.
+                    // The link lives in our managed bin dir, which we own
+                    // exclusively. A dangling link here was created by
+                    // git-prism (e.g. brew upgrade GC'd the Cellar binary)
+                    // and should be cleaned up.
+                    //
+                    // Safety: only links inside `shim_dir` are passed here;
+                    // we never remove dangling symlinks outside our managed
+                    // directory.
+                    debug_assert!(
+                        link.parent() == Some(shim_dir),
+                        "is_uninstallable_shim called for a link outside the managed shim dir"
+                    );
+                    Ok(true)
+                }
+            }
+        }
+        Err(_) => {
+            // read_link itself failed — treat as broken/dangling, same as above.
+            Ok(true)
+        }
+    }
+}
+
 /// Remove all shim symlinks under `~/.local/share/git-prism/bin/` (one per
 /// entry in [`PATH_SHIM_LINK_NAMES`]), then remove the parent directory if it
 /// is empty.
 ///
 /// Only removes a path when it is a symlink pointing at the running
-/// `git-prism` binary. If the path is a regular file (not owned by us) this
-/// function returns an error rather than silently deleting it.
+/// `git-prism` binary, or a dangling symlink inside the managed bin directory
+/// (which git-prism itself created — the post-`brew upgrade` GC scenario).
+/// Regular files and foreign symlinks cause an error rather than silent deletion.
+///
+/// The pre-flight check validates ALL names before any filesystem mutation so
+/// that a refusal on one name never leaves sibling links in a partially-removed
+/// state.
 pub fn uninstall_path_shim(home: &Path) -> Result<()> {
     let current_exe = std::env::current_exe()
         .context("failed to resolve current executable path")?
         .canonicalize()
         .context("failed to canonicalize current executable path")?;
 
-    for name in PATH_SHIM_LINK_NAMES {
-        let link = path_shim_link(home, name);
+    let shim_dir = home.join(PATH_SHIM_REL_DIR);
 
-        if link.exists() || link.is_symlink() {
-            let meta = link
-                .symlink_metadata()
-                .with_context(|| format!("failed to stat {}", link.display()))?;
+    // Pre-flight: validate every name before removing any.
+    let should_remove: Vec<bool> = PATH_SHIM_LINK_NAMES
+        .iter()
+        .map(|name| is_uninstallable_shim(&path_shim_link(home, name), &current_exe, &shim_dir))
+        .collect::<Result<_>>()?;
 
-            if !meta.file_type().is_symlink() {
-                anyhow::bail!(
-                    "{} is a regular file, not a symlink managed by git-prism; \
-                     remove it manually if you want to clean up this path",
-                    link.display()
-                );
-            }
-
-            match std::fs::read_link(&link) {
-                Ok(target) => {
-                    let canonical_target = target.canonicalize().unwrap_or(target);
-                    if canonical_target != current_exe {
-                        anyhow::bail!(
-                            "{} is a symlink pointing at {} which is not the running git-prism binary ({}); \
-                             remove it manually if you want to clean up this path",
-                            link.display(),
-                            canonical_target.display(),
-                            current_exe.display()
-                        );
-                    }
-                }
-                Err(_) => {
-                    // Broken symlink — safe to remove (target doesn't exist anyway).
-                }
-            }
-
+    // Apply removals only after all checks passed.
+    for (name, remove) in PATH_SHIM_LINK_NAMES.iter().zip(should_remove) {
+        if remove {
+            let link = path_shim_link(home, name);
             std::fs::remove_file(&link)
                 .with_context(|| format!("failed to remove symlink {}", link.display()))?;
         }
     }
 
-    let shim_dir = home.join(PATH_SHIM_REL_DIR);
     if shim_dir.exists() {
         let is_empty = shim_dir
             .read_dir()
@@ -1102,6 +1216,254 @@ mod tests {
             user_content,
             "install_path_shim silently overwrote a regular file at {}",
             user_file.display()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Adversarial QA — gh symlink (issue #347): partial-state / mixed-ownership
+    // -------------------------------------------------------------------------
+
+    /// PARTIAL-STATE BUG (uninstall): when the `git` link is git-prism-owned but
+    /// the `gh` link is a FOREIGN symlink (points at some other binary),
+    /// `uninstall_path_shim` processes `git` first and removes it, THEN bails on
+    /// `gh`. Result: the user's `git` interception silently vanishes while the
+    /// error message only talks about `gh`. Uninstall should either be
+    /// all-or-nothing, or at minimum must not tear down a valid managed link
+    /// when it is going to abort on a sibling it refuses to touch.
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_uninstall_must_not_remove_git_link_when_bailing_on_foreign_gh() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        // Both links created pointing at the running binary (git-prism owned).
+        install_path_shim(home, false).unwrap();
+
+        // Replace the `gh` link with a FOREIGN symlink (a target that is not the
+        // running git-prism binary).
+        let gh_link = home.join(".local/share/git-prism/bin/gh");
+        let foreign_target = dir.path().join("some-other-binary");
+        std::fs::write(&foreign_target, b"not git-prism").unwrap();
+        std::fs::remove_file(&gh_link).unwrap();
+        std::os::unix::fs::symlink(&foreign_target, &gh_link).unwrap();
+
+        let git_link = home.join(".local/share/git-prism/bin/git");
+        assert!(git_link.is_symlink(), "precondition: git link exists");
+
+        // Uninstall MUST refuse (foreign gh) — that part is expected.
+        let result = uninstall_path_shim(home);
+        assert!(
+            result.is_err(),
+            "uninstall must error when gh is a foreign symlink"
+        );
+
+        // BUG: the git link is gone even though uninstall aborted. The managed
+        // `git` interception was torn down as a side effect of a refused
+        // operation, leaving the system in a half-uninstalled state.
+        assert!(
+            git_link.is_symlink(),
+            "uninstall removed the git symlink while bailing on a foreign gh link; \
+             refused-uninstall left a partial state"
+        );
+    }
+
+    /// PARTIAL-STATE BUG (install): when `gh` is a regular user file and `git`
+    /// does not yet exist, `install_path_shim(force=false)` processes `git`
+    /// first — creating the symlink — and only THEN reaches `gh`, where it
+    /// bails. Result: install reports an error but has already created the
+    /// `git` symlink. A failed install should not leave a half-installed state.
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_install_must_not_create_git_link_when_bailing_on_regular_gh_file() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        // A regular (non-symlink) user file sits at the `gh` target. No `git`
+        // link exists yet.
+        let gh_file = shim_dir.join("gh");
+        std::fs::write(&gh_file, b"USER OWNS THIS gh FILE\n").unwrap();
+
+        let result = install_path_shim(home, false);
+        assert!(
+            result.is_err(),
+            "install must error when gh is a regular file and force is false"
+        );
+
+        // BUG: install aborted (returned Err) but already created the git
+        // symlink during the first loop iteration, leaving a partial install.
+        let git_link = shim_dir.join("git");
+        assert!(
+            !git_link.exists() && !git_link.is_symlink(),
+            "install created the git symlink despite aborting on the gh regular file; \
+             failed install left a partial state"
+        );
+    }
+
+    /// DANGLING-LINK BUG (uninstall): a git-prism-created shim symlink whose
+    /// target was later removed (e.g. `brew upgrade` GC'd the Cellar binary —
+    /// the very scenario the staleness advisory in this file addresses) becomes
+    /// a dangling symlink. `uninstall_path_shim` cannot remove it: `read_link`
+    /// returns Ok(dangling_target), `canonicalize()` of that target fails and
+    /// falls back to the raw path, which never equals `current_exe`, so the
+    /// function BAILS with "is not the running git-prism binary". The inline
+    /// comment ("Broken symlink — safe to remove") proves the intended behavior
+    /// is to remove it, but the code never reaches that Err branch for a
+    /// dangling link. The user is left unable to clean up a shim git-prism
+    /// itself created.
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_uninstall_must_remove_dangling_git_prism_owned_symlink() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        // Simulate a git-prism shim install whose target was GC'd: a dangling
+        // symlink under the managed bin dir.
+        let dangling_target = home.join("Cellar/git-prism/0.9.0/bin/git-prism");
+        let git_link = shim_dir.join("git");
+        std::os::unix::fs::symlink(&dangling_target, &git_link).unwrap();
+        assert!(git_link.is_symlink(), "precondition: dangling git link");
+        assert!(!git_link.exists(), "precondition: target is gone");
+
+        let result = uninstall_path_shim(home);
+
+        // BUG: uninstall errors instead of cleaning up the dangling link.
+        assert!(
+            result.is_ok(),
+            "uninstall failed to remove a dangling git-prism-owned symlink: {:?}",
+            result.err()
+        );
+        assert!(
+            !git_link.is_symlink(),
+            "dangling shim symlink was left in place after uninstall"
+        );
+    }
+
+    /// TRIANGULATION: uninstall partial-state — git is foreign, gh is owned.
+    /// The git-prism-owned `gh` link must NOT be removed when the git link
+    /// is foreign and causes a refusal (reverse order of the primary test).
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_uninstall_must_not_remove_gh_link_when_bailing_on_foreign_git() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        install_path_shim(home, false).unwrap();
+
+        // Replace `git` with a foreign symlink.
+        let git_link = home.join(".local/share/git-prism/bin/git");
+        let foreign_target = dir.path().join("foreign-binary");
+        std::fs::write(&foreign_target, b"not git-prism").unwrap();
+        std::fs::remove_file(&git_link).unwrap();
+        std::os::unix::fs::symlink(&foreign_target, &git_link).unwrap();
+
+        let gh_link = home.join(".local/share/git-prism/bin/gh");
+        assert!(gh_link.is_symlink(), "precondition: gh link exists");
+
+        let result = uninstall_path_shim(home);
+        assert!(
+            result.is_err(),
+            "uninstall must error on foreign git symlink"
+        );
+
+        // gh must not have been removed — the refusal on git must have
+        // pre-flighted before any mutation.
+        assert!(
+            gh_link.is_symlink(),
+            "uninstall removed gh symlink while bailing on foreign git; partial state"
+        );
+    }
+
+    /// TRIANGULATION: install partial-state — git is the obstacle, not gh.
+    /// When git already has a foreign symlink, install must refuse BEFORE
+    /// creating anything (including gh).
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_install_must_not_create_gh_link_when_bailing_on_foreign_git_symlink() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        // Foreign symlink at git, nothing at gh.
+        let foreign_target = dir.path().join("foreign-binary");
+        std::fs::write(&foreign_target, b"not git-prism").unwrap();
+        let git_link = shim_dir.join("git");
+        std::os::unix::fs::symlink(&foreign_target, &git_link).unwrap();
+
+        let result = install_path_shim(home, false);
+        assert!(result.is_err(), "install must error on foreign git symlink");
+
+        // gh must not have been created.
+        let gh_link = shim_dir.join("gh");
+        assert!(
+            !gh_link.exists() && !gh_link.is_symlink(),
+            "install created gh symlink despite aborting on foreign git; partial state"
+        );
+    }
+
+    /// TRIANGULATION: install with --force on a foreign symlink must succeed
+    /// and replace the foreign link.
+    #[test]
+    #[cfg(unix)]
+    fn install_with_force_replaces_foreign_symlink() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        let foreign_target = dir.path().join("foreign-gh");
+        std::fs::write(&foreign_target, b"user's gh").unwrap();
+        let gh_link = shim_dir.join("gh");
+        std::os::unix::fs::symlink(&foreign_target, &gh_link).unwrap();
+
+        install_path_shim(home, true).unwrap();
+
+        // gh must now point at the git-prism shim target, not the foreign binary.
+        let new_target = std::fs::read_link(&gh_link).unwrap();
+        assert_ne!(
+            new_target, foreign_target,
+            "install --force must replace foreign symlink with git-prism shim"
+        );
+    }
+
+    /// ASYMMETRY BUG (install clobbers foreign symlinks without --force): the
+    /// `--force` guard only protects REGULAR files. A user-created foreign
+    /// SYMLINK at the `gh` (or `git`) target — e.g. `gh` -> their own gh
+    /// wrapper — is silently removed and replaced by `install_path_shim` even
+    /// when `force` is false, with no error and no warning. This is
+    /// inconsistent with `uninstall_path_shim`, which REFUSES to touch a
+    /// foreign symlink. Install should refuse a foreign symlink without
+    /// `--force`, the same way it refuses a regular file.
+    #[test]
+    #[cfg(unix)]
+    fn adversarial_install_must_not_clobber_foreign_symlink_without_force() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+
+        // A user's pre-existing foreign symlink at the gh target.
+        let users_gh = dir.path().join("users-own-gh");
+        std::fs::write(&users_gh, b"user's gh wrapper").unwrap();
+        let gh_link = shim_dir.join("gh");
+        std::os::unix::fs::symlink(&users_gh, &gh_link).unwrap();
+
+        let result = install_path_shim(home, false);
+
+        // Without --force, install must NOT silently clobber the user's foreign
+        // symlink. Either it errors, or it leaves the user's symlink intact.
+        let still_points_at_users_target = std::fs::read_link(&gh_link)
+            .map(|t| t == users_gh)
+            .unwrap_or(false);
+        assert!(
+            result.is_err() || still_points_at_users_target,
+            "install silently replaced a user's foreign gh symlink without --force \
+             (result={result:?}); the --force guard only protects regular files, not \
+             foreign symlinks"
         );
     }
 }
