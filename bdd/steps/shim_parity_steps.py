@@ -651,17 +651,25 @@ def step_rc_contains_export(context: Context, rel_path: str) -> None:
     )
 
 
+_SHIM_BLOCK_START_MARKER = "# >>> git-prism shim >>>"
+
+
 @then("the rc file \"{rel_path}\" under HOME contains the shim export line exactly once")
 def step_rc_contains_export_exactly_once(context: Context, rel_path: str) -> None:
-    """Assert the shim export line appears exactly once (idempotency)."""
+    """Assert the managed PATH block appears exactly once (idempotency).
+
+    The new marker-delimited block contains the shim path fragment twice (once
+    in each branch of the case statement), so we count block start-markers
+    rather than raw fragment occurrences.
+    """
     rc_path = context.isolated_home / rel_path
     assert rc_path.exists(), f"RC file not found: {rc_path}"
     content = rc_path.read_text()
-    occurrences = content.count(_SHIM_EXPORT_FRAGMENT)
+    occurrences = content.count(_SHIM_BLOCK_START_MARKER)
     assert occurrences == 1, (
-        f"Expected the shim export fragment to appear exactly once in {rc_path}, "
-        f"but found {occurrences} occurrences.\n"
-        f"Fragment: {_SHIM_EXPORT_FRAGMENT!r}\n"
+        f"Expected the managed PATH block to appear exactly once in {rc_path}, "
+        f"but found {occurrences} occurrences of the start marker.\n"
+        f"Marker: {_SHIM_BLOCK_START_MARKER!r}\n"
         f"File contents:\n{content}"
     )
 

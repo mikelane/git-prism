@@ -11,9 +11,6 @@ use anyhow::Result;
 
 use crate::hooks;
 
-/// The full export line written to shell rc files.
-const SHIM_EXPORT_LINE: &str = r#"export PATH="$HOME/.local/share/git-prism/bin:$PATH""#;
-
 /// Install the PATH shim symlink and print the result to stdout.
 ///
 /// Idempotent: if the symlink already exists and points at the current binary,
@@ -21,30 +18,34 @@ const SHIM_EXPORT_LINE: &str = r#"export PATH="$HOME/.local/share/git-prism/bin:
 /// target path.
 ///
 /// After installing the symlink, checks whether the shim directory is already
-/// in `PATH`. If not, prompts the user via stdin for consent to append the
-/// export line to their shell rc file.
+/// first on PATH for non-login shells. If not, prompts the user via stdin for
+/// consent to write the managed PATH block to the appropriate rc files.
 pub fn run_install(home: &std::path::Path, force: bool) -> Result<()> {
-    let rc_path = detect_rc_file(home);
+    let shell = std::env::var("SHELL").unwrap_or_default();
     run_install_with_io(
         home,
         force,
         &mut io::stdin().lock(),
         &mut io::stdout(),
-        &rc_path,
+        &shell,
     )
 }
 
 /// Testable install implementation with injected I/O.
 ///
-/// `rc_path` is the shell rc file to append the export line to when the user
-/// consents. Production callers pass `detect_rc_file(home)`; tests pass an
-/// explicit path so the result is independent of the runner's `$SHELL`.
+/// `shell` drives which rc files receive the managed PATH block when the user
+/// consents:
+///   - `"zsh"` → `.zshenv` + `.zshrc`
+///   - `"bash"` → `.bash_profile` + `.bashrc`
+///
+/// Production callers pass the ambient `$SHELL`; tests pass an explicit value
+/// so results are independent of the CI runner's shell.
 pub fn run_install_with_io(
     home: &std::path::Path,
     force: bool,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
-    rc_path: &std::path::Path,
+    shell: &str,
 ) -> Result<()> {
     hooks::install_path_shim(home, force)?;
     let shim_dir = home.join(hooks::PATH_SHIM_REL_DIR);
@@ -54,36 +55,40 @@ pub fn run_install_with_io(
 
     let shim_dir_str = shim_dir.to_string_lossy().into_owned();
 
-    if shim_dir_is_in_path(&shim_dir_str) {
-        // Already on PATH — nothing to do.
+    if shim_dir_is_first_in_path(&shim_dir_str) {
+        // Already first on PATH — nothing to do.
         return Ok(());
     }
 
-    offer_path_setup(home, rc_path, stdin, stdout)?;
+    offer_path_setup(home, shell, stdin, stdout)?;
     Ok(())
 }
 
-/// Return true if the shim directory string appears in the current `PATH` env var.
-/// Normalizes trailing slashes so a PATH entry like `/path/to/bin/` matches `/path/to/bin`.
-fn shim_dir_is_in_path(shim_dir: &str) -> bool {
+/// Return true if the shim directory is the FIRST entry in the current `PATH`.
+///
+/// Unlike the old "present anywhere" check, this requires the shim to be first
+/// so that it wins over Homebrew/cargo/nvm entries that re-prepend later.
+/// Normalizes trailing slashes so `/path/to/bin/` matches `/path/to/bin`.
+fn shim_dir_is_first_in_path(shim_dir: &str) -> bool {
     let path_env = std::env::var("PATH").unwrap_or_default();
     let normalized_shim = shim_dir.trim_end_matches('/');
-    path_env.split(':').any(|entry| {
-        let normalized_entry = entry.trim_end_matches('/');
-        normalized_entry == normalized_shim
-    })
+    path_env
+        .split(':')
+        .next()
+        .map(|first| first.trim_end_matches('/') == normalized_shim)
+        .unwrap_or(false)
 }
 
 /// Prompt for PATH consent and act on the answer.
 fn offer_path_setup(
     home: &std::path::Path,
-    rc_path: &std::path::Path,
+    shell: &str,
     stdin: &mut dyn BufRead,
     stdout: &mut dyn Write,
 ) -> Result<()> {
     writeln!(
         stdout,
-        "\nThe shim directory is not in your PATH.\nAdd it automatically? [y/N] "
+        "\nThe shim directory is not first in your PATH.\nAdd it automatically? [y/N] "
     )?;
     stdout.flush()?;
 
@@ -91,48 +96,30 @@ fn offer_path_setup(
     stdin.read_line(&mut answer)?;
 
     if answer.trim().eq_ignore_ascii_case("y") {
-        append_to_rc_idempotent(home, rc_path, stdout)?;
+        write_rc_block_for_shell(home, shell)?;
+        print_setup_success(shell, stdout)?;
     } else {
         print_manual_instructions(stdout)?;
     }
     Ok(())
 }
 
-/// Append the export line to the shell rc file, unless it is already present.
-/// Detects presence by matching the full export line (line-wise, ignoring comments).
-fn append_to_rc_idempotent(
-    home: &std::path::Path,
-    rc_path: &std::path::Path,
-    stdout: &mut dyn Write,
-) -> Result<()> {
-    let existing = if rc_path.exists() {
-        std::fs::read_to_string(rc_path)?
+/// Print success message after writing the managed PATH block.
+fn print_setup_success(shell: &str, stdout: &mut dyn Write) -> Result<()> {
+    let basename = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(shell);
+    let (env_file, rc_file) = if basename == "bash" {
+        (".bash_profile", ".bashrc")
     } else {
-        String::new()
+        (".zshenv", ".zshrc")
     };
-
-    // Check if the full export line already exists (non-comment, trimmed match).
-    let export_line_already_present = existing.lines().any(|line| {
-        let trimmed = line.trim_start();
-        !trimmed.starts_with('#') && trimmed.trim() == SHIM_EXPORT_LINE.trim()
-    });
-
-    if !export_line_already_present {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(rc_path)?;
-        writeln!(file, "\n{SHIM_EXPORT_LINE}")?;
-    }
-
-    let rc_display = rc_path
-        .strip_prefix(home)
-        .map(|p| format!("~/{}", p.display()))
-        .unwrap_or_else(|_| rc_path.display().to_string());
-
+    let env_display = format!("~/{env_file}");
+    let rc_display = format!("~/{rc_file}");
     writeln!(
         stdout,
-        "Added to {rc_display}. Please restart Claude Code so the new PATH takes effect in its shell snapshot."
+        "Added to {env_display} and {rc_display}. Please restart Claude Code so the new PATH takes effect in its shell snapshot."
     )?;
     Ok(())
 }
@@ -141,38 +128,100 @@ fn append_to_rc_idempotent(
 fn print_manual_instructions(stdout: &mut dyn Write) -> Result<()> {
     writeln!(
         stdout,
-        "To complete setup, add this line to your shell rc manually:\n  {SHIM_EXPORT_LINE}"
+        "To complete setup, add this block to ~/.zshenv and the end of ~/.zshrc manually:\n\
+         \n\
+         {BLOCK_START_MARKER}\n\
+         {SHIM_PATH_BLOCK_BODY}\n\
+         {BLOCK_END_MARKER}"
     )?;
     Ok(())
 }
 
-/// Determine the login-shell rc file based on `$SHELL`, defaulting to `.zprofile`.
+/// Write the marker-delimited PATH shim block to the appropriate rc files for the given shell.
 ///
-/// Non-interactive login shells (like Claude Code's) source `.zprofile` / `.bash_profile`
-/// but skip `.zshrc` / `.bashrc`. macOS `path_helper` also demotes PATH entries inherited
-/// from the environment behind `/usr/bin`, so writing to `.zshrc` has no effect in that
-/// context. Use login-shell rc files to ensure the export takes effect.
-fn detect_rc_file(home: &std::path::Path) -> std::path::PathBuf {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    detect_rc_file_for(home, &shell)
-}
-
-/// Testable rc-file detection with an injected shell string.
+/// For zsh: writes to `~/.zshenv` (covers non-login non-interactive agent shells)
+/// and appends/replaces at the end of `~/.zshrc` (re-asserts priority after brew/cargo prepends).
+/// For bash: writes to `~/.bashrc` and `~/.bash_profile`.
 ///
-/// Matches on the basename of the shell path so that a path which merely
-/// contains "bash" as a substring (e.g. `/usr/local/bin/newbash`) is not
-/// misidentified as bash.
-pub(crate) fn detect_rc_file_for(home: &std::path::Path, shell: &str) -> std::path::PathBuf {
+/// The block is marker-delimited so re-running replaces the existing block (idempotent).
+pub(crate) fn write_rc_block_for_shell(home: &std::path::Path, shell: &str) -> Result<()> {
     let basename = std::path::Path::new(shell)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(shell);
-    let rc_name = if basename == "bash" {
-        ".bash_profile"
+    let (env_file, rc_file) = if basename == "bash" {
+        (".bash_profile", ".bashrc")
     } else {
-        ".zprofile"
+        (".zshenv", ".zshrc")
     };
-    home.join(rc_name)
+    write_marker_block(home, &home.join(env_file))?;
+    write_marker_block(home, &home.join(rc_file))?;
+    Ok(())
+}
+
+/// Markers that delimit the managed PATH block so it can be replaced idempotently.
+const BLOCK_START_MARKER: &str = "# >>> git-prism shim >>>";
+const BLOCK_END_MARKER: &str = "# <<< git-prism shim <<<";
+
+/// The managed PATH block content (without markers).
+const SHIM_PATH_BLOCK_BODY: &str = r#"case ":$PATH:" in
+  ":$HOME/.local/share/git-prism/bin:"*) ;;
+  *) PATH="$HOME/.local/share/git-prism/bin:${PATH//:$HOME\/.local\/share\/git-prism\/bin:/:}"; export PATH ;;
+esac"#;
+
+/// Write (or replace) the marker-delimited PATH block in the given rc file.
+///
+/// If the file already contains the markers, the block between them is replaced.
+/// If not, the block is appended. Creates the file if it doesn't exist.
+fn write_marker_block(home: &std::path::Path, rc_path: &std::path::Path) -> Result<()> {
+    let existing = if rc_path.exists() {
+        std::fs::read_to_string(rc_path)?
+    } else {
+        String::new()
+    };
+
+    let new_block = format!("{BLOCK_START_MARKER}\n{SHIM_PATH_BLOCK_BODY}\n{BLOCK_END_MARKER}\n");
+
+    let new_content = if existing.contains(BLOCK_START_MARKER) {
+        // Replace the existing block between markers (handles the end marker too).
+        replace_marker_block(&existing, &new_block)
+    } else {
+        // Append the block, ensuring a single newline separator.
+        let separator = if existing.ends_with('\n') || existing.is_empty() {
+            ""
+        } else {
+            "\n"
+        };
+        format!("{existing}{separator}\n{new_block}")
+    };
+
+    std::fs::write(rc_path, new_content)?;
+
+    let rc_display = rc_path
+        .strip_prefix(home)
+        .map(|p| format!("~/{}", p.display()))
+        .unwrap_or_else(|_| rc_path.display().to_string());
+    let _ = rc_display; // used in caller output
+    Ok(())
+}
+
+/// Replace the content between (and including) the start and end markers with `new_block`.
+fn replace_marker_block(content: &str, new_block: &str) -> String {
+    let start = content.find(BLOCK_START_MARKER);
+    let end = content.find(BLOCK_END_MARKER);
+    match (start, end) {
+        (Some(s), Some(e)) => {
+            let after_end = e + BLOCK_END_MARKER.len();
+            // Consume the trailing newline after the end marker if present.
+            let after_end = if content[after_end..].starts_with('\n') {
+                after_end + 1
+            } else {
+                after_end
+            };
+            format!("{}{}{}", &content[..s], new_block, &content[after_end..])
+        }
+        _ => format!("{content}\n{new_block}"),
+    }
 }
 
 /// Remove the PATH shim symlink.
@@ -187,12 +236,37 @@ pub fn run_uninstall(home: &std::path::Path) -> Result<()> {
 /// Output always includes the shim directory path so the user knows where
 /// to add to `$PATH` regardless of install state. Each managed symlink name
 /// (`git`, `gh`) is reported on a separate line.
+///
+/// Also checks whether the shim directory is first on PATH using the current
+/// process environment, and emits a warning when it is not.
 pub fn run_status(home: &std::path::Path) -> Result<()> {
-    run_status_with_io(home, &mut std::io::stdout())
+    let path_env = std::env::var("PATH").ok();
+    run_status_with_path(home, &mut std::io::stdout(), path_env.as_deref())
 }
 
 /// Testable status implementation with injected output writer.
+#[cfg(test)]
 pub fn run_status_with_io(home: &std::path::Path, out: &mut dyn std::io::Write) -> Result<()> {
+    let path_env = std::env::var("PATH").ok();
+    run_status_with_path(home, out, path_env.as_deref())
+}
+
+/// Fully-injectable status implementation for testing (injected PATH string).
+#[cfg(test)]
+pub(crate) fn run_status_with_path_for_test(
+    home: &std::path::Path,
+    out: &mut dyn std::io::Write,
+    path_override: Option<&str>,
+) -> Result<()> {
+    run_status_with_path(home, out, path_override)
+}
+
+/// Core status implementation with injected PATH.
+fn run_status_with_path(
+    home: &std::path::Path,
+    out: &mut dyn std::io::Write,
+    path_env: Option<&str>,
+) -> Result<()> {
     let shim_dir = home.join(hooks::PATH_SHIM_REL_DIR);
     let shim_dir_str = shim_dir.to_string_lossy();
 
@@ -222,6 +296,25 @@ pub fn run_status_with_io(home: &std::path::Path, out: &mut dyn std::io::Write) 
     }
 
     writeln!(out, "shim directory: {shim_dir_str}")?;
+
+    // Warn when the shim dir is not first on PATH — this is the condition that
+    // causes agent shells to resolve the real git/gh instead of the shim.
+    if let Some(path) = path_env {
+        let normalized_shim = shim_dir_str.trim_end_matches('/');
+        let is_first = path
+            .split(':')
+            .next()
+            .map(|first| first.trim_end_matches('/') == normalized_shim)
+            .unwrap_or(false);
+        if !is_first {
+            writeln!(
+                out,
+                "warning: shim directory is not first on PATH — agent shells will not intercept git/gh.\n\
+                 Run `git-prism shim install` and restart Claude Code to fix this."
+            )?;
+        }
+    }
+
     Ok(())
 }
 
@@ -233,25 +326,187 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // ---------------------------------------------------------------------------
+    // TDD: marker-delimited multi-file block writer (issue #355)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn write_rc_block_creates_zshenv_and_zshrc_for_zsh() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        assert!(
+            home.join(".zshenv").exists(),
+            ".zshenv must be created for zsh"
+        );
+        assert!(
+            home.join(".zshrc").exists(),
+            ".zshrc must be created for zsh"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_creates_bash_profile_and_bashrc_for_bash() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_rc_block_for_shell(home, "bash").unwrap();
+        assert!(
+            home.join(".bash_profile").exists(),
+            ".bash_profile must be created for bash"
+        );
+        assert!(
+            home.join(".bashrc").exists(),
+            ".bashrc must be created for bash"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_contains_marker_delimiters() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let zshenv = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        assert!(
+            zshenv.contains(BLOCK_START_MARKER),
+            ".zshenv must contain start marker"
+        );
+        assert!(
+            zshenv.contains(BLOCK_END_MARKER),
+            ".zshenv must contain end marker"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_is_idempotent_no_duplicate_block() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let zshenv = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        let start_count = zshenv.matches(BLOCK_START_MARKER).count();
+        assert_eq!(
+            start_count, 1,
+            "start marker must appear exactly once after two writes; content:\n{zshenv}"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_uses_forces_first_case_statement() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let zshenv = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        // The block must use `case` (not a simple guard) to force-prepend even
+        // when the shim dir already appears later in PATH.
+        assert!(
+            zshenv.contains("case \":$PATH:\""),
+            ".zshenv block must use case statement for forces-first semantics; got:\n{zshenv}"
+        );
+        assert!(
+            zshenv.contains("export PATH"),
+            ".zshenv block must export PATH"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_replaces_existing_block_on_rerun() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // Manually write a "stale" block.
+        let stale = format!(
+            "{}\n# stale content\n{}\n",
+            BLOCK_START_MARKER, BLOCK_END_MARKER
+        );
+        std::fs::write(home.join(".zshenv"), &stale).unwrap();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let after = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        assert!(
+            !after.contains("stale content"),
+            "stale block content must be replaced on rerun; got:\n{after}"
+        );
+        assert!(
+            after.contains("case \":$PATH:\""),
+            "replacement block must contain the current case statement"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_preserves_content_after_end_marker() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let initial = format!(
+            "{}\n# old block\n{}\n# user stuff after\n",
+            BLOCK_START_MARKER, BLOCK_END_MARKER
+        );
+        std::fs::write(home.join(".zshenv"), &initial).unwrap();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let after = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        assert!(
+            after.contains("user stuff after"),
+            "content after the end marker must be preserved; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn write_rc_block_works_with_full_shell_path_like_bin_zsh() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        write_rc_block_for_shell(home, "/bin/zsh").unwrap();
+        assert!(
+            home.join(".zshenv").exists(),
+            ".zshenv must be created for /bin/zsh"
+        );
+        assert!(
+            home.join(".zshrc").exists(),
+            ".zshrc must be created for /bin/zsh"
+        );
+    }
+
     /// The shim-dir path fragment, derived from the canonical constant in
     /// `hooks` so these assertions track the real install location instead of a
     /// drifting literal copy.
     const SHIM_EXPORT_FRAGMENT: &str = hooks::PATH_SHIM_REL_DIR;
 
-    /// Install with consent, using an explicit `.zshrc` path so the test is
-    /// independent of the CI runner's `$SHELL`.
+    /// Install with consent, pinning shell to zsh so tests are independent of
+    /// the CI runner's `$SHELL`.
     fn install_with_consent(home: &std::path::Path) {
-        let rc = home.join(".zshrc");
         let mut stdin = Cursor::new("y\n");
         let mut stdout = Vec::new();
-        run_install_with_io(home, false, &mut stdin, &mut stdout, &rc).unwrap();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, "zsh").unwrap();
     }
 
     fn install_with_decline(home: &std::path::Path) {
-        let rc = home.join(".zshrc");
         let mut stdin = Cursor::new("n\n");
         let mut stdout = Vec::new();
-        run_install_with_io(home, false, &mut stdin, &mut stdout, &rc).unwrap();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, "zsh").unwrap();
+    }
+
+    #[test]
+    fn consent_writes_marker_block_to_zshenv_for_zsh() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let mut stdin = Cursor::new("y\n");
+        let mut stdout = Vec::new();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, "zsh").unwrap();
+        let zshenv = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        assert!(
+            zshenv.contains(BLOCK_START_MARKER),
+            ".zshenv must contain the marker block after consent"
+        );
+    }
+
+    #[test]
+    fn consent_writes_marker_block_to_zshrc_for_zsh() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let mut stdin = Cursor::new("y\n");
+        let mut stdout = Vec::new();
+        run_install_with_io(home, false, &mut stdin, &mut stdout, "zsh").unwrap();
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert!(
+            zshrc.contains(BLOCK_START_MARKER),
+            ".zshrc must contain the marker block after consent"
+        );
     }
 
     #[test]
@@ -290,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn consent_appends_export_line_exactly_once_on_repeat() {
+    fn consent_appends_block_exactly_once_on_repeat() {
         let dir = TempDir::new().unwrap();
         let rc = dir.path().join(".zshrc");
         std::fs::write(&rc, "# shell rc\n").unwrap();
@@ -299,19 +554,21 @@ mod tests {
         install_with_consent(dir.path());
 
         let content = std::fs::read_to_string(&rc).unwrap();
-        let count = content.matches(SHIM_EXPORT_FRAGMENT).count();
-        assert_eq!(count, 1, "export fragment must appear exactly once");
+        // Count the start marker — exactly one block means exactly one marker.
+        let count = content.matches(BLOCK_START_MARKER).count();
+        assert_eq!(
+            count, 1,
+            "managed PATH block must appear exactly once after two consents; rc:\n{content}"
+        );
     }
 
     #[test]
     fn consent_output_contains_restart() {
         let dir = TempDir::new().unwrap();
-        let rc = dir.path().join(".zshrc");
-        std::fs::write(&rc, "# shell rc\n").unwrap();
 
         let mut stdin = Cursor::new("y\n");
         let mut stdout = Vec::new();
-        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, &rc).unwrap();
+        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, "zsh").unwrap();
 
         let out = String::from_utf8(stdout).unwrap();
         assert!(
@@ -321,25 +578,35 @@ mod tests {
     }
 
     #[test]
-    fn decline_leaves_rc_file_unchanged() {
+    fn decline_leaves_rc_files_unchanged() {
         let dir = TempDir::new().unwrap();
-        let rc = dir.path().join(".zshrc");
-        std::fs::write(&rc, "# shell rc\n").unwrap();
-        let original = std::fs::read_to_string(&rc).unwrap();
+        let home = dir.path();
+        // Pre-create both files so we can check neither is modified.
+        std::fs::write(home.join(".zshenv"), "# zshenv\n").unwrap();
+        std::fs::write(home.join(".zshrc"), "# zshrc\n").unwrap();
+        let zshenv_before = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        let zshrc_before = std::fs::read_to_string(home.join(".zshrc")).unwrap();
 
-        install_with_decline(dir.path());
+        install_with_decline(home);
 
-        let after = std::fs::read_to_string(&rc).unwrap();
-        assert_eq!(original, after, "rc file must be unchanged after decline");
+        let zshenv_after = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        let zshrc_after = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert_eq!(
+            zshenv_before, zshenv_after,
+            ".zshenv must be unchanged after decline"
+        );
+        assert_eq!(
+            zshrc_before, zshrc_after,
+            ".zshrc must be unchanged after decline"
+        );
     }
 
     #[test]
     fn decline_output_contains_shim_dir_path() {
         let dir = TempDir::new().unwrap();
-        let rc = dir.path().join(".zshrc");
         let mut stdin = Cursor::new("n\n");
         let mut stdout = Vec::new();
-        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, &rc).unwrap();
+        run_install_with_io(dir.path(), false, &mut stdin, &mut stdout, "zsh").unwrap();
 
         let out = String::from_utf8(stdout).unwrap();
         assert!(
@@ -371,54 +638,77 @@ mod tests {
     }
 
     #[test]
-    fn detect_rc_file_returns_zprofile_for_zsh() {
+    fn shell_routing_writes_zshenv_and_zshrc_for_zsh() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        // Simulate SHELL=zsh by calling detect_rc_file directly.
-        // We need to test the logic without relying on the CI runner's $SHELL.
-        // detect_rc_file_for lets us inject the shell string.
-        let rc = detect_rc_file_for(home, "zsh");
-        assert!(
-            rc.ends_with(".zprofile"),
-            "zsh rc must be .zprofile (login-shell sourced), got: {}",
-            rc.display()
-        );
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        assert!(home.join(".zshenv").exists(), "zsh must write .zshenv");
+        assert!(home.join(".zshrc").exists(), "zsh must write .zshrc");
     }
 
     #[test]
-    fn detect_rc_file_returns_bash_profile_for_bash() {
+    fn shell_routing_writes_bash_profile_and_bashrc_for_bash() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
-        let rc = detect_rc_file_for(home, "bash");
+        write_rc_block_for_shell(home, "bash").unwrap();
         assert!(
-            rc.ends_with(".bash_profile"),
-            "bash rc must be .bash_profile (login-shell sourced), got: {}",
-            rc.display()
+            home.join(".bash_profile").exists(),
+            "bash must write .bash_profile"
         );
+        assert!(home.join(".bashrc").exists(), "bash must write .bashrc");
     }
 
     #[test]
-    fn detect_rc_file_defaults_to_zprofile_when_shell_unknown() {
+    fn shell_routing_defaults_to_zsh_files_for_unknown_shell() {
         let dir = TempDir::new().unwrap();
-        let rc = detect_rc_file_for(dir.path(), "");
+        write_rc_block_for_shell(dir.path(), "").unwrap();
         assert!(
-            rc.ends_with(".zprofile"),
-            "unknown shell must default to .zprofile, got: {}",
-            rc.display()
+            dir.path().join(".zshenv").exists(),
+            "unknown shell must default to .zshenv"
         );
     }
 
     /// A path that merely CONTAINS "bash" as a substring (e.g. `/usr/local/newbash`)
-    /// must not be misidentified as bash — only a path whose final component IS
-    /// "bash" (or the bare string "bash") should select `.bash_profile`.
+    /// must not be misidentified as bash — only a path whose final component IS "bash"
+    /// should route to bash files.
     #[test]
-    fn detect_rc_file_does_not_misroute_shell_path_containing_bash_as_substring() {
+    fn shell_routing_does_not_misroute_shell_path_containing_bash_as_substring() {
         let dir = TempDir::new().unwrap();
-        let rc = detect_rc_file_for(dir.path(), "/usr/local/bin/newbash");
+        write_rc_block_for_shell(dir.path(), "/usr/local/bin/newbash").unwrap();
         assert!(
-            rc.ends_with(".zprofile"),
-            "shell whose basename is 'newbash' (not 'bash') must default to .zprofile, got: {}",
-            rc.display()
+            dir.path().join(".zshenv").exists(),
+            "shell whose basename is 'newbash' (not 'bash') must default to .zshenv"
+        );
+    }
+
+    #[test]
+    fn run_status_warns_when_shim_not_first_in_nonlogin_shell_path() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        install_with_decline(home);
+        let mut out = Vec::new();
+        // Simulate a non-login shell where the shim dir is present but NOT first.
+        run_status_with_path_for_test(home, &mut out, Some("/opt/homebrew/bin:/usr/bin")).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("warning") || text.contains("not first"),
+            "status must warn when shim dir is not first on PATH; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn run_status_no_warning_when_shim_is_first_in_path() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        install_with_decline(home);
+        let shim_dir = home.join(".local/share/git-prism/bin");
+        let path_with_shim_first = format!("{}:/opt/homebrew/bin:/usr/bin", shim_dir.display());
+        let mut out = Vec::new();
+        run_status_with_path_for_test(home, &mut out, Some(&path_with_shim_first)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("not first"),
+            "status must not warn when shim dir is first on PATH; got: {text:?}"
         );
     }
 
