@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::agent_detection::EnvSource;
 use crate::metrics::{ShimOutcome, ShimSubcommand};
-use crate::shim::classify::{Classification, classify};
+use crate::shim::classify::{Classification, ClassifyResult, classify};
 use crate::shim::real_git::RealGitExec;
 use crate::telemetry::TelemetryGuard;
 
@@ -76,7 +76,10 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     }
 
     // 3. Classify the subcommand.
-    let classification = classify(argv);
+    let ClassifyResult {
+        classification,
+        repo_override,
+    } = classify(argv);
     let subcommand = classification_to_subcommand(&classification);
     if classification == Classification::Passthrough {
         metrics.record_shim_invocation(ShimOutcome::Passthrough);
@@ -85,7 +88,9 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     }
 
     // 4. Dispatch to the handler.
-    let repo_path = match resolve_repo_path(env) {
+    //    When `-C <path>` was present in the argv, use that path as the repo
+    //    root; otherwise fall back to the usual env-var / cwd resolution.
+    let repo_path = match resolve_repo_path(env, repo_override) {
         Some(p) => p,
         None => {
             metrics.record_shim_invocation(ShimOutcome::Passthrough);
@@ -129,16 +134,25 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
     }
 }
 
-/// Return the repository path from `$GIT_PRISM_REPO` if set, otherwise use
-/// the current working directory.  Returns `None` when the cwd cannot be
-/// determined (deleted directory, permission error) — callers should fall
-/// through to passthrough so real git can handle the error gracefully.
+/// Return the repository path to use for manifest building.
+///
+/// Priority (highest first):
+/// 1. `GIT_PRISM_REPO` env var (test / explicit override).
+/// 2. `-C <path>` from the argv classifier (`repo_override`).
+/// 3. Current working directory.
+///
+/// Returns `None` when the cwd cannot be determined (deleted directory,
+/// permission error) — callers should fall through to passthrough so real git
+/// can handle the error gracefully.
 ///
 /// The `GIT_PRISM_CWD_UNAVAILABLE` env key is reserved for testing: when set,
 /// this function behaves as if `current_dir()` failed.
-fn resolve_repo_path(env: &dyn EnvSource) -> Option<PathBuf> {
+fn resolve_repo_path(env: &dyn EnvSource, repo_override: Option<&str>) -> Option<PathBuf> {
     if let Some(repo) = env.get("GIT_PRISM_REPO") {
         return Some(PathBuf::from(repo));
+    }
+    if let Some(path) = repo_override {
+        return Some(PathBuf::from(path));
     }
     // Allow tests to inject a cwd-unavailable condition without touching the
     // real process working directory.
@@ -325,6 +339,51 @@ mod tests {
         metrics.record_shim_invocation(crate::metrics::ShimOutcome::Passthrough);
         metrics.record_shim_invocation(crate::metrics::ShimOutcome::LoopBreak);
         metrics.record_shim_invocation(crate::metrics::ShimOutcome::NoAgent);
+    }
+
+    #[test]
+    fn it_dispatches_to_handler_using_dash_c_path_as_repo() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Build a minimal two-commit repo.
+        let dir = TempDir::new().unwrap();
+        let repo_path = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "t@t.com"]);
+        run(&["config", "user.name", "T"]);
+        std::fs::write(repo_path.join("a.txt"), "hello\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-m", "first"]);
+        std::fs::write(repo_path.join("b.txt"), "world\n").unwrap();
+        run(&["add", "b.txt"]);
+        run(&["commit", "-m", "second"]);
+
+        let repo_str: &'static str =
+            Box::leak(repo_path.to_string_lossy().into_owned().into_boxed_str());
+
+        // No GIT_PRISM_REPO — repo path comes only from -C <path> in argv.
+        let env = MapEnv(HashMap::from([("CLAUDECODE", "1")]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        // Invoke with -C <repo> prefix — the bug scenario from issue #356.
+        let argv = ["git", "-C", repo_str, "diff", "HEAD~1..HEAD"];
+        let code = run_shim(&argv, &env, &exec, &mut guard);
+
+        // The shim must have dispatched to the handler (not passthrough).
+        assert!(
+            !exec.called.get(),
+            "expected handler dispatch via -C path, not passthrough"
+        );
+        assert_eq!(code, ExitCode::SUCCESS, "handler should return SUCCESS");
     }
 
     #[test]

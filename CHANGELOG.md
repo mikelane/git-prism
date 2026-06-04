@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`git -C <path> diff/log/show/blame` now routes through the shim correctly.** Previously the argv classifier looked for the subcommand at a fixed position (`argv[1]`), so leading git global options like `-C <path>`, `-c <name=value>`, `--git-dir <path>` caused the call to be classified as `Passthrough` and raw git output was returned instead of a JSON manifest. The classifier now skips all recognised git global options (both `--opt value` and `--opt=value` forms, and valueless flags like `--no-pager`) before locating the subcommand. When `-C <path>` is present, the path is used as the repository root for manifest building, matching git's own semantics (last `-C` wins). Unrecognised leading `-` tokens fall through to passthrough — the documented safe default. (#356)
+
 ## [0.9.3] — 2026-06-03
 
 ### Fixed
