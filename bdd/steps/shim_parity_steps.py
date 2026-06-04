@@ -21,6 +21,7 @@ Platform note for @ISSUE-322:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -141,10 +142,9 @@ def step_shim_dir_already_in_path(context: Context) -> None:
 
     Stores the modified PATH in context so the When step can inject it.
     """
-    shim_dir = str(_shim_dir_path(context))
     shim_dir_path = _shim_dir_path(context)
     shim_dir_path.mkdir(parents=True, exist_ok=True)
-    context.injected_path = f"{shim_dir}:{os.environ.get('PATH', '')}"
+    context.injected_path = f"{shim_dir_path}:{os.environ.get('PATH', '')}"
 
 
 @given("the shim is installed with a \"gh\" symlink")
@@ -479,8 +479,9 @@ def step_shim_install_consent(context: Context) -> None:
     """Run git-prism shim install, answering 'y' to the PATH setup prompt."""
     binary = _find_binary(context)
     env = _isolated_env(context)
-    # Pin SHELL to zsh so detect_rc_file always picks .zprofile, regardless of
-    # the CI runner's ambient $SHELL (which is /bin/bash on GitHub Actions).
+    # Pin SHELL to zsh so the install always writes the zsh rc files
+    # (.zshenv + .zshrc), regardless of the CI runner's ambient $SHELL
+    # (which is /bin/bash on GitHub Actions).
     env["SHELL"] = "/bin/zsh"
     # If the shim dir was injected into PATH by a prior Given step, use that.
     if hasattr(context, "injected_path"):
@@ -505,8 +506,9 @@ def step_shim_install_consent_again(context: Context) -> None:
     """Run git-prism shim install a second time with 'y' consent (idempotency check)."""
     binary = _find_binary(context)
     env = _isolated_env(context)
-    # Pin SHELL to zsh so detect_rc_file always picks .zprofile, regardless of
-    # the CI runner's ambient $SHELL (which is /bin/bash on GitHub Actions).
+    # Pin SHELL to zsh so the install always writes the zsh rc files
+    # (.zshenv + .zshrc), regardless of the CI runner's ambient $SHELL
+    # (which is /bin/bash on GitHub Actions).
     env["SHELL"] = "/bin/zsh"
     result = subprocess.run(  # noqa: S603
         [str(binary), "shim", "install"],
@@ -717,11 +719,10 @@ def step_files_entries_have_change_scope(context: Context) -> None:
     binary returns plain text or its own JSON, neither of which has a
     change_scope field on file entries.
     """
-    import json as _json
     stdout = (context.result.stdout or "").strip()
     try:
-        data = _json.loads(stdout)
-    except _json.JSONDecodeError as exc:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
         raise AssertionError(
             f"Output is not valid JSON: {exc}\n"
             f"stdout: {stdout[:500]}\n"

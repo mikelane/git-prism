@@ -7,7 +7,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::hooks;
 
@@ -99,36 +99,45 @@ fn offer_path_setup(
         write_rc_block_for_shell(home, shell)?;
         print_setup_success(shell, stdout)?;
     } else {
-        print_manual_instructions(stdout)?;
+        print_manual_instructions(shell, stdout)?;
     }
     Ok(())
 }
 
-/// Print success message after writing the managed PATH block.
-fn print_setup_success(shell: &str, stdout: &mut dyn Write) -> Result<()> {
+/// Resolve the (env-file, rc-file) pair for a shell, keyed on the basename of
+/// `$SHELL`. `"bash"` routes to the bash startup files; everything else (zsh,
+/// empty, unknown) defaults to the zsh pair.
+///
+/// Matching on the basename — not a substring of the whole path — means a shell
+/// at `/usr/local/bin/newbash` is correctly treated as not-bash.
+fn rc_files_for_shell(shell: &str) -> (&'static str, &'static str) {
     let basename = std::path::Path::new(shell)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(shell);
-    let (env_file, rc_file) = if basename == "bash" {
+    if basename == "bash" {
         (".bash_profile", ".bashrc")
     } else {
         (".zshenv", ".zshrc")
-    };
-    let env_display = format!("~/{env_file}");
-    let rc_display = format!("~/{rc_file}");
+    }
+}
+
+/// Print success message after writing the managed PATH block.
+fn print_setup_success(shell: &str, stdout: &mut dyn Write) -> Result<()> {
+    let (env_file, rc_file) = rc_files_for_shell(shell);
     writeln!(
         stdout,
-        "Added to {env_display} and {rc_display}. Please restart Claude Code so the new PATH takes effect in its shell snapshot."
+        "Added to ~/{env_file} and ~/{rc_file}. Please restart Claude Code so the new PATH takes effect in its shell snapshot."
     )?;
     Ok(())
 }
 
-/// Print manual PATH instructions to stdout.
-fn print_manual_instructions(stdout: &mut dyn Write) -> Result<()> {
+/// Print manual PATH instructions naming the rc files for the active shell.
+fn print_manual_instructions(shell: &str, stdout: &mut dyn Write) -> Result<()> {
+    let (env_file, rc_file) = rc_files_for_shell(shell);
     writeln!(
         stdout,
-        "To complete setup, add this block to ~/.zshenv and the end of ~/.zshrc manually:\n\
+        "To complete setup, add this block to ~/{env_file} and the end of ~/{rc_file} manually:\n\
          \n\
          {BLOCK_START_MARKER}\n\
          {SHIM_PATH_BLOCK_BODY}\n\
@@ -145,17 +154,9 @@ fn print_manual_instructions(stdout: &mut dyn Write) -> Result<()> {
 ///
 /// The block is marker-delimited so re-running replaces the existing block (idempotent).
 pub(crate) fn write_rc_block_for_shell(home: &std::path::Path, shell: &str) -> Result<()> {
-    let basename = std::path::Path::new(shell)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(shell);
-    let (env_file, rc_file) = if basename == "bash" {
-        (".bash_profile", ".bashrc")
-    } else {
-        (".zshenv", ".zshrc")
-    };
-    write_marker_block(home, &home.join(env_file))?;
-    write_marker_block(home, &home.join(rc_file))?;
+    let (env_file, rc_file) = rc_files_for_shell(shell);
+    write_marker_block(&home.join(env_file))?;
+    write_marker_block(&home.join(rc_file))?;
     Ok(())
 }
 
@@ -189,9 +190,10 @@ esac"#;
 /// Strips ALL existing managed blocks and stray markers (handles corruption
 /// from hand-edits, interrupted writes, or prior buggy runs) then appends
 /// exactly one canonical block.  Creates the file if it doesn't exist.
-fn write_marker_block(home: &std::path::Path, rc_path: &std::path::Path) -> Result<()> {
+fn write_marker_block(rc_path: &std::path::Path) -> Result<()> {
     let existing = if rc_path.exists() {
-        std::fs::read_to_string(rc_path)?
+        std::fs::read_to_string(rc_path)
+            .with_context(|| format!("failed to read rc file {}", rc_path.display()))?
     } else {
         String::new()
     };
@@ -212,13 +214,8 @@ fn write_marker_block(home: &std::path::Path, rc_path: &std::path::Path) -> Resu
         format!("{cleaned}{separator}\n{new_block}")
     };
 
-    std::fs::write(rc_path, new_content)?;
-
-    let rc_display = rc_path
-        .strip_prefix(home)
-        .map(|p| format!("~/{}", p.display()))
-        .unwrap_or_else(|_| rc_path.display().to_string());
-    let _ = rc_display; // used in caller output
+    std::fs::write(rc_path, new_content)
+        .with_context(|| format!("failed to write PATH shim block to {}", rc_path.display()))?;
     Ok(())
 }
 
@@ -485,6 +482,38 @@ mod tests {
     }
 
     #[test]
+    fn write_rc_block_preserves_content_before_start_marker() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // User content sits BEFORE an existing managed block. The rewrite strips
+        // the old block but must not eat the lines that precede it.
+        let initial = format!(
+            "export EDITOR=vim\n# my own path tweaks\n{}\n# old block body\n{}\n",
+            BLOCK_START_MARKER, BLOCK_END_MARKER
+        );
+        std::fs::write(home.join(".zshenv"), &initial).unwrap();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let after = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        assert!(
+            after.contains("export EDITOR=vim"),
+            "user content before the start marker must be preserved; got:\n{after}"
+        );
+        assert!(
+            after.contains("# my own path tweaks"),
+            "all user lines before the start marker must be preserved; got:\n{after}"
+        );
+        assert!(
+            !after.contains("# old block body"),
+            "the stale block body must still be stripped; got:\n{after}"
+        );
+        assert_eq!(
+            after.matches(BLOCK_START_MARKER).count(),
+            1,
+            "exactly one managed block must remain; got:\n{after}"
+        );
+    }
+
+    #[test]
     fn write_rc_block_works_with_full_shell_path_like_bin_zsh() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -727,9 +756,16 @@ mod tests {
         // Simulate a non-login shell where the shim dir is present but NOT first.
         run_status_with_path_for_test(home, &mut out, Some("/opt/homebrew/bin:/usr/bin")).unwrap();
         let text = String::from_utf8(out).unwrap();
+        // Assert the specific PATH-ordering warning, not a bare "warning" substring
+        // (the staleness path also prints "warning", so an OR would mask a
+        // regression that dropped the not-first message but kept some other warning).
         assert!(
-            text.contains("warning") || text.contains("not first"),
-            "status must warn when shim dir is not first on PATH; got: {text:?}"
+            text.contains("not first on PATH"),
+            "status must warn that the shim dir is not first on PATH; got: {text:?}"
+        );
+        assert!(
+            text.contains("git-prism shim install"),
+            "the not-first warning must name the remedy (`git-prism shim install`); got: {text:?}"
         );
     }
 
