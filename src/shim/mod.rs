@@ -78,7 +78,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     // 3. Classify the subcommand.
     let ClassifyResult {
         classification,
-        repo_override,
+        dash_c,
     } = classify(argv);
     let subcommand = classification_to_subcommand(&classification);
     if classification == Classification::Passthrough {
@@ -90,7 +90,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     // 4. Dispatch to the handler.
     //    When `-C <path>` was present in the argv, use that path as the repo
     //    root; otherwise fall back to the usual env-var / cwd resolution.
-    let repo_path = match resolve_repo_path(env, repo_override) {
+    let repo_path = match resolve_repo_path(env, &dash_c) {
         Some(p) => p,
         None => {
             metrics.record_shim_invocation(ShimOutcome::Passthrough);
@@ -138,7 +138,10 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
 ///
 /// Priority (highest first):
 /// 1. `GIT_PRISM_REPO` env var (test / explicit override).
-/// 2. `-C <path>` from the argv classifier (`repo_override`).
+/// 2. `-C` values from the argv classifier, folded with git's `cd`-semantics:
+///    `git -C a -C b` → start from cwd, `cd a`, `cd b` → repo at `<cwd>/a/b`.
+///    An absolute value resets the base: `git -C /abs -C rel` → `/abs/rel`.
+///    A single absolute `-C /abs` → `/abs` (unchanged from old behaviour).
 /// 3. Current working directory.
 ///
 /// Returns `None` when the cwd cannot be determined (deleted directory,
@@ -147,19 +150,30 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
 ///
 /// The `GIT_PRISM_CWD_UNAVAILABLE` env key is reserved for testing: when set,
 /// this function behaves as if `current_dir()` failed.
-fn resolve_repo_path(env: &dyn EnvSource, repo_override: Option<&str>) -> Option<PathBuf> {
+fn resolve_repo_path(env: &dyn EnvSource, dash_c: &[&str]) -> Option<PathBuf> {
     if let Some(repo) = env.get("GIT_PRISM_REPO") {
         return Some(PathBuf::from(repo));
-    }
-    if let Some(path) = repo_override {
-        return Some(PathBuf::from(path));
     }
     // Allow tests to inject a cwd-unavailable condition without touching the
     // real process working directory.
     if env.get("GIT_PRISM_CWD_UNAVAILABLE").is_some() {
         return None;
     }
-    std::env::current_dir().ok()
+    let cwd = std::env::current_dir().ok()?;
+    if dash_c.is_empty() {
+        return Some(cwd);
+    }
+    // Fold all -C values in order, matching git's `cd`-semantics:
+    // absolute value resets the base; relative value joins onto it.
+    let resolved = dash_c.iter().fold(cwd, |base, &segment| {
+        let p = PathBuf::from(segment);
+        if p.is_absolute() {
+            p
+        } else {
+            base.join(segment)
+        }
+    });
+    Some(resolved)
 }
 
 #[cfg(test)]
