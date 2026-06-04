@@ -227,17 +227,20 @@ fn write_marker_block(rc_path: &std::path::Path) -> Result<()> {
 ///   - Inverted block: END appears before START
 ///   - Orphaned END markers with no preceding START
 ///
-/// The invariant: after this call, the returned string contains neither
-/// `BLOCK_START_MARKER` nor `BLOCK_END_MARKER`.
+/// Marker detection uses full-line equality (`line.trim() == MARKER`), not
+/// substring matching.  A user line that merely *mentions* the marker text
+/// (e.g. `echo "# >>> git-prism shim >>>"`) is preserved unchanged.  Only a
+/// line whose entire trimmed content is the marker string is treated as a
+/// block boundary.
 fn strip_all_marker_blocks(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut inside_block = false;
 
     for line in content.lines() {
-        if line.contains(BLOCK_START_MARKER) {
+        if line.trim() == BLOCK_START_MARKER {
             // Enter managed block; discard this line.
             inside_block = true;
-        } else if line.contains(BLOCK_END_MARKER) {
+        } else if line.trim() == BLOCK_END_MARKER {
             // Exit managed block; discard this line regardless of whether we
             // saw a matching START (handles orphaned END markers).
             inside_block = false;
@@ -510,6 +513,39 @@ mod tests {
             after.matches(BLOCK_START_MARKER).count(),
             1,
             "exactly one managed block must remain; got:\n{after}"
+        );
+    }
+
+    /// ADVERSARIAL QA (issue #355, gate-3 pass 2): a user line that merely
+    /// *contains* the start-marker text as a substring (e.g. an `echo` or a
+    /// comment that references the marker, or instructions the tool itself
+    /// printed and the user pasted as a note) must NOT cause the writer to treat
+    /// everything after it as a managed block and silently delete it.
+    ///
+    /// `strip_all_marker_blocks` keys on `line.contains(BLOCK_START_MARKER)`, so
+    /// the substring flips `inside_block = true` and every following user line is
+    /// dropped until an END marker appears — and if none does, deletion runs to
+    /// EOF. This is real data loss of user-owned rc content.
+    #[test]
+    fn write_rc_block_does_not_eat_user_lines_that_mention_the_marker_substring() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        // No real managed block here — just a user comment/echo that happens to
+        // quote the marker text, followed by genuine user config.
+        let initial = format!(
+            "export EDITOR=vim\necho \"paste the {BLOCK_START_MARKER} line into your rc\"\nexport SECRET_TOKEN=keepme\nalias gp='git-prism'\n"
+        );
+        std::fs::write(home.join(".zshenv"), &initial).unwrap();
+        write_rc_block_for_shell(home, "zsh").unwrap();
+        let after = std::fs::read_to_string(home.join(".zshenv")).unwrap();
+        assert!(
+            after.contains("export SECRET_TOKEN=keepme"),
+            "user config after a line that only mentions the marker substring must \
+             be preserved, not deleted; got:\n{after}"
+        );
+        assert!(
+            after.contains("alias gp='git-prism'"),
+            "all trailing user config must survive; got:\n{after}"
         );
     }
 
