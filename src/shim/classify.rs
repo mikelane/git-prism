@@ -6,16 +6,16 @@
 
 /// The full result of classifying an argv slice.
 ///
-/// `classification` is the routing decision; `dash_c` carries every `-C <path>`
-/// value in argv order so the caller can apply git's `cd`-semantics fold:
-/// `git -C a -C b` means `cd a; cd b`, not "use `b` against cwd".
+/// `classification` is the routing decision; `repo_dir_overrides` carries every
+/// `-C <path>` value in argv order so the caller can apply git's `cd`-semantics
+/// fold: `git -C a -C b` means `cd a; cd b`, not "use `b` against cwd".
 ///
 /// An empty `Vec` means no `-C` was present.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClassifyResult<'a> {
     pub(crate) classification: Classification<'a>,
     /// All `-C <path>` values in argv order (empty when none).
-    pub(crate) dash_c: Vec<&'a str>,
+    pub(crate) repo_dir_overrides: Vec<&'a str>,
 }
 
 /// The result of classifying a `git …` or `gh …` argv slice.
@@ -49,12 +49,13 @@ pub(crate) enum Classification<'a> {
 ///
 /// For `git` invocations, leading global options (e.g. `-C <path>`,
 /// `-c <name=value>`, `--git-dir <path>`) are skipped to locate the real
-/// subcommand.  All `-C <path>` values are collected in order into `dash_c`.
+/// subcommand.  All `-C <path>` values are collected in order into
+/// `repo_dir_overrides`.
 pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> ClassifyResult<'a> {
     if argv.len() < 2 {
         return ClassifyResult {
             classification: Classification::Passthrough,
-            dash_c: vec![],
+            repo_dir_overrides: vec![],
         };
     }
     // argv[0] may be an absolute path (e.g. /tmp/bin/gh) when invoked via a
@@ -71,36 +72,37 @@ pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> ClassifyResult<'a> {
             let rest = &argv[2..];
             ClassifyResult {
                 classification: classify_gh(subcommand, rest),
-                dash_c: vec![],
+                repo_dir_overrides: vec![],
             }
         }
         _ => {
-            let (subcommand, rest, dash_c) = skip_git_global_options(&argv[1..]);
+            let (subcommand, rest, repo_dir_overrides) = skip_git_global_options(&argv[1..]);
             let subcommand = match subcommand {
                 Some(s) => s,
                 None => {
                     return ClassifyResult {
                         classification: Classification::Passthrough,
-                        dash_c: vec![],
+                        repo_dir_overrides: vec![],
                     };
                 }
             };
             ClassifyResult {
                 classification: classify_git(subcommand, rest),
-                dash_c,
+                repo_dir_overrides,
             }
         }
     }
 }
 
-/// Skip leading git global options and return `(subcommand, rest, dash_c)`.
+/// Skip leading git global options and return
+/// `(subcommand, rest, repo_dir_overrides)`.
 ///
 /// `tokens` is `argv[1..]` (everything after the binary name).  Returns the
 /// first non-option token as the subcommand, the remaining tokens as `rest`,
-/// and all `-C <path>` values in argv order as `dash_c`.
+/// and all `-C <path>` values in argv order as `repo_dir_overrides`.
 ///
-/// Callers fold `dash_c` with `cd`-semantics to resolve the repo path:
-/// `git -C a -C b` → `cd a; cd b` → repo at `a/b` when `b` is relative.
+/// Callers fold `repo_dir_overrides` with `cd`-semantics to resolve the repo
+/// path: `git -C a -C b` → `cd a; cd b` → repo at `a/b` when `b` is relative.
 ///
 /// If an unrecognised leading `-`-prefixed token is encountered the safe
 /// default is to return `(None, &[], vec![])` so the caller produces Passthrough.
@@ -108,7 +110,7 @@ fn skip_git_global_options<'a>(
     tokens: &'a [&'a str],
 ) -> (Option<&'a str>, &'a [&'a str], Vec<&'a str>) {
     let mut i = 0;
-    let mut dash_c: Vec<&'a str> = vec![];
+    let mut repo_dir_overrides: Vec<&'a str> = vec![];
 
     while i < tokens.len() {
         let tok = tokens[i];
@@ -116,7 +118,7 @@ fn skip_git_global_options<'a>(
         // Short value-taking options (two-token form only).
         if tok == "-C" {
             if let Some(val) = tokens.get(i + 1).copied() {
-                dash_c.push(val);
+                repo_dir_overrides.push(val);
             }
             i += 2;
             continue;
@@ -176,7 +178,7 @@ fn skip_git_global_options<'a>(
         }
 
         // First non-option token is the subcommand.
-        return (Some(tok), &tokens[i + 1..], dash_c);
+        return (Some(tok), &tokens[i + 1..], repo_dir_overrides);
     }
 
     (None, &[], vec![])
@@ -525,7 +527,7 @@ mod tests {
                 classification: Classification::Manifest {
                     range: "HEAD~1..HEAD"
                 },
-                dash_c: vec!["/path"],
+                repo_dir_overrides: vec!["/path"],
             }
         );
     }
@@ -538,7 +540,7 @@ mod tests {
             result,
             ClassifyResult {
                 classification: Classification::History { range: "A..B" },
-                dash_c: vec![],
+                repo_dir_overrides: vec![],
             }
         );
     }
@@ -551,7 +553,7 @@ mod tests {
             result,
             ClassifyResult {
                 classification: Classification::ShowSnapshot { sha: "abc1234" },
-                dash_c: vec![],
+                repo_dir_overrides: vec![],
             }
         );
     }
@@ -564,7 +566,7 @@ mod tests {
             result,
             ClassifyResult {
                 classification: Classification::Manifest { range: "A..B" },
-                dash_c: vec!["/repo"],
+                repo_dir_overrides: vec!["/repo"],
             }
         );
     }
@@ -577,7 +579,7 @@ mod tests {
             result,
             ClassifyResult {
                 classification: Classification::Manifest { range: "A..B" },
-                dash_c: vec![],
+                repo_dir_overrides: vec![],
             }
         );
     }
@@ -590,7 +592,7 @@ mod tests {
             result,
             ClassifyResult {
                 classification: Classification::Passthrough,
-                dash_c: vec![],
+                repo_dir_overrides: vec![],
             }
         );
     }
@@ -604,7 +606,233 @@ mod tests {
             result,
             ClassifyResult {
                 classification: Classification::Manifest { range: "A..B" },
-                dash_c: vec!["/first", "/last"],
+                repo_dir_overrides: vec!["/first", "/last"],
+            }
+        );
+    }
+
+    #[test]
+    fn it_preserves_relative_stacked_dash_c_order_for_cd_semantics() {
+        // git -C a -C b diff A..B  →  repo_dir_overrides = ["a", "b"] in argv
+        // order. The fold in resolve_repo_path turns this into cwd/a/b
+        // (cd a; cd b); the classifier's only job is to preserve order
+        // faithfully, NOT to collapse to the last value. A bug that kept only
+        // the last token would yield ["b"] and silently target the wrong repo
+        // (issue #356).
+        let result = classify(&["git", "-C", "a", "-C", "b", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec!["a", "b"],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_dash_c_value_that_looks_like_a_subcommand() {
+        // git -C log diff A..B  →  "log" is the -C PATH, not the subcommand.
+        // The real subcommand is "diff". A naive scanner that treated the token
+        // after -C as a subcommand would misclassify this as History.
+        let result = classify(&["git", "-C", "log", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec!["log"],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_dash_lowercase_c_value_that_looks_like_a_subcommand() {
+        // git -c diff log A..B  →  "diff" is the -c CONFIG value, not the
+        // subcommand. The real subcommand is "log". -c carries no path, so
+        // repo_dir_overrides stays empty. A scanner that mistook "diff" for the
+        // subcommand would classify Manifest instead of History.
+        let result = classify(&["git", "-c", "diff", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_long_global_in_space_separated_form() {
+        // git --git-dir /p/.git diff A..B  →  the value "/p/.git" is the
+        // --git-dir argument (two-token form), NOT the subcommand. The `=`
+        // form is covered elsewhere; this guards the space-separated branch.
+        let result = classify(&["git", "--git-dir", "/p/.git", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_work_tree_global_in_space_separated_form() {
+        // git --work-tree /wt log A..B  →  History; "/wt" is consumed as the
+        // --work-tree value, "log" is the subcommand.
+        let result = classify(&["git", "--work-tree", "/wt", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_work_tree_global_in_equals_form() {
+        // git --work-tree=/wt diff A..B  →  Manifest (one-token --opt=value form).
+        let result = classify(&["git", "--work-tree=/wt", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_exec_path_value_form_and_bare_form() {
+        // --exec-path has two shapes: `--exec-path=<dir>` (one token, valued)
+        // and bare `--exec-path` (valueless query). Both must be skipped to
+        // reach the subcommand. The bare form does NOT consume the next token.
+        let valued = classify(&["git", "--exec-path=/usr/libexec", "diff", "A..B"]);
+        assert_eq!(
+            valued,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+        let bare = classify(&["git", "--exec-path", "diff", "A..B"]);
+        assert_eq!(
+            bare,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_bare_paginate_valueless_global() {
+        // git -p diff A..B  →  Manifest; -p is a valueless pager flag and must
+        // NOT consume "diff" as a value.
+        let result = classify(&["git", "-p", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_handles_interleaved_globals_around_dash_c() {
+        // git -c k=v -C /repo --no-pager -c j=w diff A..B
+        // repo_dir_overrides collects only the -C value; the three
+        // -c/--no-pager globals are skipped without disturbing collection or
+        // subcommand location.
+        let result = classify(&[
+            "git",
+            "-c",
+            "k=v",
+            "-C",
+            "/repo",
+            "--no-pager",
+            "-c",
+            "j=w",
+            "diff",
+            "A..B",
+        ]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec!["/repo"],
+            }
+        );
+    }
+
+    #[test]
+    fn it_interleaves_multiple_dash_c_among_other_globals_preserving_order() {
+        // git -C a -c k=v -C b diff A..B  →  repo_dir_overrides = ["a", "b"] in
+        // order, with the -c global skipped in between. Proves collection order
+        // is driven by -C position, not by adjacency.
+        let result = classify(&["git", "-C", "a", "-c", "k=v", "-C", "b", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec!["a", "b"],
+            }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_when_dash_c_is_last_token_with_no_value() {
+        // git -C  (value-taking global as the final token, no value present)
+        // The scanner must not panic on the missing value and must fall to the
+        // safe Passthrough default rather than inventing a subcommand.
+        let result = classify(&["git", "-C"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Passthrough,
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_when_long_value_global_is_last_token_with_no_value() {
+        // git --git-dir  (two-token global with its value missing)  →  Passthrough.
+        let result = classify(&["git", "--git-dir"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Passthrough,
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_when_only_globals_present_with_no_subcommand() {
+        // git -c k=v --no-pager  (all globals, no subcommand at all)  →  Passthrough.
+        let result = classify(&["git", "-c", "k=v", "--no-pager"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Passthrough,
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_unknown_flag_after_valid_globals_discarding_overrides() {
+        // git -C /repo --bogus diff A..B  →  the unknown flag forces the safe
+        // default, and repo_dir_overrides is reset to empty so a stale -C cannot
+        // leak into a Passthrough result and mis-route a later handler.
+        let result = classify(&["git", "-C", "/repo", "--bogus", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Passthrough,
+                repo_dir_overrides: vec![],
             }
         );
     }

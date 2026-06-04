@@ -78,7 +78,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     // 3. Classify the subcommand.
     let ClassifyResult {
         classification,
-        dash_c,
+        repo_dir_overrides,
     } = classify(argv);
     let subcommand = classification_to_subcommand(&classification);
     if classification == Classification::Passthrough {
@@ -90,7 +90,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     // 4. Dispatch to the handler.
     //    When `-C <path>` was present in the argv, use that path as the repo
     //    root; otherwise fall back to the usual env-var / cwd resolution.
-    let repo_path = match resolve_repo_path(env, &dash_c) {
+    let repo_path = match resolve_repo_path(env, &repo_dir_overrides) {
         Some(p) => p,
         None => {
             metrics.record_shim_invocation(ShimOutcome::Passthrough);
@@ -150,7 +150,7 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
 ///
 /// The `GIT_PRISM_CWD_UNAVAILABLE` env key is reserved for testing: when set,
 /// this function behaves as if `current_dir()` failed.
-fn resolve_repo_path(env: &dyn EnvSource, dash_c: &[&str]) -> Option<PathBuf> {
+fn resolve_repo_path(env: &dyn EnvSource, repo_dir_overrides: &[&str]) -> Option<PathBuf> {
     if let Some(repo) = env.get("GIT_PRISM_REPO") {
         return Some(PathBuf::from(repo));
     }
@@ -160,12 +160,12 @@ fn resolve_repo_path(env: &dyn EnvSource, dash_c: &[&str]) -> Option<PathBuf> {
         return None;
     }
     let cwd = std::env::current_dir().ok()?;
-    if dash_c.is_empty() {
+    if repo_dir_overrides.is_empty() {
         return Some(cwd);
     }
     // Fold all -C values in order, matching git's `cd`-semantics:
     // absolute value resets the base; relative value joins onto it.
-    let resolved = dash_c.iter().fold(cwd, |base, &segment| {
+    let resolved = repo_dir_overrides.iter().fold(cwd, |base, &segment| {
         let p = PathBuf::from(segment);
         if p.is_absolute() {
             p
