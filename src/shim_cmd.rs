@@ -164,15 +164,31 @@ const BLOCK_START_MARKER: &str = "# >>> git-prism shim >>>";
 const BLOCK_END_MARKER: &str = "# <<< git-prism shim <<<";
 
 /// The managed PATH block content (without markers).
+///
+/// Strips the shim dir from ALL positions in PATH (front, middle, or end) before
+/// prepending it exactly once. The implementation wraps PATH in colons so every
+/// entry is colon-bounded on both sides, applies a global substitution, then
+/// unwraps. Only the exact shim dir path is removed; superstring siblings such as
+/// `git-prism/bin-extra` are not affected because the patterns are colon-anchored.
 const SHIM_PATH_BLOCK_BODY: &str = r#"case ":$PATH:" in
   ":$HOME/.local/share/git-prism/bin:"*) ;;
-  *) PATH="$HOME/.local/share/git-prism/bin:${PATH//:$HOME\/.local\/share\/git-prism\/bin:/:}"; export PATH ;;
+  *)
+    _gp_shim="$HOME/.local/share/git-prism/bin"
+    _gp_p=":${PATH}:"
+    _gp_p="${_gp_p//:${_gp_shim}:/:}"
+    _gp_p="${_gp_p#:}"
+    _gp_p="${_gp_p%:}"
+    PATH="${_gp_shim}${_gp_p:+:${_gp_p}}"
+    export PATH
+    unset _gp_shim _gp_p
+    ;;
 esac"#;
 
 /// Write (or replace) the marker-delimited PATH block in the given rc file.
 ///
-/// If the file already contains the markers, the block between them is replaced.
-/// If not, the block is appended. Creates the file if it doesn't exist.
+/// Strips ALL existing managed blocks and stray markers (handles corruption
+/// from hand-edits, interrupted writes, or prior buggy runs) then appends
+/// exactly one canonical block.  Creates the file if it doesn't exist.
 fn write_marker_block(home: &std::path::Path, rc_path: &std::path::Path) -> Result<()> {
     let existing = if rc_path.exists() {
         std::fs::read_to_string(rc_path)?
@@ -182,17 +198,18 @@ fn write_marker_block(home: &std::path::Path, rc_path: &std::path::Path) -> Resu
 
     let new_block = format!("{BLOCK_START_MARKER}\n{SHIM_PATH_BLOCK_BODY}\n{BLOCK_END_MARKER}\n");
 
-    let new_content = if existing.contains(BLOCK_START_MARKER) {
-        // Replace the existing block between markers (handles the end marker too).
-        replace_marker_block(&existing, &new_block)
+    let cleaned = strip_all_marker_blocks(&existing);
+
+    // Append the single canonical block with a blank-line separator.
+    let separator = if cleaned.ends_with('\n') || cleaned.is_empty() {
+        ""
     } else {
-        // Append the block, ensuring a single newline separator.
-        let separator = if existing.ends_with('\n') || existing.is_empty() {
-            ""
-        } else {
-            "\n"
-        };
-        format!("{existing}{separator}\n{new_block}")
+        "\n"
+    };
+    let new_content = if cleaned.is_empty() {
+        new_block
+    } else {
+        format!("{cleaned}{separator}\n{new_block}")
     };
 
     std::fs::write(rc_path, new_content)?;
@@ -205,22 +222,42 @@ fn write_marker_block(home: &std::path::Path, rc_path: &std::path::Path) -> Resu
     Ok(())
 }
 
-/// Replace the content between (and including) the start and end markers with `new_block`.
-fn replace_marker_block(content: &str, new_block: &str) -> String {
-    let start = content.find(BLOCK_START_MARKER);
-    let end = content.find(BLOCK_END_MARKER);
-    match (start, end) {
-        (Some(s), Some(e)) => {
-            let after_end = e + BLOCK_END_MARKER.len();
-            // Consume the trailing newline after the end marker if present.
-            let after_end = if content[after_end..].starts_with('\n') {
-                after_end + 1
-            } else {
-                after_end
-            };
-            format!("{}{}{}", &content[..s], new_block, &content[after_end..])
+/// Remove every git-prism managed block (and any stray marker lines) from `content`.
+///
+/// Handles all corruption forms:
+///   - Well-formed START..END pairs (any number of them)
+///   - Truncated block: START present, END missing
+///   - Inverted block: END appears before START
+///   - Orphaned END markers with no preceding START
+///
+/// The invariant: after this call, the returned string contains neither
+/// `BLOCK_START_MARKER` nor `BLOCK_END_MARKER`.
+fn strip_all_marker_blocks(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut inside_block = false;
+
+    for line in content.lines() {
+        if line.contains(BLOCK_START_MARKER) {
+            // Enter managed block; discard this line.
+            inside_block = true;
+        } else if line.contains(BLOCK_END_MARKER) {
+            // Exit managed block; discard this line regardless of whether we
+            // saw a matching START (handles orphaned END markers).
+            inside_block = false;
+        } else if !inside_block {
+            result.push_str(line);
+            result.push('\n');
         }
-        _ => format!("{content}\n{new_block}"),
+        // Lines inside a managed block are silently dropped.
+    }
+
+    // Trim trailing blank lines introduced by block removal, but preserve a
+    // single trailing newline when the original content ended with one.
+    let trimmed = result.trim_end_matches('\n');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
     }
 }
 
