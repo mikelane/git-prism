@@ -14,6 +14,7 @@ use crate::tools::{
 };
 
 /// How often the orphan watchdog polls the parent pid.
+#[cfg(unix)]
 const ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Returns `true` when the process has been reparented to init/launchd (ppid == 1),
@@ -22,7 +23,8 @@ const ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 ///
 /// The argument is injected for testability — callers pass `libc::getppid() as u32`
 /// in production and a fixed value in unit tests.
-pub fn should_exit_orphaned(ppid: u32) -> bool {
+#[cfg(unix)]
+pub(crate) fn should_exit_orphaned(ppid: u32) -> bool {
     ppid == 1
 }
 
@@ -35,6 +37,7 @@ pub fn should_exit_orphaned(ppid: u32) -> bool {
 /// serve future entirely. The hard-exit is intentional — a reparented process has
 /// no meaningful cleanup to do (telemetry flush is best-effort; the OTLP collector
 /// is likely gone too).
+#[cfg(unix)]
 fn spawn_orphan_watchdog() {
     tokio::spawn(async move {
         loop {
@@ -58,6 +61,12 @@ fn spawn_orphan_watchdog() {
         }
     });
 }
+
+/// On non-Unix targets there is no `getppid()` / init-reparenting signal, so the
+/// orphan watchdog is a no-op. The MCP client owns server lifetime there and the
+/// stdin-EOF path still handles graceful shutdown.
+#[cfg(not(unix))]
+fn spawn_orphan_watchdog() {}
 
 /// Convert a `ChangeScope` variant to a static metric label string.
 fn change_scope_label(scope: ChangeScope) -> &'static str {
@@ -1133,6 +1142,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_returns_true_when_ppid_is_init() {
         assert!(
@@ -1142,6 +1152,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_returns_false_when_ppid_is_two() {
         assert!(
@@ -1150,6 +1161,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_returns_false_for_typical_shell_pid() {
         // Realistic shell pids are in the thousands; must not trigger exit.
@@ -1159,6 +1171,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn it_returns_false_when_ppid_is_zero() {
         // `getppid() == 0` can occur in a Linux PID namespace whose parent lives
