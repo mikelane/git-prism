@@ -5,8 +5,6 @@ pub(crate) mod metrics;
 pub(crate) mod pagination;
 pub(crate) mod privacy;
 mod server;
-// The shim module is complete but not yet wired to argv[0] dispatch (#287).
-#[allow(dead_code)]
 mod shim;
 mod shim_cmd;
 mod telemetry;
@@ -18,6 +16,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use git::refs::{RefRange, parse_range, validate_commit_range};
+use shim::real_git::RealGitExec as _;
 use tools::{
     ContextOptions, FunctionContextResponse, ManifestOptions, SnapshotOptions,
     build_function_context_with_options, build_snapshots, collect_all_history_pages,
@@ -275,6 +274,16 @@ async fn main() -> std::process::ExitCode {
             env: &agent_detection::StdEnvSource,
             argv0: args.first().copied().unwrap_or("git"),
         };
+
+        // Per-invocation opt-out: exec the real binary immediately with zero
+        // overhead — no telemetry init, no classification, no metric recording.
+        // This is the first-class escape hatch for callers that set
+        // GIT_PRISM_PASSTHROUGH=1 (or GIT_PRISM_DISABLE=1) to skip the shim
+        // entirely for a specific invocation or test suite run.
+        if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
+            return exec.passthrough(&args);
+        }
+
         // Initialize telemetry when an OTLP endpoint is configured. The guard
         // must live until after run_shim returns — on the exec-replace
         // (passthrough) path the process is replaced and Rust's drop glue
@@ -298,7 +307,7 @@ async fn main() -> std::process::ExitCode {
             &exec,
             &mut telemetry_guard,
         );
-        telemetry_guard.force_flush();
+        telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
         return exit_code;
     }
 
