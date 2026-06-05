@@ -170,7 +170,7 @@ GIT_PRISM_INSIDE_SHIM=1 git diff main..HEAD   # bypasses the shim
 
 Set `GIT_PRISM_PASSTHROUGH=1` (or the alias `GIT_PRISM_DISABLE=1`) to make the
 shim exec the real git/gh **immediately** — before telemetry init, before
-classification, with zero added latency:
+classification, with near-zero added latency:
 
 ```bash
 GIT_PRISM_PASSTHROUGH=1 git diff main..HEAD   # real git, no shim overhead
