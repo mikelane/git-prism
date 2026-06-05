@@ -184,49 +184,55 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
   # decline, and already-in-PATH (no prompt needed).
   # ===========================================================================
 
-  Rule: User consents to auto-PATH setup — rc file is updated idempotently
+  Rule: User consents to auto-PATH setup — rc files are updated idempotently
 
     @ISSUE-325
-    Scenario: Accepting PATH setup appends the export line to the shell rc
+    Scenario: Accepting PATH setup writes the managed block to .zshenv for agent shells
       Given an isolated HOME directory
       And the shim directory is not in PATH
-      And a shell rc file exists at ".zprofile" under HOME
       When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
       Then the exit code is 0
-      And the rc file ".zprofile" under HOME contains the shim directory export line
+      And the rc file ".zshenv" under HOME contains the shim directory export line
       And the output contains "restart"
 
     @ISSUE-325
-    Scenario: Re-running install does not append the export line a second time
+    Scenario: Accepting PATH setup writes the managed block to .zshrc to win over brew prepends
       Given an isolated HOME directory
       And the shim directory is not in PATH
-      And a shell rc file exists at ".zprofile" under HOME
+      When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
+      Then the exit code is 0
+      And the rc file ".zshrc" under HOME contains the shim directory export line
+
+    @ISSUE-325
+    Scenario: Re-running install does not duplicate the managed block
+      Given an isolated HOME directory
+      And the shim directory is not in PATH
       When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
       And I run "git-prism shim install" and consent to PATH setup with the isolated HOME again
-      Then the rc file ".zprofile" under HOME contains the shim export line exactly once
+      Then the rc file ".zshenv" under HOME contains the shim export line exactly once
 
-  Rule: User declines auto-PATH setup — rc file is not modified
+  Rule: User declines auto-PATH setup — rc files are not modified
 
     @ISSUE-325
-    Scenario: Declining PATH setup prints manual instructions and leaves rc unchanged
+    Scenario: Declining PATH setup prints manual instructions and leaves rc files unchanged
       Given an isolated HOME directory
       And the shim directory is not in PATH
-      And a shell rc file exists at ".zprofile" under HOME
+      And a shell rc file exists at ".zshenv" under HOME
       When I run "git-prism shim install" and decline PATH setup with the isolated HOME
       Then the exit code is 0
-      And the rc file ".zprofile" under HOME is unchanged
+      And the rc file ".zshenv" under HOME is unchanged
       And the output contains ".local/share/git-prism/bin"
 
-  Rule: Shim directory already in PATH — no prompt, no rc modification
+  Rule: Shim directory already first in PATH — no prompt, no rc modification
 
     @ISSUE-325
-    Scenario: No PATH prompt when shim directory is already in PATH
+    Scenario: No PATH prompt when shim directory is already first in PATH
       Given an isolated HOME directory
       And the shim directory is already in PATH
-      And a shell rc file exists at ".zprofile" under HOME
+      And a shell rc file exists at ".zshenv" under HOME
       When I run "git-prism shim install" with the isolated HOME
       Then the exit code is 0
-      And the rc file ".zprofile" under HOME is unchanged
+      And the rc file ".zshenv" under HOME is unchanged
 
   # ===========================================================================
   # @ISSUE-326 — redirect hook removal (hard removal, no deprecation phase)
