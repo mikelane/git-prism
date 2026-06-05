@@ -315,6 +315,26 @@ mod tests {
         );
     }
 
+    /// A non-zero exit code from the real binary must propagate through the
+    /// opt-out passthrough path unchanged.
+    #[test]
+    fn it_propagates_nonzero_exit_code_on_passthrough_opt_out() {
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            ("GIT_PRISM_PASSTHROUGH", "1"),
+        ]));
+        let exec = SpyExec::new(ExitCode::from(2));
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+
+        assert!(
+            exec.called.get(),
+            "expected immediate passthrough when GIT_PRISM_PASSTHROUGH=1"
+        );
+        assert_eq!(code, ExitCode::from(2));
+    }
+
     /// With opt-out unset, a classified agent command must NOT passthrough immediately.
     #[test]
     fn it_does_not_passthrough_immediately_when_opt_out_var_is_unset() {
@@ -580,10 +600,10 @@ mod tests {
             std::env::remove_var("GIT_PRISM_OTLP_ENDPOINT");
         }
         drop(guard);
-        // Must return well before the 5 s SDK export timeout.
+        // Must return well before the 2 s budget (500ms cap × 4 margin).
         assert!(
-            elapsed.as_secs() < 5,
-            "structured-path bounded flush must not stall for the full SDK export timeout; \
+            elapsed < Duration::from_secs(2),
+            "structured-path bounded flush must not stall significantly beyond the 500ms cap; \
              took {elapsed:?}"
         );
     }

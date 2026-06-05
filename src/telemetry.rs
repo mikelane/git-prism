@@ -767,9 +767,9 @@ mod tests {
         }
         drop(guard);
         assert!(
-            elapsed < EXPORT_TIMEOUT,
-            "bounded flush must abandon a stalled exporter well before the {EXPORT_TIMEOUT:?} \
-             export timeout; took {elapsed:?}"
+            elapsed < Duration::from_secs(1),
+            "bounded flush must abandon a stalled exporter well before the 1s budget \
+             (200ms cap × 5 margin); took {elapsed:?}"
         );
     }
 
@@ -784,17 +784,12 @@ mod tests {
     /// return exit_code;                                    // guard dropped HERE
     /// ```
     ///
-    /// The #361 fix bounds `force_flush_bounded`, but the very next thing that
-    /// happens is the guard going out of scope, which runs `Drop::drop` →
-    /// `tp.shutdown()` + `mp.shutdown()`. Those shutdown calls are UNBOUNDED and
-    /// each block up to `EXPORT_TIMEOUT` (5 s) when the collector is a black
-    /// hole. So the bounded flush saves nothing: the agent's `git diff` still
-    /// stalls for multiple seconds on process teardown — the exact #360 symptom
-    /// #361 set out to eliminate.
-    ///
-    /// This test asserts the total teardown (flush + drop) returns within a
-    /// budget well under a single `EXPORT_TIMEOUT`. It FAILS today because
-    /// `Drop` is unbounded.
+    /// The #361 fix bounds `force_flush_bounded`, so the agent's teardown no
+    /// longer stalls for multiple seconds even when the collector is unreachable.
+    /// This test verifies that the *entire* sequence — bounded flush followed by
+    /// the guard's `Drop` (which runs `tp.shutdown()` + `mp.shutdown()`) — stays
+    /// bounded against a black-hole endpoint. This regression guard prevents #360
+    /// from recurring via either the force_flush path or the guard-drop path.
     #[tokio::test]
     async fn qa_structured_path_total_teardown_is_bounded_on_black_hole_endpoint() {
         use crate::shim::STRUCTURED_FLUSH_TIMEOUT;
