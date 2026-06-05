@@ -37,9 +37,32 @@ const PASSTHROUGH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 /// call indefinitely (the #360 multi-minute stall scenario).
 pub(crate) const STRUCTURED_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Returns `true` when the caller has requested an immediate passthrough,
+/// skipping all shim processing and telemetry.
+///
+/// Checked in `main.rs` **before** `telemetry::init_quiet()` so opted-out
+/// calls have zero added latency and emit no telemetry at all.  Also checked
+/// at the top of `run_shim` for callers that already hold a guard.
+///
+/// Truthy values: `"1"`, `"true"` (case-insensitive).
+/// Falsy / absent: empty string, `"0"`, `"false"`, or unset.
+pub(crate) fn passthrough_opt_out_requested(env: &dyn EnvSource) -> bool {
+    for key in &["GIT_PRISM_PASSTHROUGH", "GIT_PRISM_DISABLE"] {
+        if let Some(val) = env.get(key) {
+            let lower = val.to_ascii_lowercase();
+            if lower == "1" || lower == "true" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Main entry point for shim mode.
 ///
 /// Decision tree:
+/// 0. `GIT_PRISM_PASSTHROUGH` / `GIT_PRISM_DISABLE` is truthy → immediate exec
+///    (opt-out; no metrics recorded, no telemetry flush needed).
 /// 1. `GIT_PRISM_INSIDE_SHIM` is set → passthrough (loop-break sentinel).
 /// 2. `detect_calling_agent` returns `None` → passthrough (non-agent caller).
 /// 3. `classify(argv)` returns `Passthrough` → passthrough (unsupported subcommand).
@@ -47,20 +70,21 @@ pub(crate) const STRUCTURED_FLUSH_TIMEOUT: Duration = Duration::from_millis(500)
 ///
 /// # Metrics invariant
 ///
-/// Every path through this function calls `record_shim_invocation` **exactly
-/// once**.  `record_shim_classification` is called at most once, only on the
-/// structured-dispatch path (step 4) — never on passthrough or loop-break
-/// paths.  This invariant ensures dashboards that aggregate
-/// `shim_invocations_total` get an accurate per-call count.
+/// Steps 1–3 call `record_shim_invocation` **exactly once**.  Step 0
+/// (opt-out) short-circuits before any metric recording so opted-out calls
+/// do not appear in dashboards.  `record_shim_classification` is called at
+/// most once, only on the structured-dispatch path (step 4).  This invariant
+/// ensures dashboards that aggregate `shim_invocations_total` get an accurate
+/// per-call count for non-opted-out invocations.
 ///
 /// # Telemetry flush on passthrough
 ///
 /// On passthrough paths `exec.passthrough()` calls `execvp`, which replaces
 /// the process image and never returns.  `Drop` glue and the flush in
-/// `main.rs` are unreachable on those paths.  `telemetry_guard.force_flush()`
+/// `main.rs` are unreachable on those paths.  `telemetry_guard.force_flush_bounded()`
 /// is called on every passthrough branch **before** `exec.passthrough()` so
-/// the buffered metric reaches the OTLP endpoint.  A second flush / `Drop`
-/// is a documented no-op (`TelemetryGuard::force_flush` is idempotent).
+/// the buffered metric reaches the OTLP endpoint.  The step-0 opt-out path
+/// skips the flush entirely (no telemetry was initialized).
 pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     argv: &[&str],
     env: &E,
@@ -68,6 +92,12 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     telemetry_guard: &mut TelemetryGuard,
 ) -> ExitCode {
     let metrics = crate::metrics::get();
+
+    // 0. Per-invocation passthrough opt-out: exec the real binary immediately,
+    //    skipping telemetry and classification entirely.
+    if passthrough_opt_out_requested(env) {
+        return exec.passthrough(argv);
+    }
 
     // 1. Loop-break sentinel: a nested git call from within the shim.
     if env.get("GIT_PRISM_INSIDE_SHIM").is_some() {
@@ -200,6 +230,135 @@ mod tests {
     }
 
     // ---- decision path tests ----
+
+    // ---- passthrough_opt_out_requested unit tests ----
+
+    #[test]
+    fn opt_out_recognizes_passthrough_equals_one() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_PASSTHROUGH", "1")]));
+        assert!(passthrough_opt_out_requested(&env));
+    }
+
+    #[test]
+    fn opt_out_recognizes_passthrough_equals_true_case_insensitive() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_PASSTHROUGH", "TRUE")]));
+        assert!(passthrough_opt_out_requested(&env));
+    }
+
+    #[test]
+    fn opt_out_recognizes_disable_alias() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_DISABLE", "1")]));
+        assert!(passthrough_opt_out_requested(&env));
+    }
+
+    #[test]
+    fn opt_out_inactive_when_var_is_zero() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_PASSTHROUGH", "0")]));
+        assert!(!passthrough_opt_out_requested(&env));
+    }
+
+    #[test]
+    fn opt_out_inactive_when_var_is_false() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_PASSTHROUGH", "false")]));
+        assert!(!passthrough_opt_out_requested(&env));
+    }
+
+    #[test]
+    fn opt_out_inactive_when_var_is_empty() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_PASSTHROUGH", "")]));
+        assert!(!passthrough_opt_out_requested(&env));
+    }
+
+    #[test]
+    fn opt_out_inactive_when_var_is_unset() {
+        let env = MapEnv(HashMap::new());
+        assert!(!passthrough_opt_out_requested(&env));
+    }
+
+    /// With `GIT_PRISM_PASSTHROUGH=1`, the shim must exec the real binary
+    /// immediately (before any classification or telemetry).
+    #[test]
+    fn it_passes_through_immediately_when_passthrough_env_var_is_set() {
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            ("GIT_PRISM_PASSTHROUGH", "1"),
+        ]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        // Even though this is a classified command (diff), the opt-out must
+        // cause an immediate passthrough before any classification runs.
+        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+
+        assert!(
+            exec.called.get(),
+            "expected immediate passthrough when GIT_PRISM_PASSTHROUGH=1"
+        );
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    /// `GIT_PRISM_DISABLE` is an alias for `GIT_PRISM_PASSTHROUGH`.
+    #[test]
+    fn it_passes_through_immediately_when_disable_alias_is_set() {
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            ("GIT_PRISM_DISABLE", "1"),
+        ]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+
+        assert!(
+            exec.called.get(),
+            "expected immediate passthrough when GIT_PRISM_DISABLE=1"
+        );
+    }
+
+    /// With opt-out unset, a classified agent command must NOT passthrough immediately.
+    #[test]
+    fn it_does_not_passthrough_immediately_when_opt_out_var_is_unset() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Build a minimal two-commit repo so the handler has something to work with.
+        let dir = TempDir::new().unwrap();
+        let repo_path = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "t@t.com"]);
+        run(&["config", "user.name", "T"]);
+        std::fs::write(repo_path.join("a.txt"), "hello\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-m", "first"]);
+        std::fs::write(repo_path.join("b.txt"), "world\n").unwrap();
+        run(&["add", "b.txt"]);
+        run(&["commit", "-m", "second"]);
+
+        let repo_str: &'static str =
+            Box::leak(repo_path.to_string_lossy().into_owned().into_boxed_str());
+
+        // No opt-out var — normal agent dispatch should run the handler.
+        let env = MapEnv(HashMap::from([
+            ("CLAUDECODE", "1"),
+            ("GIT_PRISM_REPO", repo_str),
+        ]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+
+        assert!(
+            !exec.called.get(),
+            "without opt-out, a classified agent command must dispatch to the handler, not passthrough"
+        );
+    }
 
     #[test]
     fn it_passes_through_when_inside_shim_sentinel_is_set() {

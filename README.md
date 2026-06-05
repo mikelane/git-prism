@@ -166,6 +166,27 @@ yourself to force vanilla git for one command:
 GIT_PRISM_INSIDE_SHIM=1 git diff main..HEAD   # bypasses the shim
 ```
 
+### Per-invocation opt-out (`GIT_PRISM_PASSTHROUGH`)
+
+Set `GIT_PRISM_PASSTHROUGH=1` (or the alias `GIT_PRISM_DISABLE=1`) to make the
+shim exec the real git/gh **immediately** — before telemetry init, before
+classification, with zero added latency:
+
+```bash
+GIT_PRISM_PASSTHROUGH=1 git diff main..HEAD   # real git, no shim overhead
+```
+
+This is the first-class alternative to putting `/usr/bin` ahead of the shim on
+`PATH`. Use it to wrap a test suite or tight loop where shim processing and
+telemetry are not desirable:
+
+```bash
+GIT_PRISM_PASSTHROUGH=1 cargo test   # git calls inside tests skip the shim
+```
+
+Accepted truthy values: `1`, `true` (case-insensitive). Any other value (or
+unset) leaves the shim active.
+
 ### Debugging
 
 Set `GIT_PRISM_DEBUG_RESOLVER=1` to print the resolved real-git path to stderr,
@@ -739,6 +760,8 @@ Optional OpenTelemetry instrumentation, disabled by default and opt-in via envir
 | `GIT_PRISM_OTLP_HEADERS` | Planned, not yet wired ([#43](https://github.com/mikelane/git-prism/issues/43)). Setting this variable has no effect today; managed OTLP backends that require auth headers need a local collector proxy. | unset |
 | `GIT_PRISM_SERVICE_NAME` | Service name reported to the backend. | `git-prism` |
 | `GIT_PRISM_SERVICE_VERSION` | Service version reported to the backend. | crate version |
+| `GIT_PRISM_PASSTHROUGH` | Set to `1` or `true` to skip shim processing and telemetry entirely for a single invocation. See [Per-invocation opt-out](#per-invocation-opt-out-git_prism_passthrough). | unset |
+| `GIT_PRISM_DISABLE` | Alias for `GIT_PRISM_PASSTHROUGH`. | unset |
 
 Quick start with Jaeger (any OTLP-compatible backend works):
 ```bash
