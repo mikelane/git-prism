@@ -29,16 +29,24 @@ pub fn should_exit_orphaned(ppid: u32) -> bool {
 /// Spawn a background task that polls the parent pid every [`ORPHAN_POLL_INTERVAL`]
 /// and hard-exits the process when [`should_exit_orphaned`] returns `true`.
 ///
-/// This is a fire-and-forget guard: `tokio::select!` in `run_server` races the
-/// serve future against a never-resolving placeholder, while this task hard-exits
-/// on orphan. The hard-exit is intentional — a reparented process has no meaningful
-/// cleanup to do (telemetry flush is best-effort; the OTLP collector is gone too).
+/// This is a fire-and-forget guard: `run_server` spawns it and then awaits the
+/// serve loop normally; the watchdog runs concurrently on the tokio runtime and
+/// calls `std::process::exit(0)` directly when it detects an orphan, bypassing the
+/// serve future entirely. The hard-exit is intentional — a reparented process has
+/// no meaningful cleanup to do (telemetry flush is best-effort; the OTLP collector
+/// is likely gone too).
 fn spawn_orphan_watchdog() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(ORPHAN_POLL_INTERVAL).await;
-            // SAFETY: getppid() is always safe to call; it never fails.
-            let ppid = unsafe { libc::getppid() } as u32;
+            // SAFETY: `getppid` is a POSIX system call with no preconditions —
+            // it takes no arguments, dereferences no pointers, and touches no
+            // shared state, so there is nothing the caller can violate. It is
+            // also infallible (it cannot return an error).
+            let raw_ppid: libc::pid_t = unsafe { libc::getppid() };
+            // `pid_t` is signed but a real ppid is always >= 1; the cast is a
+            // plain widening reinterpretation used only for the `== 1` compare.
+            let ppid = raw_ppid as u32;
             if should_exit_orphaned(ppid) {
                 eprintln!(
                     "git-prism: parent process exited (ppid == 1); \
@@ -1125,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn it_exits_when_reparented_to_init() {
+    fn it_returns_true_when_ppid_is_init() {
         assert!(
             should_exit_orphaned(1),
             "ppid == 1 means the process was reparented to init/launchd \
@@ -1134,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn it_does_not_exit_when_parent_is_alive() {
+    fn it_returns_false_when_ppid_is_two() {
         assert!(
             !should_exit_orphaned(2),
             "ppid == 2 means a live parent; serve must not exit"
@@ -1142,11 +1150,23 @@ mod tests {
     }
 
     #[test]
-    fn it_does_not_exit_for_typical_shell_parent_pid() {
+    fn it_returns_false_for_typical_shell_pid() {
         // Realistic shell pids are in the thousands; must not trigger exit.
         assert!(
             !should_exit_orphaned(12345),
             "ppid == 12345 is a normal shell pid; serve must not exit"
+        );
+    }
+
+    #[test]
+    fn it_returns_false_when_ppid_is_zero() {
+        // `getppid() == 0` can occur in a Linux PID namespace whose parent lives
+        // outside the namespace. The current predicate does NOT treat this as
+        // orphaned, so the watchdog won't fire for that case. Pinning current
+        // behavior; whether to broaden to `ppid <= 1` is tracked in #366.
+        assert!(
+            !should_exit_orphaned(0),
+            "ppid == 0 (PID-namespace reparenting) is currently not treated as orphaned (see #366)"
         );
     }
 
