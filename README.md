@@ -55,6 +55,46 @@ claude mcp add git-prism -- git-prism serve
 That's it. The server uses stdio transport and is available in all Claude Code
 sessions.
 
+### Shim vs. MCP server — which do you need?
+
+git-prism has two independent interception paths. They do different things and
+can be used together or separately:
+
+| | PATH shim (`git-prism shim install`) | MCP server (`git-prism serve`) |
+|---|---|---|
+| **What it intercepts** | `git` and `gh` CLI calls made by the agent | Direct calls to git-prism MCP tools (`get_change_manifest`, `get_function_context`, etc.) |
+| **How it runs** | One-shot process per intercepted command; exits immediately | Long-running stdio server; one process per Claude Code session |
+| **Needs MCP registration?** | No | Yes (`claude mcp add`) |
+
+**If you only use the PATH shim** (agents call `git`/`gh` directly and you
+haven't registered git-prism as an MCP server), you don't need the MCP
+registration at all — and you can remove it to avoid the orphaned-process
+accumulation described below.
+
+**If you use the MCP tools** (`get_change_manifest`, etc.) in your agent
+prompts, you need the MCP server registration.
+
+**Most users want both:** the shim redirects raw `git diff`/`git log` calls,
+and the MCP tools give structured data when the agent calls them explicitly.
+
+### Orphaned serve processes
+
+`git-prism serve` is launched by the MCP client and its lifecycle is owned by
+that client. In practice, Claude Code sessions sometimes exit without closing
+the server's stdin, leaving an orphaned process running indefinitely. Observed
+accumulation: 5+ processes, uptimes from ~2 hours to >1 day.
+
+git-prism defends against this: the serve process polls its parent pid every
+5 seconds and exits when it detects it has been reparented to init/launchd
+(`ppid == 1`), which is the OS signal that the launching session has died.
+
+If you are **shim-only** (no MCP tool calls in your prompts), removing the MCP
+registration entirely is the simplest fix:
+
+```bash
+claude mcp remove git-prism
+```
+
 ## Redirect hook (removed in v0.9.0)
 
 Earlier versions bundled a Claude Code `PreToolUse` redirect hook, installed via

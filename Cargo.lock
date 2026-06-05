@@ -657,6 +657,7 @@ dependencies = [
  "gix",
  "glob",
  "insta",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

@@ -13,6 +13,43 @@ use crate::tools::{
     build_manifest, build_review_change, build_snapshots, build_worktree_manifest,
 };
 
+/// How often the orphan watchdog polls the parent pid.
+const ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Returns `true` when the process has been reparented to init/launchd (ppid == 1),
+/// which means the Claude Code session that launched `git-prism serve` has exited
+/// without closing stdin. Exiting on this condition prevents indefinite orphan daemons.
+///
+/// The argument is injected for testability — callers pass `libc::getppid() as u32`
+/// in production and a fixed value in unit tests.
+pub fn should_exit_orphaned(ppid: u32) -> bool {
+    ppid == 1
+}
+
+/// Spawn a background task that polls the parent pid every [`ORPHAN_POLL_INTERVAL`]
+/// and hard-exits the process when [`should_exit_orphaned`] returns `true`.
+///
+/// This is a fire-and-forget guard: `tokio::select!` in `run_server` races the
+/// serve future against a never-resolving placeholder, while this task hard-exits
+/// on orphan. The hard-exit is intentional — a reparented process has no meaningful
+/// cleanup to do (telemetry flush is best-effort; the OTLP collector is gone too).
+fn spawn_orphan_watchdog() {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(ORPHAN_POLL_INTERVAL).await;
+            // SAFETY: getppid() is always safe to call; it never fails.
+            let ppid = unsafe { libc::getppid() } as u32;
+            if should_exit_orphaned(ppid) {
+                eprintln!(
+                    "git-prism: parent process exited (ppid == 1); \
+                     exiting orphaned serve process"
+                );
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 /// Convert a `ChangeScope` variant to a static metric label string.
 fn change_scope_label(scope: ChangeScope) -> &'static str {
     match scope {
@@ -882,6 +919,11 @@ pub async fn run_server() -> anyhow::Result<()> {
         );
     }
     crate::metrics::get().record_session_started();
+    // Spawn the orphan watchdog before starting the serve loop. It runs
+    // concurrently and hard-exits the process if the parent pid becomes 1
+    // (reparented to init/launchd), which happens when the Claude Code session
+    // that launched `git-prism serve` dies without closing stdin.
+    spawn_orphan_watchdog();
     let server = GitPrismServer::new();
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;
@@ -1079,6 +1121,32 @@ mod tests {
         assert!(
             server_info.capabilities.prompts.is_none(),
             "prompts capability must not be advertised — this server does not implement prompts"
+        );
+    }
+
+    #[test]
+    fn it_exits_when_reparented_to_init() {
+        assert!(
+            should_exit_orphaned(1),
+            "ppid == 1 means the process was reparented to init/launchd \
+             (the Claude Code session died); serve must exit"
+        );
+    }
+
+    #[test]
+    fn it_does_not_exit_when_parent_is_alive() {
+        assert!(
+            !should_exit_orphaned(2),
+            "ppid == 2 means a live parent; serve must not exit"
+        );
+    }
+
+    #[test]
+    fn it_does_not_exit_for_typical_shell_parent_pid() {
+        // Realistic shell pids are in the thousands; must not trigger exit.
+        assert!(
+            !should_exit_orphaned(12345),
+            "ppid == 12345 is a normal shell pid; serve must not exit"
         );
     }
 
