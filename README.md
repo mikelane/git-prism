@@ -57,7 +57,7 @@ sessions.
 
 ### Shim vs. MCP server — which do you need?
 
-git-prism has two independent interception paths. They do different things and
+git-prism works through two independent mechanisms. They do different things and
 can be used together or separately:
 
 | | PATH shim (`git-prism shim install`) | MCP server (`git-prism serve`) |
@@ -68,8 +68,8 @@ can be used together or separately:
 
 **If you only use the PATH shim** (agents call `git`/`gh` directly and you
 haven't registered git-prism as an MCP server), you don't need the MCP
-registration at all — and you can remove it to avoid the orphaned-process
-accumulation described below.
+registration at all -- and you can remove it to avoid the orphaned `serve`
+processes described below.
 
 **If you use the MCP tools** (`get_change_manifest`, etc.) in your agent
 prompts, you need the MCP server registration.
@@ -86,7 +86,7 @@ accumulation: 5+ processes, uptimes from ~2 hours to >1 day.
 
 git-prism defends against this: the serve process polls its parent pid every
 5 seconds and exits when it detects it has been reparented to init/launchd
-(`ppid == 1`), which is the OS signal that the launching session has died.
+(`ppid == 1`) -- the OS signal that the launching session has died.
 
 If you are **shim-only** (no MCP tool calls in your prompts), removing the MCP
 registration entirely is the simplest fix:
