@@ -52,28 +52,6 @@ impl TelemetryGuard {
         self.tracer_provider.is_some()
     }
 
-    /// Force-flush pending telemetry to the exporter immediately.
-    ///
-    /// The `PeriodicReader` used by the metrics provider only fires on its
-    /// configured interval (default 60 s). A short-lived process — such as the
-    /// shim — exits before the reader ticks, so `Drop` alone never delivers
-    /// metrics. Calling `force_flush` before process exit ensures buffered
-    /// measurements reach the OTLP endpoint.
-    ///
-    /// Safe to call on a no-op guard: it is a documented zero-cost no-op.
-    pub fn force_flush(&mut self) {
-        if let Some(mp) = &self.meter_provider
-            && let Err(e) = mp.force_flush()
-        {
-            eprintln!("git-prism: failed to force-flush metrics: {e}");
-        }
-        if let Some(tp) = &self.tracer_provider
-            && let Err(e) = tp.force_flush()
-        {
-            eprintln!("git-prism: failed to force-flush traces: {e}");
-        }
-    }
-
     /// Best-effort flush with a wall-clock deadline.
     ///
     /// Runs `force_flush` on a background thread and waits at most `timeout`
@@ -686,8 +664,8 @@ mod tests {
             tracer_provider: None,
             meter_provider: None,
         };
-        // force_flush on a no-op guard must be a no-op with zero overhead.
-        guard.force_flush();
+        // force_flush_bounded on a no-op guard must be a zero-cost no-op.
+        guard.force_flush_bounded(Duration::from_millis(500));
     }
 
     #[tokio::test]
@@ -703,8 +681,8 @@ mod tests {
             guard.is_active(),
             "guard must be active for this test to exercise flush"
         );
-        // force_flush on an active guard must not panic even when no exporter is reachable.
-        guard.force_flush();
+        // force_flush_bounded on an active guard must not panic even when no exporter is reachable.
+        guard.force_flush_bounded(Duration::from_millis(500));
         // SAFETY: cleanup
         unsafe {
             std::env::remove_var(ENV_OTLP_ENDPOINT);
@@ -712,7 +690,7 @@ mod tests {
         drop(guard);
     }
 
-    /// Double-flush must be idempotent: `force_flush` borrows the providers
+    /// Double-flush must be idempotent: `force_flush_bounded` borrows the providers
     /// (`&mut self`) rather than taking them, so a second call — and a
     /// subsequent `Drop` — must still succeed without panic or double-free.
     /// This is the real shim sequence: flush before exec, then Drop on exit.
@@ -729,14 +707,14 @@ mod tests {
             guard.is_active(),
             "guard must be active for this test to exercise repeated flush"
         );
-        guard.force_flush();
+        guard.force_flush_bounded(Duration::from_millis(500));
         // Second flush must remain a no-panic no-op: providers are still owned.
-        guard.force_flush();
+        guard.force_flush_bounded(Duration::from_millis(500));
         // Guard must still be active after repeated flushes — flush does not
         // consume the providers the way Drop does.
         assert!(
             guard.is_active(),
-            "force_flush must not consume the providers; guard stays active"
+            "force_flush_bounded must not consume the providers; guard stays active"
         );
         // SAFETY: cleanup
         unsafe {
@@ -751,11 +729,11 @@ mod tests {
     #[test]
     fn it_tolerates_double_force_flush_on_noop_guard() {
         let mut guard = TelemetryGuard::noop();
-        guard.force_flush();
-        guard.force_flush();
+        guard.force_flush_bounded(Duration::from_millis(500));
+        guard.force_flush_bounded(Duration::from_millis(500));
         assert!(
             !guard.is_active(),
-            "a no-op guard must stay inactive across repeated force_flush calls"
+            "a no-op guard must stay inactive across repeated force_flush_bounded calls"
         );
         drop(guard);
     }

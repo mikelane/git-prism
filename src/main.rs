@@ -298,7 +298,7 @@ async fn main() -> std::process::ExitCode {
             &exec,
             &mut telemetry_guard,
         );
-        telemetry_guard.force_flush();
+        telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
         return exit_code;
     }
 

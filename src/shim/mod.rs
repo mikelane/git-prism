@@ -29,6 +29,14 @@ use crate::telemetry::TelemetryGuard;
 /// when the process image is replaced by execvp.
 const PASSTHROUGH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// Flush deadline used on the structured-output path (after JSON is printed).
+///
+/// The agent has already received its response by the time the flush runs, so
+/// a longer cap is acceptable — but it must still be finite so a saturated or
+/// unreachable OTLP collector cannot stall a `git diff`/`log`/`show`/`blame`
+/// call indefinitely (the #360 multi-minute stall scenario).
+pub(crate) const STRUCTURED_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Main entry point for shim mode.
 ///
 /// Decision tree:
@@ -349,6 +357,75 @@ mod tests {
         assert!(
             exec.called.get(),
             "expected passthrough when current directory cannot be determined"
+        );
+    }
+
+    /// The structured-path and passthrough-path flush timeouts must be distinct
+    /// values.  The structured path can afford a longer cap (the agent already
+    /// received its JSON response) while the passthrough path is latency-critical.
+    /// This test kills the mutation that collapses one constant to the other.
+    #[test]
+    fn structured_flush_timeout_differs_from_passthrough_flush_timeout() {
+        assert_ne!(
+            STRUCTURED_FLUSH_TIMEOUT, PASSTHROUGH_FLUSH_TIMEOUT,
+            "structured and passthrough flush timeouts must be different values; \
+             the structured path can afford a longer cap"
+        );
+        assert!(
+            STRUCTURED_FLUSH_TIMEOUT > PASSTHROUGH_FLUSH_TIMEOUT,
+            "structured-path timeout should be >= passthrough timeout \
+             since the agent already has its response"
+        );
+    }
+
+    /// `STRUCTURED_FLUSH_TIMEOUT` must exist and be reasonable (non-zero, shorter
+    /// than `EXPORT_TIMEOUT` which is 5 s) so an uncapped flush cannot occur on
+    /// the structured-output path.
+    #[test]
+    fn structured_flush_timeout_constant_is_positive_and_below_export_timeout() {
+        // The constant must be > 0 (no instant-timeout) and < 5 s (below the
+        // SDK export timeout) so a saturated collector cannot block git calls.
+        assert!(
+            STRUCTURED_FLUSH_TIMEOUT.as_millis() > 0,
+            "STRUCTURED_FLUSH_TIMEOUT must be positive"
+        );
+        assert!(
+            STRUCTURED_FLUSH_TIMEOUT.as_secs() < 5,
+            "STRUCTURED_FLUSH_TIMEOUT must be below the 5 s SDK export timeout"
+        );
+    }
+
+    /// `force_flush_bounded(STRUCTURED_FLUSH_TIMEOUT)` on an active guard with an
+    /// unreachable OTLP endpoint must return within the structured-path deadline.
+    /// This mirrors the passthrough-path black-hole test in telemetry.rs and proves
+    /// the structured path cannot stall for minutes when the collector is saturated.
+    #[tokio::test]
+    async fn structured_path_bounded_flush_returns_within_deadline_on_black_hole_endpoint() {
+        use std::sync::Mutex;
+        static ENV_MUTEX: Mutex<()> = Mutex::new(());
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            std::env::set_var("GIT_PRISM_OTLP_ENDPOINT", "http://192.0.2.1:4318");
+        }
+        let mut guard = crate::telemetry::init_quiet();
+        assert!(
+            guard.is_active(),
+            "guard must be active to exercise the structured-path bounded flush"
+        );
+        let start = std::time::Instant::now();
+        guard.force_flush_bounded(STRUCTURED_FLUSH_TIMEOUT);
+        let elapsed = start.elapsed();
+        // SAFETY: cleanup
+        unsafe {
+            std::env::remove_var("GIT_PRISM_OTLP_ENDPOINT");
+        }
+        drop(guard);
+        // Must return well before the 5 s SDK export timeout.
+        assert!(
+            elapsed.as_secs() < 5,
+            "structured-path bounded flush must not stall for the full SDK export timeout; \
+             took {elapsed:?}"
         );
     }
 
