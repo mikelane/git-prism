@@ -49,8 +49,9 @@ fn spawn_orphan_watchdog() {
             let ppid = raw_ppid as u32;
             if should_exit_orphaned(ppid) {
                 eprintln!(
-                    "git-prism: parent process exited (ppid == 1); \
-                     exiting orphaned serve process"
+                    "git-prism: serve pid {} reparented to init (ppid == 1); \
+                     parent Claude Code session exited — shutting down orphaned daemon",
+                    std::process::id()
                 );
                 std::process::exit(0);
             }
