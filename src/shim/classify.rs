@@ -52,6 +52,10 @@ pub(crate) enum Classification<'a> {
 /// subcommand.  All `-C <path>` values are collected in order into
 /// `repo_dir_overrides`.
 pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> ClassifyResult<'a> {
+    // cargo-mutants: skip -- equivalent mutant: `argv.len() < 2` vs `<= 2` is
+    // indistinguishable. No git/gh argv of length 2 ever classifies to anything
+    // but Passthrough — every real subcommand needs a range / sha / path / PR
+    // argument (length >= 3) — so both guards produce identical results.
     if argv.len() < 2 {
         return ClassifyResult {
             classification: Classification::Passthrough,
