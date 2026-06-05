@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Per-invocation shim opt-out via `GIT_PRISM_PASSTHROUGH` / `GIT_PRISM_DISABLE`.** Setting either env var to a truthy value (`1` or case-insensitive `true`) makes the shim `exec` the real `git` / `gh` immediately — before `telemetry::init_quiet()` and before command classification — with near-zero added latency and no recording. This replaces the all-or-nothing `PATH` hack for agent workflows that shell `git` heavily in throwaway tmp repos, where per-call cold-start and telemetry overhead is unwanted and recording ephemeral repos is undesirable anyway. The opt-out exec is recursion-safe (it resolves and runs the real binary, not the shim symlink, even when the shim is first on `PATH`). (#362)
+
+### Fixed
+
+- **The shim's structured-output path (`git diff` / `log` / `show` / `blame`) no longer stalls on an unreachable OpenTelemetry collector.** The structured path flushed telemetry with an unbounded `force_flush()`, and `main` then dropped the `TelemetryGuard`, whose `Drop` ran unbounded `shutdown()` calls — so a single `git diff` could block for minutes (≈10 s per call was reproduced against a black-hole endpoint: 5 s tracer shutdown + 5 s meter shutdown). Both the explicit flush and the `Drop`-path shutdown are now time-bounded (500 ms each), mirroring the already-bounded passthrough path; a saturated or unreachable collector can no longer stall an intercepted git command. Telemetry still delivers normally when the collector is responsive (proven by an end-to-end data-loss guard against a live capture server). (#361)
+
 ## [0.9.3] — 2026-06-03
 
 ### Fixed
