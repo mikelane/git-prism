@@ -9,6 +9,10 @@ use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt
 
 const DEFAULT_SERVICE_NAME: &str = "git-prism";
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Drop-path shutdown deadline. A down OTLP collector must not stall process
+/// teardown (and therefore the agent's `git` call) on `tp.shutdown()` /
+/// `mp.shutdown()`, which are individually unbounded (up to EXPORT_TIMEOUT each).
+const DROP_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Environment variable names for telemetry configuration.
 const ENV_OTLP_ENDPOINT: &str = "GIT_PRISM_OTLP_ENDPOINT";
@@ -91,21 +95,35 @@ impl TelemetryGuard {
     }
 }
 
-/// The design spec targets a 5s flush on shutdown. The SDK's `.shutdown()` handles
-/// its own timing internally, so we rely on its defaults here rather than passing
-/// an explicit timeout.
+/// Bounded Drop-path shutdown: spawns a thread to run `tp.shutdown()` and
+/// `mp.shutdown()`, then waits at most `DROP_SHUTDOWN_TIMEOUT` (500 ms).
+/// If the collector is unreachable and the shutdown thread stalls, the wait
+/// is abandoned and the thread is reaped when the process exits. This mirrors
+/// the `force_flush_bounded` pattern and prevents a dead OTLP collector from
+/// stalling the agent's `git` invocation on process teardown.
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(tp) = self.tracer_provider.take()
-            && let Err(e) = tp.shutdown()
-        {
-            eprintln!("git-prism: failed to flush traces on shutdown: {e}");
+        let tp = self.tracer_provider.take();
+        let mp = self.meter_provider.take();
+        if tp.is_none() && mp.is_none() {
+            return;
         }
-        if let Some(mp) = self.meter_provider.take()
-            && let Err(e) = mp.shutdown()
-        {
-            eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
-        }
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if let Some(tp) = tp
+                && let Err(e) = tp.shutdown()
+            {
+                eprintln!("git-prism: failed to flush traces on shutdown: {e}");
+            }
+            if let Some(mp) = mp
+                && let Err(e) = mp.shutdown()
+            {
+                eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
+            }
+            let _ = tx.send(());
+        });
+        // Bound the wait; abandon a stalled shutdown (process teardown reaps the thread).
+        let _ = rx.recv_timeout(DROP_SHUTDOWN_TIMEOUT);
     }
 }
 
@@ -773,23 +791,22 @@ mod tests {
         );
     }
 
-    /// QA #361: the WHOLE structured-path teardown — bounded flush AND the
-    /// guard's `Drop` — must stay bounded against an unreachable collector.
+    /// Smoke test: the flush+drop *sequence* completes without panic under the
+    /// test runtime.
     ///
-    /// `main.rs` runs exactly this sequence on the structured `git diff` path:
+    /// **Important limitation:** this test does NOT exercise real OTel provider
+    /// shutdown. The production providers (`SdkTracerProvider`, `SdkMeterProvider`)
+    /// are constructed under `#[cfg(not(test))]`-gated code paths; in test builds
+    /// they degrade to no-ops, so `Drop` returns instantly regardless of whether
+    /// the OTLP endpoint is reachable. The assertion here (`< 2 s`) passes even
+    /// at a buggy HEAD where the real binary stalls for ~10.5 s — it provides
+    /// false confidence about the bounded-shutdown property.
     ///
-    /// ```text
-    /// let exit_code = run_shim(...);                       // returns ExitCode
-    /// guard.force_flush_bounded(STRUCTURED_FLUSH_TIMEOUT); // 500 ms cap
-    /// return exit_code;                                    // guard dropped HERE
-    /// ```
-    ///
-    /// The #361 fix bounds `force_flush_bounded`, so the agent's teardown no
-    /// longer stalls for multiple seconds even when the collector is unreachable.
-    /// This test verifies that the *entire* sequence — bounded flush followed by
-    /// the guard's `Drop` (which runs `tp.shutdown()` + `mp.shutdown()`) — stays
-    /// bounded against a black-hole endpoint. This regression guard prevents #360
-    /// from recurring via either the force_flush path or the guard-drop path.
+    /// The load-bearing guard for the real binary is the end-to-end pentest in
+    /// `tests/shim_structured_teardown_pentest.rs`, which drives the built binary
+    /// against an unroutable TEST-NET-1 endpoint and asserts the whole invocation
+    /// returns under 4 s. That test is the one that fails when the Drop-path
+    /// shutdown is unbounded.
     #[tokio::test]
     async fn qa_structured_path_total_teardown_is_bounded_on_black_hole_endpoint() {
         use crate::shim::STRUCTURED_FLUSH_TIMEOUT;
