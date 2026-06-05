@@ -21,6 +21,7 @@ Platform note for @ISSUE-322:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -141,10 +142,9 @@ def step_shim_dir_already_in_path(context: Context) -> None:
 
     Stores the modified PATH in context so the When step can inject it.
     """
-    shim_dir = str(_shim_dir_path(context))
     shim_dir_path = _shim_dir_path(context)
     shim_dir_path.mkdir(parents=True, exist_ok=True)
-    context.injected_path = f"{shim_dir}:{os.environ.get('PATH', '')}"
+    context.injected_path = f"{shim_dir_path}:{os.environ.get('PATH', '')}"
 
 
 @given("the shim is installed with a \"gh\" symlink")
@@ -479,8 +479,9 @@ def step_shim_install_consent(context: Context) -> None:
     """Run git-prism shim install, answering 'y' to the PATH setup prompt."""
     binary = _find_binary(context)
     env = _isolated_env(context)
-    # Pin SHELL to zsh so detect_rc_file always picks .zprofile, regardless of
-    # the CI runner's ambient $SHELL (which is /bin/bash on GitHub Actions).
+    # Pin SHELL to zsh so the install always writes the zsh rc files
+    # (.zshenv + .zshrc), regardless of the CI runner's ambient $SHELL
+    # (which is /bin/bash on GitHub Actions).
     env["SHELL"] = "/bin/zsh"
     # If the shim dir was injected into PATH by a prior Given step, use that.
     if hasattr(context, "injected_path"):
@@ -505,8 +506,9 @@ def step_shim_install_consent_again(context: Context) -> None:
     """Run git-prism shim install a second time with 'y' consent (idempotency check)."""
     binary = _find_binary(context)
     env = _isolated_env(context)
-    # Pin SHELL to zsh so detect_rc_file always picks .zprofile, regardless of
-    # the CI runner's ambient $SHELL (which is /bin/bash on GitHub Actions).
+    # Pin SHELL to zsh so the install always writes the zsh rc files
+    # (.zshenv + .zshrc), regardless of the CI runner's ambient $SHELL
+    # (which is /bin/bash on GitHub Actions).
     env["SHELL"] = "/bin/zsh"
     result = subprocess.run(  # noqa: S603
         [str(binary), "shim", "install"],
@@ -651,17 +653,25 @@ def step_rc_contains_export(context: Context, rel_path: str) -> None:
     )
 
 
+_SHIM_BLOCK_START_MARKER = "# >>> git-prism shim >>>"
+
+
 @then("the rc file \"{rel_path}\" under HOME contains the shim export line exactly once")
 def step_rc_contains_export_exactly_once(context: Context, rel_path: str) -> None:
-    """Assert the shim export line appears exactly once (idempotency)."""
+    """Assert the managed PATH block appears exactly once (idempotency).
+
+    The new marker-delimited block contains the shim path fragment twice (once
+    in each branch of the case statement), so we count block start-markers
+    rather than raw fragment occurrences.
+    """
     rc_path = context.isolated_home / rel_path
     assert rc_path.exists(), f"RC file not found: {rc_path}"
     content = rc_path.read_text()
-    occurrences = content.count(_SHIM_EXPORT_FRAGMENT)
+    occurrences = content.count(_SHIM_BLOCK_START_MARKER)
     assert occurrences == 1, (
-        f"Expected the shim export fragment to appear exactly once in {rc_path}, "
-        f"but found {occurrences} occurrences.\n"
-        f"Fragment: {_SHIM_EXPORT_FRAGMENT!r}\n"
+        f"Expected the managed PATH block to appear exactly once in {rc_path}, "
+        f"but found {occurrences} occurrences of the start marker.\n"
+        f"Marker: {_SHIM_BLOCK_START_MARKER!r}\n"
         f"File contents:\n{content}"
     )
 
@@ -709,11 +719,10 @@ def step_files_entries_have_change_scope(context: Context) -> None:
     binary returns plain text or its own JSON, neither of which has a
     change_scope field on file entries.
     """
-    import json as _json
     stdout = (context.result.stdout or "").strip()
     try:
-        data = _json.loads(stdout)
-    except _json.JSONDecodeError as exc:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
         raise AssertionError(
             f"Output is not valid JSON: {exc}\n"
             f"stdout: {stdout[:500]}\n"
