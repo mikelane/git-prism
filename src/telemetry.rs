@@ -773,6 +773,66 @@ mod tests {
         );
     }
 
+    /// QA #361: the WHOLE structured-path teardown — bounded flush AND the
+    /// guard's `Drop` — must stay bounded against an unreachable collector.
+    ///
+    /// `main.rs` runs exactly this sequence on the structured `git diff` path:
+    ///
+    /// ```text
+    /// let exit_code = run_shim(...);                       // returns ExitCode
+    /// guard.force_flush_bounded(STRUCTURED_FLUSH_TIMEOUT); // 500 ms cap
+    /// return exit_code;                                    // guard dropped HERE
+    /// ```
+    ///
+    /// The #361 fix bounds `force_flush_bounded`, but the very next thing that
+    /// happens is the guard going out of scope, which runs `Drop::drop` →
+    /// `tp.shutdown()` + `mp.shutdown()`. Those shutdown calls are UNBOUNDED and
+    /// each block up to `EXPORT_TIMEOUT` (5 s) when the collector is a black
+    /// hole. So the bounded flush saves nothing: the agent's `git diff` still
+    /// stalls for multiple seconds on process teardown — the exact #360 symptom
+    /// #361 set out to eliminate.
+    ///
+    /// This test asserts the total teardown (flush + drop) returns within a
+    /// budget well under a single `EXPORT_TIMEOUT`. It FAILS today because
+    /// `Drop` is unbounded.
+    #[tokio::test]
+    async fn qa_structured_path_total_teardown_is_bounded_on_black_hole_endpoint() {
+        use crate::shim::STRUCTURED_FLUSH_TIMEOUT;
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            // Unroutable TEST-NET-1 (RFC 5737): connections hang, exercising the
+            // export-timeout path rather than a fast local connection refusal.
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://192.0.2.1:4318");
+        }
+        let mut guard = init();
+        assert!(
+            guard.is_active(),
+            "guard must be active to exercise the structured-path teardown"
+        );
+        // SAFETY: cleanup before timing so a slow remove_var doesn't pollute the measurement.
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+
+        let start = std::time::Instant::now();
+        // Exact main.rs structured-path sequence:
+        guard.force_flush_bounded(STRUCTURED_FLUSH_TIMEOUT); // 500 ms cap
+        drop(guard); // <-- main.rs `return exit_code` drops the guard here
+        let elapsed = start.elapsed();
+
+        // The whole teardown must stay well under a single 5 s EXPORT_TIMEOUT.
+        // A generous 2 s budget (4x the 500 ms flush cap) still fails loudly if
+        // Drop reintroduces the unbounded multi-second stall.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "structured-path teardown (bounded flush + guard Drop) must stay bounded; \
+             a black-hole collector must not stall the agent's git diff on teardown. \
+             took {elapsed:?} (Drop::shutdown is unbounded — #361 stall reintroduced)"
+        );
+    }
+
     /// Regression test for PR #210 blocker B1.
     ///
     /// Before the fix: when `Registry::default().with(otel_layer).try_init()`
