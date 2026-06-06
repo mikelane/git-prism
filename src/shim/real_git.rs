@@ -126,7 +126,7 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
 
     fn capture(&self, argv: &[&str]) -> Result<usize, CaptureError> {
         // capture() is only used on the git shadow-run path (maybe_shadow_capture in shadow.rs).
-        // gh invocations never reach here; they are handled by handle_gh_pr_diff / passthrough.
+        // gh invocations never reach here; they always pass through to the real gh binary.
         let real = resolve_real_git(self.argv0, self.env).ok_or(CaptureError::RealGitNotFound)?;
         // std::process::Command passes args as a slice — no shell involved,
         // so there is no command-injection risk here.
@@ -347,38 +347,6 @@ pub(crate) fn resolve_real_binary(
     None
 }
 
-/// Locate the real `git` binary using the live process environment.
-///
-/// Uses `std::env::current_exe()` as the shim identity (so the PATH-walking
-/// skip logic correctly excludes the shim even when called outside of a
-/// `passthrough` context) and reads `$PATH` from the process environment.
-///
-/// Returns `None` only when no `git` binary can be found anywhere on PATH or
-/// in the standard fallback locations.
-///
-/// Intended for use by shim handler code that needs to shell out to the real
-/// git binary (e.g. `ensure_sha_present`) without access to an `argv0` or
-/// `EnvSource`.
-#[cfg(unix)]
-pub(crate) fn find_real_git() -> Option<PathBuf> {
-    use crate::agent_detection::StdEnvSource;
-    let argv0 = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_owned))
-        .unwrap_or_default();
-    resolve_real_git(&argv0, &StdEnvSource)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn find_real_git() -> Option<PathBuf> {
-    use crate::agent_detection::StdEnvSource;
-    let argv0 = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_owned))
-        .unwrap_or_default();
-    resolve_real_git(&argv0, &StdEnvSource)
-}
-
 /// Return the canonicalized path of the shim binary.
 ///
 /// Tries `argv0` first (works when the shim is invoked with a full path).
@@ -573,8 +541,8 @@ mod tests {
     /// in the FIRST entry, and a real (non-shim) `git` in the SECOND entry. The
     /// resolver MUST skip the shim symlink and return the real git — not the
     /// symlink, and not anything that canonicalizes to the shim binary.
-    /// Returning the symlink would make `ensure_sha_present_for_pr` re-invoke
-    /// the shim → infinite recursion.
+    /// Returning the symlink would make the shim's passthrough exec path
+    /// re-invoke the shim itself → infinite recursion.
     ///
     /// This is a positive assertion (`assert_eq!` on the real git) so it cannot
     /// pass vacuously: the resolver is forced to return Some, and that Some must

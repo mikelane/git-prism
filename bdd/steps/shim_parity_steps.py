@@ -212,7 +212,8 @@ def step_stub_gh_for_passthrough(context: Context) -> None:
     The stub handles the specific subcommands used by passthrough scenarios:
       repo view --json name     -> {"name":"stub-repo"}
       issue list --limit 1     -> []
-      anything else            -> exit 0, empty output
+      pr diff <N>              -> canned unified-diff text
+      anything else            -> exit 64, stderr message
 
     This stub is placed in stub_gh_dir and also recorded as stub_gh_path so
     the 'the stub gh binary runs ... directly' When step can invoke it directly.
@@ -226,6 +227,10 @@ if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "issue" ] && [ "$2" = "list" ]; then
     printf '%s' '[]'
+    exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
+    printf '%s' 'diff --git a/stub.txt b/stub.txt\n--- a/stub.txt\n+++ b/stub.txt\n@@ -1 +1 @@\n-old\n+new\n'
     exit 0
 fi
 echo "stub gh: unhandled args: $*" >&2
@@ -379,7 +384,7 @@ def step_agent_runs_via_gh_shim(context: Context, command: str) -> None:
 
     # Invoke the shim binary directly (not via PATH) to avoid ambiguity with
     # the stub on PATH.  argv[0] must be the shim link path so the binary sees
-    # "gh" as its own name and routes to handle_gh_pr_diff.
+    # "gh" as its own name and passes through to the real gh binary.
     shim_bin = str(context.gh_shim_link)
     result = subprocess.run(  # noqa: S603
         [shim_bin, *parts[1:]],
