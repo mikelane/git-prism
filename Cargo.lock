@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "git-prism"
-version = "0.9.4"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "base64",
