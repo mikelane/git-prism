@@ -72,7 +72,13 @@ impl TelemetryGuard {
         if self.meter_provider.is_none() && self.tracer_provider.is_none() {
             return;
         }
-        // Clone the Arc-backed provider handles so they can be moved into the thread.
+        // Clone the Arc-backed provider handles so they can be moved into the flush thread.
+        // WHY clone rather than take(): `force_flush_bounded` is intentionally non-destructive.
+        // `Drop::drop` is the shutdown gate — it calls `.take()` and runs `tp.shutdown()` /
+        // `mp.shutdown()` to perform the final teardown. If we used `.take()` here, the guard
+        // would hold `None` after the first flush and `Drop` would have nothing to shut down,
+        // silently skipping the final export on process exit. A future reader must not
+        // "simplify" this to `take()`.
         let mp = self.meter_provider.clone();
         let tp = self.tracer_provider.clone();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
