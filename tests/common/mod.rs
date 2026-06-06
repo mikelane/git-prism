@@ -8,6 +8,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 /// Spawn a one-shot HTTP capture server that answers immediately (healthy collector).
@@ -49,4 +50,18 @@ pub fn spawn_capture_server() -> (String, mpsc::Receiver<bool>) {
     });
 
     (base, rx)
+}
+
+/// Receive the capture server's telemetry signal, distinguishing "no telemetry
+/// within the deadline" (`Timeout` → `false`, the legitimate expected case) from
+/// "the capture-server thread died" (`Disconnected` → panic, a harness failure
+/// that must not masquerade as a passing test).
+pub fn recv_telemetry(rx: &Receiver<bool>, timeout: Duration) -> bool {
+    match rx.recv_timeout(timeout) {
+        Ok(v) => v,
+        Err(RecvTimeoutError::Timeout) => false,
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("capture-server thread disconnected — harness failure, not a telemetry signal")
+        }
+    }
 }
