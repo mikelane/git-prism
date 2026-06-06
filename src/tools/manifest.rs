@@ -2173,7 +2173,16 @@ mod tests {
             "go should be in languages_affected, got: {:?}",
             manifest.summary.languages_affected
         );
-        // README.md => "unknown" should NOT be in languages_affected
+        // README.md => "markdown" should be in languages_affected (as of #368)
+        assert!(
+            manifest
+                .summary
+                .languages_affected
+                .contains(&"markdown".to_string()),
+            "markdown should be in languages_affected after #368, got: {:?}",
+            manifest.summary.languages_affected
+        );
+        // "unknown" should NOT be in languages_affected
         assert!(
             !manifest
                 .summary
@@ -4418,6 +4427,15 @@ mod tests {
         assert!(
             shell_file.functions_changed.is_none(),
             "shell has no tree-sitter grammar; functions_changed must be null"
+        );
+        // Assert that "shell" appears in the summary's languages_affected
+        assert!(
+            manifest
+                .summary
+                .languages_affected
+                .contains(&"shell".to_string()),
+            "shell should be in languages_affected, got: {:?}",
+            manifest.summary.languages_affected
         );
     }
 }
