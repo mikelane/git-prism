@@ -17,15 +17,33 @@ use crate::tools::{
 #[cfg(unix)]
 const ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Returns `true` when the process has been reparented to init/launchd (ppid == 1),
-/// which means the Claude Code session that launched `git-prism serve` has exited
-/// without closing stdin. Exiting on this condition prevents indefinite orphan daemons.
+/// Returns `true` when the process should shut down because its parent is effectively
+/// gone, indicated by `ppid <= 1`:
+///
+/// - `ppid == 1`: the process was reparented to init/launchd — the Claude Code session
+///   that launched `git-prism serve` exited without closing stdin.
+/// - `ppid == 0`: the parent lives outside the current Linux PID namespace; the kernel
+///   reports 0 because it cannot map the parent's real pid into this namespace. This
+///   also means the launching session is no longer reachable (#366).
+///
+/// A healthy `git-prism serve` process started by Claude Code always has a real
+/// launcher pid (a large number), never 0 or 1, so `<= 1` does not false-positive
+/// the common case.
 ///
 /// The argument is injected for testability — callers pass `libc::getppid() as u32`
 /// in production and a fixed value in unit tests.
 #[cfg(unix)]
 pub(crate) fn should_exit_orphaned(ppid: u32) -> bool {
-    ppid == 1
+    ppid <= 1
+}
+
+/// Calls `getppid` via the injected `getppid` closure and delegates to
+/// [`should_exit_orphaned`]. The closure seam makes the wiring unit-testable:
+/// production code passes the real `libc::getppid`; unit tests inject a fixed
+/// value without spawning a background task or touching the process table.
+#[cfg(unix)]
+fn watchdog_should_exit(getppid: impl Fn() -> u32) -> bool {
+    should_exit_orphaned(getppid())
 }
 
 /// Spawn a background task that polls the parent pid every [`ORPHAN_POLL_INTERVAL`]
@@ -39,21 +57,26 @@ pub(crate) fn should_exit_orphaned(ppid: u32) -> bool {
 /// is likely gone too).
 #[cfg(unix)]
 fn spawn_orphan_watchdog() {
+    eprintln!(
+        "git-prism: orphan-watchdog active; polling parent pid every {}s",
+        ORPHAN_POLL_INTERVAL.as_secs()
+    );
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(ORPHAN_POLL_INTERVAL).await;
-            // SAFETY: `getppid` is a POSIX system call with no preconditions —
-            // it takes no arguments, dereferences no pointers, and touches no
-            // shared state, so there is nothing the caller can violate. It is
-            // also infallible (it cannot return an error).
-            let raw_ppid: libc::pid_t = unsafe { libc::getppid() };
-            // `pid_t` is signed but a real ppid is always >= 1; the cast is a
-            // plain widening reinterpretation used only for the `== 1` compare.
-            let ppid = raw_ppid as u32;
-            if should_exit_orphaned(ppid) {
+            if watchdog_should_exit(|| {
+                // SAFETY: `getppid` is a POSIX system call with no preconditions —
+                // it takes no arguments, dereferences no pointers, and touches no
+                // shared state, so there is nothing the caller can violate. It is
+                // also infallible (it cannot return an error).
+                let raw: libc::pid_t = unsafe { libc::getppid() };
+                // `pid_t` is signed but a real ppid is always >= 1; the cast is a
+                // plain widening reinterpretation used only for the `<= 1` compare.
+                raw as u32
+            }) {
                 eprintln!(
-                    "git-prism: serve pid {} reparented to init (ppid == 1); \
-                     parent Claude Code session exited — shutting down orphaned daemon",
+                    "git-prism: serve pid {} parent gone (ppid <= 1 — reparented to init \
+                     or left the PID namespace); shutting down orphaned daemon",
                     std::process::id()
                 );
                 std::process::exit(0);
@@ -942,9 +965,14 @@ pub async fn run_server() -> anyhow::Result<()> {
     // (reparented to init/launchd), which happens when the Claude Code session
     // that launched `git-prism serve` dies without closing stdin.
     spawn_orphan_watchdog();
+    eprintln!("git-prism: serve pid {} started", std::process::id());
     let server = GitPrismServer::new();
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;
+    eprintln!(
+        "git-prism: serve pid {} stdin closed; shutting down cleanly",
+        std::process::id()
+    );
     // `telemetry` is dropped here at end of scope — this is what flushes
     // any pending spans and metrics on shutdown (see `TelemetryGuard::drop`).
     Ok(())
@@ -1144,6 +1172,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn it_exits_via_watchdog_seam_when_ppid_is_one() {
+        assert!(
+            watchdog_should_exit(|| 1),
+            "watchdog_should_exit(|| 1) must return true — seam wires through to should_exit_orphaned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_exits_via_watchdog_seam_when_ppid_is_zero() {
+        assert!(
+            watchdog_should_exit(|| 0),
+            "watchdog_should_exit(|| 0) must return true — PID-namespace gap closed by #366"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_does_not_exit_via_watchdog_seam_when_ppid_is_normal() {
+        assert!(
+            !watchdog_should_exit(|| 4242),
+            "watchdog_should_exit(|| 4242) must return false — live parent pid"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn it_returns_true_when_ppid_is_init() {
         assert!(
             should_exit_orphaned(1),
@@ -1163,6 +1218,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn it_returns_false_when_ppid_is_three() {
+        // Triangulates that the boundary is `<= 1`, not `< 3` or similar.
+        // ppid == 3 is a live ancestor process; serve must not exit.
+        assert!(
+            !should_exit_orphaned(3),
+            "ppid == 3 is a live process; serve must not exit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn it_returns_false_for_typical_shell_pid() {
         // Realistic shell pids are in the thousands; must not trigger exit.
         assert!(
@@ -1173,14 +1239,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn it_returns_false_when_ppid_is_zero() {
-        // `getppid() == 0` can occur in a Linux PID namespace whose parent lives
-        // outside the namespace. The current predicate does NOT treat this as
-        // orphaned, so the watchdog won't fire for that case. Pinning current
-        // behavior; whether to broaden to `ppid <= 1` is tracked in #366.
+    fn it_returns_true_when_ppid_is_zero() {
+        // `getppid() == 0` occurs when the parent process lives outside the
+        // current Linux PID namespace — the kernel reports 0 because it cannot
+        // map the parent's real pid into this namespace. Both 0 and 1 mean the
+        // launching session is effectively gone; #366 closed the gap via `ppid <= 1`.
         assert!(
-            !should_exit_orphaned(0),
-            "ppid == 0 (PID-namespace reparenting) is currently not treated as orphaned (see #366)"
+            should_exit_orphaned(0),
+            "ppid == 0 (PID-namespace parent-invisibility) must now be treated as orphaned (#366)"
         );
     }
 
