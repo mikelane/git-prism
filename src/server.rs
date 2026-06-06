@@ -18,23 +18,27 @@ use crate::tools::{
 const ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Returns `true` when the process should shut down because its parent is effectively
-/// gone, indicated by `ppid <= 1`:
+/// gone, indicated by `ppid == 1`:
 ///
-/// - `ppid == 1`: the process was reparented to init/launchd — the Claude Code session
-///   that launched `git-prism serve` exited without closing stdin.
-/// - `ppid == 0`: the parent lives outside the current Linux PID namespace; the kernel
-///   reports 0 because it cannot map the parent's real pid into this namespace. This
-///   also means the launching session is no longer reachable (#366).
+/// - `ppid == 1`: the process was reparented to init/launchd (or, inside a PID
+///   namespace, to that namespace's init) — the Claude Code session that launched
+///   `git-prism serve` exited without closing stdin. Orphaned processes ALWAYS
+///   reparent to PID 1; the `== 1` check catches all real orphans.
+/// - `ppid == 0` is deliberately NOT treated as orphaned: it means the parent
+///   process lives in an ancestor PID namespace, so this process is itself a
+///   namespace/container init (e.g., a container entrypoint). Real orphans reparent
+///   to PID 1; false-killing a serve running as PID 1 would cause a container
+///   shutdown 5s after startup while catching no additional real orphans. See #366.
 ///
 /// A healthy `git-prism serve` process started by Claude Code always has a real
-/// launcher pid (a large number), never 0 or 1, so `<= 1` does not false-positive
+/// launcher pid (a large number), never 0 or 1, so `== 1` does not false-positive
 /// the common case.
 ///
 /// The argument is injected for testability — callers pass `libc::getppid() as u32`
 /// in production and a fixed value in unit tests.
 #[cfg(unix)]
 pub(crate) fn should_exit_orphaned(ppid: u32) -> bool {
-    ppid <= 1
+    ppid == 1
 }
 
 /// Calls `getppid` via the injected `getppid` closure and delegates to
@@ -75,8 +79,8 @@ fn spawn_orphan_watchdog() {
                 raw as u32
             }) {
                 eprintln!(
-                    "git-prism: serve pid {} parent gone (ppid <= 1 — reparented to init \
-                     or left the PID namespace); shutting down orphaned daemon",
+                    "git-prism: serve pid {} reparented to init (ppid == 1); parent Claude Code \
+                     session exited — shutting down orphaned daemon",
                     std::process::id()
                 );
                 std::process::exit(0);
@@ -1181,10 +1185,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn it_exits_via_watchdog_seam_when_ppid_is_zero() {
+    fn it_does_not_exit_via_watchdog_seam_when_ppid_is_zero() {
         assert!(
-            watchdog_should_exit(|| 0),
-            "watchdog_should_exit(|| 0) must return true — PID-namespace gap closed by #366"
+            !watchdog_should_exit(|| 0),
+            "watchdog_should_exit(|| 0) must return false — ppid==0 is a namespace/container init, not an orphan"
         );
     }
 
@@ -1219,7 +1223,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn it_returns_false_when_ppid_is_three() {
-        // Triangulates that the boundary is `<= 1`, not `< 3` or similar.
+        // Triangulates that the boundary is `== 1`, not `< 3` or similar.
         // ppid == 3 is a live ancestor process; serve must not exit.
         assert!(
             !should_exit_orphaned(3),
@@ -1239,14 +1243,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn it_returns_true_when_ppid_is_zero() {
+    fn it_returns_false_when_ppid_is_zero() {
         // `getppid() == 0` occurs when the parent process lives outside the
         // current Linux PID namespace — the kernel reports 0 because it cannot
-        // map the parent's real pid into this namespace. Both 0 and 1 mean the
-        // launching session is effectively gone; #366 closed the gap via `ppid <= 1`.
+        // map the parent's real pid into this namespace. This means the process
+        // is itself a namespace/container init (e.g., a container entrypoint),
+        // not an orphaned daemon. Real orphans reparent to PID 1 (#366).
         assert!(
-            should_exit_orphaned(0),
-            "ppid == 0 (PID-namespace parent-invisibility) must now be treated as orphaned (#366)"
+            !should_exit_orphaned(0),
+            "ppid == 0 indicates a namespace/container init, not an orphan; serve must not exit"
         );
     }
 
