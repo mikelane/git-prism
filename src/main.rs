@@ -13,6 +13,7 @@ mod treesitter;
 
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
 use git::refs::{RefRange, parse_range, validate_commit_range};
@@ -158,6 +159,16 @@ enum ShimCommands {
     Uninstall,
     /// Report whether the shim is installed and show the shim directory
     Status,
+}
+
+fn resolve_cli_repo_path(
+    repo: Option<String>,
+    cwd: impl Fn() -> std::io::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    match repo {
+        Some(r) => Ok(PathBuf::from(r)),
+        None => cwd().context("cannot determine current working directory"),
+    }
 }
 
 /// Dispatch a `git-prism hooks <subcommand>` invocation. Returns the exit
@@ -332,9 +343,7 @@ async fn run() -> anyhow::Result<()> {
             include_function_analysis,
             max_response_tokens,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let options = ManifestOptions {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
@@ -360,9 +369,7 @@ async fn run() -> anyhow::Result<()> {
             repo,
             page_size,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let ref_range = parse_range(&range);
             validate_commit_range(&ref_range, "history")?;
             let (base_ref, head_ref) = match ref_range {
@@ -385,9 +392,7 @@ async fn run() -> anyhow::Result<()> {
             repo,
             include_diff_hunks,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let ref_range = parse_range(&range);
             validate_commit_range(&ref_range, "snapshot")?;
             let (base_ref, head_ref) = match ref_range {
@@ -412,9 +417,7 @@ async fn run() -> anyhow::Result<()> {
             function_names,
             max_response_tokens,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let ref_range = parse_range(&range);
             validate_commit_range(&ref_range, "context")?;
             let (base_ref, head_ref) = match ref_range {
@@ -488,4 +491,34 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_cli_repo_path_uses_explicit_repo_without_calling_cwd() {
+        let result = resolve_cli_repo_path(Some("/some/path".into()), || unreachable!());
+        assert_eq!(result.unwrap(), PathBuf::from("/some/path"));
+    }
+
+    #[test]
+    fn resolve_cli_repo_path_falls_back_to_cwd_when_repo_is_none() {
+        let result = resolve_cli_repo_path(None, || Ok(PathBuf::from("/cwd")));
+        assert_eq!(result.unwrap(), PathBuf::from("/cwd"));
+    }
+
+    #[test]
+    fn resolve_cli_repo_path_returns_clean_error_when_cwd_is_unavailable() {
+        let result = resolve_cli_repo_path(None, || {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "boom"))
+        });
+        let err = result.unwrap_err();
+        let formatted = format!("{err:#}");
+        assert!(
+            formatted.contains("cannot determine current working directory"),
+            "expected error context in: {formatted}"
+        );
+    }
 }

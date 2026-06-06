@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `manifest` / `history` / `snapshot` / `context` CLI subcommands no longer panic when the current directory is unavailable.** They resolved the default repo path with `std::env::current_dir().expect(...)`, which panicked with a backtrace if the cwd was deleted or inaccessible (a real case for the shim running in agent-driven throwaway tmp repos). They now return a clean `anyhow` error instead. (#364)
 - **The shim's structured-output path (`git diff` / `log` / `show` / `blame`) no longer stalls on an unreachable OpenTelemetry collector.** The structured path flushed telemetry with an unbounded `force_flush()`, and `main` then dropped the `TelemetryGuard`, whose `Drop` ran unbounded `shutdown()` calls — so a single `git diff` could block for minutes (≈10 s per call was reproduced against a black-hole endpoint: 5 s tracer shutdown + 5 s meter shutdown). Both the explicit flush and the `Drop`-path shutdown are now time-bounded (500 ms each), mirroring the already-bounded passthrough path; a saturated or unreachable collector can no longer stall an intercepted git command. Telemetry still delivers normally when the collector is responsive (proven by an end-to-end data-loss guard against a live capture server). (#361)
 
 ## [0.9.3] — 2026-06-03
