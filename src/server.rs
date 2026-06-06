@@ -75,7 +75,7 @@ fn spawn_orphan_watchdog() {
                 // also infallible (it cannot return an error).
                 let raw: libc::pid_t = unsafe { libc::getppid() };
                 // `pid_t` is signed but a real ppid is always >= 1; the cast is a
-                // plain widening reinterpretation used only for the `<= 1` compare.
+                // plain widening reinterpretation used only for the `== 1` compare.
                 raw as u32
             }) {
                 eprintln!(
