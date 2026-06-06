@@ -267,6 +267,16 @@ mod tests {
     }
 
     #[test]
+    fn it_passes_through_gh_pr_diff_with_non_numeric_arg() {
+        // After #367 the numeric-PR-number branch is gone; a branch-name arg
+        // (or anything else) passes through like every other gh subcommand.
+        assert_eq!(
+            classify(&["gh", "pr", "diff", "my-branch"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
     fn it_passes_through_gh_pr_list() {
         assert_eq!(classify(&["gh", "pr", "list"]), Classification::Passthrough);
     }

@@ -108,6 +108,64 @@ fn find_gh(path: &str) -> Option<std::path::PathBuf> {
     })
 }
 
+/// ADVERSARIAL QA PROBE (issue #367 breaking change): `gh pr diff <N>` with a
+/// numeric PR number — the EXACT case the pre-#367 shim intercepted and routed
+/// to a structured manifest — must now pass straight through to the real gh
+/// binary, returning the real gh's stdout and exit code verbatim with NO JSON.
+///
+/// A regression that re-introduced interception would make this stdout contain
+/// `{` (manifest JSON) and exit 0 instead of the stub's sentinel + exit 7.
+#[test]
+#[cfg(unix)]
+fn qa_gh_pr_diff_numeric_passes_through_verbatim_with_exit_code() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, shim_dir) = build_shim_dir_with_gh_symlink();
+    let stub_tmp = TempDir::new().unwrap();
+    let stub_dir = stub_tmp.path().join("bin");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let stub = stub_dir.join("gh");
+    // Stub prints a non-JSON sentinel + the args it received, then exits 7.
+    fs::write(
+        &stub,
+        b"#!/bin/sh\necho GH_PR_DIFF_STUB_SENTINEL\necho \"ARGS:$*\"\nexit 7\n",
+    )
+    .unwrap();
+    let mut p = fs::metadata(&stub).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&stub, p).unwrap();
+
+    // PATH: stub first so the shim resolves the stub as "real gh" on passthrough.
+    let path = format!("{}:{}", stub_dir.display(), shim_dir.display());
+    let out = Command::new(shim_dir.join("gh"))
+        .args(["pr", "diff", "42"])
+        .env("CLAUDECODE", "1") // agent caller — the case that USED to intercept
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("GH_PR_DIFF_STUB_SENTINEL"),
+        "gh pr diff 42 must pass through to real gh, not emit a manifest. stdout: {stdout:?}, stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("ARGS:pr diff 42"),
+        "the shim must forward argv unchanged to real gh. stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.trim_start().starts_with('{'),
+        "gh pr diff 42 must NOT produce JSON manifest output. stdout: {stdout:?}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "the real gh exit code (7) must propagate verbatim through the shim. stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// ADVERSARIAL QA PROBE: `gh pr diff --help` must pass through to real gh so
 /// the user sees help text, not a git-prism manifest attempt against a PR
 /// numbered "--help".

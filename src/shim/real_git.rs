@@ -541,8 +541,8 @@ mod tests {
     /// in the FIRST entry, and a real (non-shim) `git` in the SECOND entry. The
     /// resolver MUST skip the shim symlink and return the real git — not the
     /// symlink, and not anything that canonicalizes to the shim binary.
-    /// Returning the symlink would make `ensure_sha_present_for_pr` re-invoke
-    /// the shim → infinite recursion.
+    /// Returning the symlink would make the shim's passthrough exec path
+    /// re-invoke the shim itself → infinite recursion.
     ///
     /// This is a positive assertion (`assert_eq!` on the real git) so it cannot
     /// pass vacuously: the resolver is forced to return Some, and that Some must
