@@ -162,7 +162,6 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
         Classification::FunctionContext { .. } => ShimSubcommand::Log, // git log -S/-G is still log
         Classification::ShowSnapshot { .. } => ShimSubcommand::Show,
         Classification::BlameSnapshot { .. } => ShimSubcommand::Blame,
-        Classification::GhPrDiff { .. } => ShimSubcommand::Diff,
         Classification::Passthrough => ShimSubcommand::Other,
     }
 }
@@ -635,10 +634,6 @@ mod tests {
                 path: "src/main.rs"
             }),
             ShimSubcommand::Blame
-        );
-        assert_eq!(
-            classification_to_subcommand(&Classification::GhPrDiff { pr_number: "42" }),
-            ShimSubcommand::Diff
         );
         assert_eq!(
             classification_to_subcommand(&Classification::Passthrough),

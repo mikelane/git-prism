@@ -20,8 +20,6 @@ pub(crate) enum Classification<'a> {
     ShowSnapshot { sha: &'a str },
     /// `git blame <path>` → `get_file_snapshots` (blame variant)
     BlameSnapshot { path: &'a str },
-    /// `gh pr diff <N>` → `get_change_manifest` via resolved PR base..head range
-    GhPrDiff { pr_number: &'a str },
     /// Anything else — pass through to real git/gh.
     Passthrough,
 }
@@ -53,19 +51,10 @@ pub(crate) fn classify<'a>(argv: &'a [&'a str]) -> Classification<'a> {
 
 /// Classify `gh <subcommand> …` argv.
 ///
-/// Only `gh pr diff <N>` is intercepted; everything else passes through to
-/// the real `gh` binary.
-fn classify_gh<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
-    // gh pr diff <N>  →  intercept only if N is a numeric PR number.
-    // Flags (starting with -) and non-numeric tokens pass through.
-    if subcommand == "pr"
-        && rest.first() == Some(&"diff")
-        && let Some(pr_number) = rest.get(1)
-        && !pr_number.starts_with('-')
-        && pr_number.chars().all(|c| c.is_ascii_digit())
-    {
-        return Classification::GhPrDiff { pr_number };
-    }
+/// All `gh` subcommands pass through to the real `gh` binary unchanged.
+/// Structured PR review is available via the MCP tools (`review_change`,
+/// `get_change_manifest`) rather than through shim interception.
+fn classify_gh<'a>(_subcommand: &str, _rest: &[&'a str]) -> Classification<'a> {
     Classification::Passthrough
 }
 
@@ -221,10 +210,11 @@ mod tests {
     // --- gh classification ---
 
     #[test]
-    fn it_classifies_gh_pr_diff_as_gh_pr_diff() {
+    fn it_passes_through_gh_pr_diff_with_number() {
+        // gh pr diff <N> must now pass straight through to the real gh binary.
         assert_eq!(
             classify(&["gh", "pr", "diff", "42"]),
-            Classification::GhPrDiff { pr_number: "42" }
+            Classification::Passthrough
         );
     }
 
