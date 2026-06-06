@@ -498,19 +498,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_cli_repo_path_uses_explicit_repo_without_calling_cwd() {
+    fn it_uses_explicit_repo_without_calling_cwd() {
         let result = resolve_cli_repo_path(Some("/some/path".into()), || unreachable!());
         assert_eq!(result.unwrap(), PathBuf::from("/some/path"));
     }
 
     #[test]
-    fn resolve_cli_repo_path_falls_back_to_cwd_when_repo_is_none() {
+    fn it_falls_back_to_cwd_when_repo_is_none() {
         let result = resolve_cli_repo_path(None, || Ok(PathBuf::from("/cwd")));
         assert_eq!(result.unwrap(), PathBuf::from("/cwd"));
     }
 
     #[test]
-    fn resolve_cli_repo_path_returns_clean_error_when_cwd_is_unavailable() {
+    fn it_returns_clean_error_when_cwd_is_unavailable() {
         let result = resolve_cli_repo_path(None, || {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "boom"))
         });
@@ -520,5 +520,15 @@ mod tests {
             formatted.contains("cannot determine current working directory"),
             "expected error context in: {formatted}"
         );
+    }
+
+    #[test]
+    fn it_treats_empty_repo_string_as_an_explicit_path() {
+        // `--repo ""` parses to Some(String::new()); the helper returns it as an
+        // explicit empty path (gix resolves "" to cwd downstream) rather than
+        // falling back via cwd. Pin this so a future is_empty() fallback is a
+        // deliberate choice, not an accident.
+        let result = resolve_cli_repo_path(Some(String::new()), || unreachable!());
+        assert_eq!(result.unwrap(), std::path::PathBuf::from(""));
     }
 }
