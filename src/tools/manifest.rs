@@ -1448,12 +1448,14 @@ mod tests {
         let imports = go_file.imports_changed.as_ref().unwrap();
         assert!(imports.added.iter().any(|i| i.contains("os")));
 
-        // README has no function analysis (unknown language)
+        // README is labeled "markdown" but has no grammar, so functions_changed is null.
+        // This proves the decoupling: language label != analyzer presence.
         let readme = manifest
             .files
             .iter()
             .find(|f| f.path == "README.md")
             .unwrap();
+        assert_eq!(readme.language, "markdown");
         assert!(readme.functions_changed.is_none());
     }
 
@@ -4339,6 +4341,83 @@ mod tests {
         assert!(
             no_imports_entry.functions_changed.is_some(),
             "no_imports.rs should keep its function signatures at tier1"
+        );
+    }
+
+    /// Proves the #368 decoupling contract: a file with a newly-mapped extension
+    /// (`.sh`) that has no tree-sitter grammar gets the correct language label
+    /// AND `functions_changed: null`.
+    #[test]
+    fn it_labels_shell_file_with_no_grammar_as_shell_and_null_functions() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(path.join("deploy.sh"), "#!/bin/bash\necho hello\n").unwrap();
+        Command::new("git")
+            .args(["add", "deploy.sh"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        std::fs::write(
+            path.join("deploy.sh"),
+            "#!/bin/bash\necho hello\necho world\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "deploy.sh"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add world line"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let options = ManifestOptions {
+            include_patterns: vec![],
+            exclude_patterns: vec![],
+            include_function_analysis: true,
+            max_response_tokens: None,
+        };
+        let manifest = build_manifest(&path, "HEAD~1", "HEAD", &options, 0, 200).unwrap();
+
+        let shell_file = manifest
+            .files
+            .iter()
+            .find(|f| f.path == "deploy.sh")
+            .expect("deploy.sh must appear in the manifest");
+
+        assert_eq!(
+            shell_file.language, "shell",
+            "shell file must be labeled 'shell', not 'unknown'"
+        );
+        assert!(
+            shell_file.functions_changed.is_none(),
+            "shell has no tree-sitter grammar; functions_changed must be null"
         );
     }
 }

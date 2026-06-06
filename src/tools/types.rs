@@ -573,6 +573,19 @@ pub fn detect_language(path: &str) -> &'static str {
         "c" | "h" => "c",
         "cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx" => "cpp",
         "cs" => "csharp",
+        "sh" | "bash" | "zsh" => "shell",
+        "yml" | "yaml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "toml" => "toml",
+        "json" => "json",
+        "j2" | "jinja" | "jinja2" => "jinja",
+        "xml" => "xml",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" => "scss",
+        "ini" | "cfg" => "ini",
+        "sql" => "sql",
+        "txt" => "text",
         _ => "unknown",
     }
 }
@@ -703,8 +716,103 @@ mod tests {
     }
 
     #[test]
-    fn it_returns_unknown_for_unsupported_extension() {
-        assert_eq!(detect_language("README.md"), "unknown");
+    fn it_detects_markdown_from_md_extension() {
+        assert_eq!(detect_language("README.md"), "markdown");
+    }
+
+    #[test]
+    fn it_detects_shell_from_sh_extension() {
+        assert_eq!(detect_language("deploy.sh"), "shell");
+    }
+
+    #[test]
+    fn it_detects_shell_from_bash_extension() {
+        assert_eq!(detect_language("setup.bash"), "shell");
+    }
+
+    #[test]
+    fn it_detects_shell_from_zsh_extension() {
+        assert_eq!(detect_language("profile.zsh"), "shell");
+    }
+
+    #[test]
+    fn it_detects_yaml_from_yml_extension() {
+        assert_eq!(detect_language(".github/workflows/ci.yml"), "yaml");
+    }
+
+    #[test]
+    fn it_detects_yaml_from_yaml_extension() {
+        assert_eq!(detect_language("config.yaml"), "yaml");
+    }
+
+    #[test]
+    fn it_detects_toml_from_toml_extension() {
+        assert_eq!(detect_language("Cargo.toml"), "toml");
+    }
+
+    #[test]
+    fn it_detects_json_from_json_extension() {
+        assert_eq!(detect_language("package.json"), "json");
+    }
+
+    #[test]
+    fn it_detects_jinja_from_j2_extension() {
+        assert_eq!(detect_language("template.j2"), "jinja");
+    }
+
+    #[test]
+    fn it_detects_jinja_from_jinja_extension() {
+        assert_eq!(detect_language("page.jinja"), "jinja");
+    }
+
+    #[test]
+    fn it_detects_jinja_from_jinja2_extension() {
+        assert_eq!(detect_language("index.jinja2"), "jinja");
+    }
+
+    #[test]
+    fn it_detects_xml_from_xml_extension() {
+        assert_eq!(detect_language("pom.xml"), "xml");
+    }
+
+    #[test]
+    fn it_detects_html_from_html_extension() {
+        assert_eq!(detect_language("index.html"), "html");
+    }
+
+    #[test]
+    fn it_detects_html_from_htm_extension() {
+        assert_eq!(detect_language("page.htm"), "html");
+    }
+
+    #[test]
+    fn it_detects_css_from_css_extension() {
+        assert_eq!(detect_language("styles.css"), "css");
+    }
+
+    #[test]
+    fn it_detects_scss_from_scss_extension() {
+        assert_eq!(detect_language("styles.scss"), "scss");
+    }
+
+    #[test]
+    fn it_detects_ini_from_ini_extension() {
+        assert_eq!(detect_language("setup.ini"), "ini");
+    }
+
+    #[test]
+    fn it_detects_ini_from_cfg_extension() {
+        assert_eq!(detect_language("pytest.cfg"), "ini");
+    }
+
+    #[test]
+    fn it_detects_sql_from_sql_extension() {
+        assert_eq!(detect_language("migration.sql"), "sql");
+    }
+
+    #[test]
+    fn it_detects_text_from_txt_extension() {
+        assert_eq!(detect_language("requirements.txt"), "text");
     }
 
     #[test]
