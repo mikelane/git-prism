@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The shim no longer intercepts `gh pr diff <N>`.** It now passes straight through to the real `gh`, returning the unified diff that `gh pr diff` is contractually expected to produce. Previously the shim rewrote it into a JSON change-manifest, which silently broke reviewers and any tooling that parses the diff output shape. Structured PR review is still available through the git-prism MCP tools (`review_change`, `get_change_manifest`). (#367)
 
+### Fixed
+
+- **The change manifest now labels common non-grammar file types instead of `unknown`.** Common extensions now map to a named language — `.sh` to `shell`, `.yml` to `yaml`, `.j2` to `jinja`, `.md` to `markdown`, `.toml` to `toml`, `.json` to `json`, and more — so `languages_affected` reflects a PR's real composition rather than only the tree-sitter-supported subset. Files without a grammar still correctly report `functions_changed: null`. (#368)
+
 ## [0.9.4] — 2026-06-05
 
 ### Added
