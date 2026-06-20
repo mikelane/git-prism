@@ -1,3 +1,5 @@
+use gix::revision::walk::Sorting;
+use gix_traverse::commit::simple::CommitTimeOrder;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -160,9 +162,7 @@ impl RepoReader {
             .repo
             .rev_walk([head_id])
             .with_hidden([base_id])
-            .sorting(gix::revision::walk::Sorting::ByCommitTime(
-                gix_traverse::commit::simple::CommitTimeOrder::NewestFirst,
-            ))
+            .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
             .all()
             .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
