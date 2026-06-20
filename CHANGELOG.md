@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`git log A..B` (and the shim's interception of it) no longer fails on diverged history.** `walk_commits` computed the two-dot range with a hand-rolled walk that stopped only on the exact base OID and followed first-parent only, so when `base` was not an ancestor of `head` (a branch whose base has advanced — the normal case) the walk ran off to the root commit and errored with `commit <root> has no parent but base <base> not yet reached`. It now uses gix's `rev_walk` with the base as a hidden tip and `ByCommitTime(NewestFirst)` sorting, matching `git rev-list --reverse base..head` for diverged, merge, octopus, and disjoint histories. (#382)
+
 ## [0.10.0] — 2026-06-06
 
 ### Changed
