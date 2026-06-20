@@ -187,7 +187,10 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
 ///
 /// The `GIT_PRISM_CWD_UNAVAILABLE` env key is reserved for testing: when set,
 /// this function behaves as if `current_dir()` failed.
-fn resolve_repo_path(env: &dyn EnvSource, repo_dir_overrides: &[&str]) -> Option<PathBuf> {
+pub(crate) fn resolve_repo_path(
+    env: &dyn EnvSource,
+    repo_dir_overrides: &[&str],
+) -> Option<PathBuf> {
     if let Some(repo) = env.get("GIT_PRISM_REPO") {
         return Some(PathBuf::from(repo));
     }
@@ -712,5 +715,42 @@ mod tests {
             classification_to_subcommand(&Classification::Passthrough),
             ShimSubcommand::Other
         );
+    }
+    #[test]
+    fn resolve_repo_path_with_no_overrides_returns_cwd() {
+        let cwd = std::env::current_dir().expect("test requires a readable cwd");
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &[]);
+        assert_eq!(result, Some(cwd));
+    }
+
+    #[test]
+    fn resolve_repo_path_with_single_relative_override_joins_onto_cwd() {
+        let cwd = std::env::current_dir().expect("test requires a readable cwd");
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &["src"]);
+        assert_eq!(result, Some(cwd.join("src")));
+    }
+
+    #[test]
+    fn resolve_repo_path_absolute_segment_resets_base() {
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &["rel", "/abs"]);
+        assert_eq!(result, Some(std::path::PathBuf::from("/abs")));
+    }
+
+    #[test]
+    fn resolve_repo_path_two_relative_segments_fold_in_order() {
+        let cwd = std::env::current_dir().expect("test requires a readable cwd");
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &["a", "b"]);
+        assert_eq!(result, Some(cwd.join("a").join("b")));
+    }
+
+    #[test]
+    fn resolve_repo_path_returns_none_when_cwd_unavailable() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_CWD_UNAVAILABLE", "1")]));
+        let result = resolve_repo_path(&env, &[]);
+        assert_eq!(result, None);
     }
 }

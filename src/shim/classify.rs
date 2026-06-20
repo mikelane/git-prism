@@ -1438,4 +1438,211 @@ mod tests {
             Classification::ShowSnapshot { sha: ":/x" }
         );
     }
+
+    // --- Mutant-killing: untested arms of skip_git_global_options ---
+
+    // Two-token value-taking options: --namespace, --super-prefix, --config-env
+    #[test]
+    fn it_skips_namespace_global_in_space_separated_form() {
+        let result = classify(&["git", "--namespace", "ns", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_super_prefix_global_in_space_separated_form() {
+        let result = classify(&["git", "--super-prefix", "p", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_config_env_global_in_space_separated_form() {
+        let result = classify(&["git", "--config-env", "NAME=v", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_namespace_global_in_equals_form() {
+        let result = classify(&["git", "--namespace=ns", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_super_prefix_global_in_equals_form() {
+        let result = classify(&["git", "--super-prefix=p", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_config_env_global_in_equals_form() {
+        let result = classify(&["git", "--config-env=NAME=v", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_capital_p_no_pager_flag() {
+        let result = classify(&["git", "-P", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_bare_flag() {
+        let result = classify(&["git", "--bare", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_no_replace_objects_flag() {
+        let result = classify(&["git", "--no-replace-objects", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_literal_pathspecs_flag() {
+        let result = classify(&["git", "--literal-pathspecs", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_glob_pathspecs_flag() {
+        let result = classify(&["git", "--glob-pathspecs", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_noglob_pathspecs_flag() {
+        let result = classify(&["git", "--noglob-pathspecs", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_icase_pathspecs_flag() {
+        let result = classify(&["git", "--icase-pathspecs", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Manifest { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_skips_no_optional_locks_flag() {
+        let result = classify(&["git", "--no-optional-locks", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_lowercase_c_with_subcommand_lookalike_value_as_passthrough() {
+        let result = classify(&["git", "-c", "diff", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Passthrough,
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_lowercase_c_key_val_log_range_as_history() {
+        let result = classify(&["git", "-c", "user.name=x", "log", "A..B"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::History { range: "A..B" },
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_when_lowercase_c_is_last_token() {
+        let result = classify(&["git", "-c"]);
+        assert_eq!(
+            result,
+            ClassifyResult {
+                classification: Classification::Passthrough,
+                repo_dir_overrides: vec![],
+            }
+        );
+    }
 }
