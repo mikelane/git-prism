@@ -149,16 +149,23 @@ impl RepoReader {
         // `with_hidden` marks base as a "hidden tip": the walker traverses from
         // head but excludes any commit reachable from base (including base itself),
         // which is exactly the two-dot range semantics of `git rev-list base..head`.
+        //
+        // We sort by `NewestFirst` (commit-time descending) and then reverse to match
+        // `git rev-list --reverse`, which is the order callers of `get_commit_history`
+        // expect. `BreadthFirst` (the default) reversed does NOT match git's output for
+        // ranges that span merge commits — the commit SET is correct but the ORDER
+        // diverges.  `ByCommitTime(NewestFirst)` then reversed matches `git rev-list
+        // --reverse` for all tested graph shapes.
         let walk = self
             .repo
             .rev_walk([head_id])
             .with_hidden([base_id])
+            .sorting(gix::revision::walk::Sorting::ByCommitTime(
+                gix_traverse::commit::simple::CommitTimeOrder::NewestFirst,
+            ))
             .all()
             .map_err(|e| GitError::ReadObject(e.to_string()))?;
 
-        // gix default walk order is newest-first (BreadthFirst). Reverse to
-        // oldest-first to match `git rev-list --reverse` and the existing test
-        // contract.
         let mut commits = walk
             .map(|result| {
                 let info = result.map_err(|e| GitError::ReadObject(e.to_string()))?;
@@ -1384,6 +1391,331 @@ mod tests {
         assert!(
             files.iter().any(|p| p == "feature.rs"),
             "mixed tag..branch range must include feature.rs, got: {files:?}"
+        );
+    }
+
+    // ===== ADVERSARIAL QA: walk_commits reachability (issue #382 pen-test) =====
+
+    /// Oracle helper: `git rev-list --reverse base..head`, oldest-first SHAs.
+    fn git_rev_list_reverse(path: &std::path::Path, base: &str, head: &str) -> Vec<String> {
+        let out = git(path, &["rev-list", "--reverse", &format!("{base}..{head}")]);
+        assert!(
+            out.status.success(),
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    fn walk_shas(reader: &RepoReader, base: &str, head: &str) -> Vec<String> {
+        reader
+            .walk_commits(base, head)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.sha)
+            .collect()
+    }
+
+    /// Build: main has A(root)->B. Branch feature off B adds C,D. Back on main add E.
+    /// Merge feature into main -> M, with PINNED distinct dates so the test is
+    /// deterministic across runs (no timestamp collisions). Range B..M must match
+    /// `git rev-list --reverse` exactly (diverged history + a real merge commit).
+    #[test]
+    fn qa_walk_diverged_with_merge_matches_git_rev_list() {
+        let (_dir, path) = create_test_repo(); // A = initial commit
+        std::fs::write(path.join("b.txt"), "b\n").unwrap();
+        git(&path, &["add", "b.txt"]);
+        commit_with_date(&path, "B", "2021-01-02T00:00:00");
+
+        git(&path, &["checkout", "-b", "feature"]);
+        std::fs::write(path.join("c.txt"), "c\n").unwrap();
+        git(&path, &["add", "c.txt"]);
+        commit_with_date(&path, "C", "2021-01-03T00:00:00");
+        std::fs::write(path.join("d.txt"), "d\n").unwrap();
+        git(&path, &["add", "d.txt"]);
+        commit_with_date(&path, "D", "2021-01-04T00:00:00");
+
+        git(&path, &["checkout", "main"]);
+        std::fs::write(path.join("e.txt"), "e\n").unwrap();
+        git(&path, &["add", "e.txt"]);
+        commit_with_date(&path, "E", "2021-01-05T00:00:00");
+
+        let merge = Command::new("git")
+            .args(["merge", "--no-ff", "feature", "-m", "M merge"])
+            .env("GIT_AUTHOR_DATE", "2021-01-06T00:00:00")
+            .env("GIT_COMMITTER_DATE", "2021-01-06T00:00:00")
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        assert!(merge.status.success(), "merge failed");
+
+        let reader = RepoReader::open(&path).unwrap();
+        let b_sha = String::from_utf8(git(&path, &["rev-parse", "main~1^1~1"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let m_sha = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let expected = git_rev_list_reverse(&path, &b_sha, &m_sha);
+        let actual = walk_shas(&reader, &b_sha, &m_sha);
+        assert_eq!(
+            actual, expected,
+            "walk_commits must match `git rev-list --reverse B..M` for diverged+merge history"
+        );
+    }
+
+    /// Octopus merge: 3 parents merged in one commit, with PINNED distinct dates.
+    /// base..octopus must equal `git rev-list --reverse` in BOTH set and order.
+    /// Deterministic repro of the BreadthFirst-vs-rev-list ordering divergence.
+    #[test]
+    fn qa_walk_octopus_merge_matches_git_rev_list() {
+        let (_dir, path) = create_test_repo(); // root
+        let root = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Distinct, increasing dates so ordering is well-defined and stable.
+        let dates = [
+            ("t1", "2021-02-01T00:00:00"),
+            ("t2", "2021-02-02T00:00:00"),
+            ("t3", "2021-02-03T00:00:00"),
+        ];
+        for (br, date) in dates {
+            git(&path, &["checkout", "-b", br, &root]);
+            let f = format!("{br}.txt");
+            std::fs::write(path.join(&f), "x\n").unwrap();
+            git(&path, &["add", &f]);
+            commit_with_date(&path, br, date);
+            git(&path, &["checkout", "main"]);
+        }
+
+        let out = Command::new("git")
+            .args(["merge", "--no-ff", "t1", "t2", "t3", "-m", "octopus"])
+            .env("GIT_AUTHOR_DATE", "2021-02-04T00:00:00")
+            .env("GIT_COMMITTER_DATE", "2021-02-04T00:00:00")
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "octopus merge setup failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let head = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let expected = git_rev_list_reverse(&path, &root, &head);
+        let actual = walk_shas(&reader, &root, &head);
+        assert_eq!(
+            actual, expected,
+            "walk_commits must match `git rev-list --reverse root..octopus` (3+ parents)"
+        );
+    }
+
+    /// Disjoint histories: head is an orphan branch sharing NO ancestor with base.
+    /// `git rev-list base..head` == all of head's commits (nothing reachable from base
+    /// is excluded). walk_commits must agree, not error or under-return.
+    #[test]
+    fn qa_walk_disjoint_orphan_history_matches_git_rev_list() {
+        let (_dir, path) = create_test_repo(); // base lineage on main
+        let base = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        git(&path, &["checkout", "--orphan", "orphan"]);
+        // orphan branch: clean slate
+        let _ = git(&path, &["rm", "-rf", "."]);
+        std::fs::write(path.join("o1.txt"), "o1\n").unwrap();
+        git(&path, &["add", "o1.txt"]);
+        git(&path, &["commit", "-m", "orphan-1"]);
+        std::fs::write(path.join("o2.txt"), "o2\n").unwrap();
+        git(&path, &["add", "o2.txt"]);
+        git(&path, &["commit", "-m", "orphan-2"]);
+        let head = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let expected = git_rev_list_reverse(&path, &base, &head);
+        let actual = walk_shas(&reader, &base, &head);
+        assert_eq!(
+            actual, expected,
+            "walk_commits must match git for disjoint/orphan histories (base..head = all head commits)"
+        );
+    }
+
+    /// base == root commit (root has no parent). root..head must equal git rev-list.
+    #[test]
+    fn qa_walk_base_is_root_commit_matches_git_rev_list() {
+        let (_dir, path) = create_test_repo(); // root
+        let root = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        for i in 1..=3 {
+            let f = format!("f{i}.txt");
+            std::fs::write(path.join(&f), "x\n").unwrap();
+            git(&path, &["add", &f]);
+            git(&path, &["commit", "-m", &format!("c{i}")]);
+        }
+        let head = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let expected = git_rev_list_reverse(&path, &root, &head);
+        let actual = walk_shas(&reader, &root, &head);
+        assert_eq!(
+            actual, expected,
+            "root..head must match git rev-list --reverse"
+        );
+    }
+
+    /// Reverse range: head is an ANCESTOR of base (base..head where head<base).
+    /// git rev-list base..head returns EMPTY. walk_commits must return empty, not
+    /// the whole history and not an error.
+    #[test]
+    fn qa_walk_head_ancestor_of_base_returns_empty() {
+        let (_dir, path) = create_test_repo();
+        for i in 1..=3 {
+            let f = format!("f{i}.txt");
+            std::fs::write(path.join(&f), "x\n").unwrap();
+            git(&path, &["add", &f]);
+            git(&path, &["commit", "-m", &format!("c{i}")]);
+        }
+        let reader = RepoReader::open(&path).unwrap();
+        // base = HEAD (newest), head = HEAD~2 (older). head is ancestor of base.
+        let expected = git_rev_list_reverse(&path, "HEAD", "HEAD~2");
+        let actual = walk_shas(&reader, "HEAD", "HEAD~2");
+        assert_eq!(
+            actual, expected,
+            "base..head with head as ancestor of base must be empty (got {actual:?})"
+        );
+        assert!(actual.is_empty(), "expected empty range, got {actual:?}");
+    }
+
+    /// Short (abbreviated) SHA refs must work on both ends.
+    #[test]
+    fn qa_walk_accepts_short_shas() {
+        let (_dir, path) = create_test_repo();
+        std::fs::write(path.join("b.txt"), "b\n").unwrap();
+        git(&path, &["add", "b.txt"]);
+        git(&path, &["commit", "-m", "B"]);
+        std::fs::write(path.join("c.txt"), "c\n").unwrap();
+        git(&path, &["add", "c.txt"]);
+        git(&path, &["commit", "-m", "C"]);
+
+        let base_short = String::from_utf8(git(&path, &["rev-parse", "--short", "HEAD~2"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let head_short = String::from_utf8(git(&path, &["rev-parse", "--short", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let expected = git_rev_list_reverse(&path, &base_short, &head_short);
+        let actual = walk_shas(&reader, &base_short, &head_short);
+        assert_eq!(actual, expected, "short SHAs must resolve and match git");
+        assert_eq!(actual.len(), 2);
+    }
+
+    /// Annotated tags on both ends of walk_commits (not just diff_commits).
+    #[test]
+    fn qa_walk_annotated_tag_range_matches_git_rev_list() {
+        let (_dir, path) = create_test_repo();
+        git(&path, &["tag", "-a", "v_old", "-m", "old"]);
+        std::fs::write(path.join("b.txt"), "b\n").unwrap();
+        git(&path, &["add", "b.txt"]);
+        git(&path, &["commit", "-m", "B"]);
+        std::fs::write(path.join("c.txt"), "c\n").unwrap();
+        git(&path, &["add", "c.txt"]);
+        git(&path, &["commit", "-m", "C"]);
+        git(&path, &["tag", "-a", "v_new", "-m", "new"]);
+
+        let reader = RepoReader::open(&path).unwrap();
+        let expected = git_rev_list_reverse(&path, "v_old", "v_new");
+        let actual = walk_shas(&reader, "v_old", "v_new");
+        assert_eq!(
+            actual, expected,
+            "annotated tag..tag walk must match git rev-list --reverse"
+        );
+        let msgs: Vec<String> = reader
+            .walk_commits("v_old", "v_new")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.message)
+            .collect();
+        assert_eq!(msgs, vec!["B".to_string(), "C".to_string()]);
+    }
+
+    /// Ordering stress: a diamond where committer DATES are intentionally skewed so
+    /// date-order != topo-order. If gix walks by date and git rev-list uses topo,
+    /// the reversed sequences diverge. This is the highest-risk ordering case.
+    #[test]
+    fn qa_walk_skewed_dates_ordering_matches_git_rev_list() {
+        let (_dir, path) = create_test_repo(); // A root
+        let a = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // Branch X off A: commit with an OLD date.
+        git(&path, &["checkout", "-b", "x", &a]);
+        std::fs::write(path.join("x.txt"), "x\n").unwrap();
+        git(&path, &["add", "x.txt"]);
+        commit_with_date(&path, "X-old-date", "2001-01-01T00:00:00");
+
+        // Branch Y off A: commit with a NEWER date than X.
+        git(&path, &["checkout", "-b", "y", &a]);
+        std::fs::write(path.join("y.txt"), "y\n").unwrap();
+        git(&path, &["add", "y.txt"]);
+        commit_with_date(&path, "Y-new-date", "2020-01-01T00:00:00");
+
+        // Merge x into y so both are reachable from one head.
+        git(&path, &["merge", "--no-ff", "x", "-m", "merge x into y"]);
+        let head = String::from_utf8(git(&path, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let reader = RepoReader::open(&path).unwrap();
+        let expected = git_rev_list_reverse(&path, &a, &head);
+        let actual = walk_shas(&reader, &a, &head);
+        assert_eq!(
+            actual, expected,
+            "walk_commits ordering must match `git rev-list --reverse` even with skewed commit dates"
+        );
+    }
+
+    fn commit_with_date(path: &std::path::Path, msg: &str, date: &str) {
+        let out = Command::new("git")
+            .args(["commit", "-m", msg])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "dated commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

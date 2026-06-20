@@ -655,6 +655,7 @@ dependencies = [
  "chrono",
  "clap",
  "gix",
+ "gix-traverse",
  "glob",
  "insta",
  "libc",
