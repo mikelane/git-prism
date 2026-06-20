@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::agent_detection::EnvSource;
 use crate::metrics::{ShimOutcome, ShimSubcommand};
-use crate::shim::classify::{Classification, classify};
+use crate::shim::classify::{Classification, ClassifyResult, classify};
 use crate::shim::real_git::RealGitExec;
 use crate::telemetry::TelemetryGuard;
 
@@ -114,7 +114,10 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     }
 
     // 3. Classify the subcommand.
-    let classification = classify(argv);
+    let ClassifyResult {
+        classification,
+        repo_dir_overrides,
+    } = classify(argv);
     let subcommand = classification_to_subcommand(&classification);
     if classification == Classification::Passthrough {
         metrics.record_shim_invocation(ShimOutcome::Passthrough);
@@ -123,7 +126,9 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     }
 
     // 4. Dispatch to the handler.
-    let repo_path = match resolve_repo_path(env) {
+    //    When `-C <path>` was present in the argv, use that path as the repo
+    //    root; otherwise fall back to the usual env-var / cwd resolution.
+    let repo_path = match resolve_repo_path(env, &repo_dir_overrides) {
         Some(p) => p,
         None => {
             metrics.record_shim_invocation(ShimOutcome::Passthrough);
@@ -166,14 +171,26 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
     }
 }
 
-/// Return the repository path from `$GIT_PRISM_REPO` if set, otherwise use
-/// the current working directory.  Returns `None` when the cwd cannot be
-/// determined (deleted directory, permission error) — callers should fall
-/// through to passthrough so real git can handle the error gracefully.
+/// Return the repository path to use for manifest building.
+///
+/// Priority (highest first):
+/// 1. `GIT_PRISM_REPO` env var (test / explicit override).
+/// 2. `-C` values from the argv classifier, folded with git's `cd`-semantics:
+///    `git -C a -C b` → start from cwd, `cd a`, `cd b` → repo at `<cwd>/a/b`.
+///    An absolute value resets the base: `git -C /abs -C rel` → `/abs/rel`.
+///    A single absolute `-C /abs` → `/abs` (unchanged from old behaviour).
+/// 3. Current working directory.
+///
+/// Returns `None` when the cwd cannot be determined (deleted directory,
+/// permission error) — callers should fall through to passthrough so real git
+/// can handle the error gracefully.
 ///
 /// The `GIT_PRISM_CWD_UNAVAILABLE` env key is reserved for testing: when set,
 /// this function behaves as if `current_dir()` failed.
-fn resolve_repo_path(env: &dyn EnvSource) -> Option<PathBuf> {
+pub(crate) fn resolve_repo_path(
+    env: &dyn EnvSource,
+    repo_dir_overrides: &[&str],
+) -> Option<PathBuf> {
     if let Some(repo) = env.get("GIT_PRISM_REPO") {
         return Some(PathBuf::from(repo));
     }
@@ -182,7 +199,21 @@ fn resolve_repo_path(env: &dyn EnvSource) -> Option<PathBuf> {
     if env.get("GIT_PRISM_CWD_UNAVAILABLE").is_some() {
         return None;
     }
-    std::env::current_dir().ok()
+    let cwd = std::env::current_dir().ok()?;
+    if repo_dir_overrides.is_empty() {
+        return Some(cwd);
+    }
+    // Fold all -C values in order, matching git's `cd`-semantics:
+    // absolute value resets the base; relative value joins onto it.
+    let resolved = repo_dir_overrides.iter().fold(cwd, |base, &segment| {
+        let p = PathBuf::from(segment);
+        if p.is_absolute() {
+            p
+        } else {
+            base.join(segment)
+        }
+    });
+    Some(resolved)
 }
 
 #[cfg(test)]
@@ -514,6 +545,51 @@ mod tests {
     }
 
     #[test]
+    fn it_dispatches_to_handler_using_dash_c_path_as_repo() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Build a minimal two-commit repo.
+        let dir = TempDir::new().unwrap();
+        let repo_path = dir.path().to_path_buf();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "t@t.com"]);
+        run(&["config", "user.name", "T"]);
+        std::fs::write(repo_path.join("a.txt"), "hello\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-m", "first"]);
+        std::fs::write(repo_path.join("b.txt"), "world\n").unwrap();
+        run(&["add", "b.txt"]);
+        run(&["commit", "-m", "second"]);
+
+        let repo_str: &'static str =
+            Box::leak(repo_path.to_string_lossy().into_owned().into_boxed_str());
+
+        // No GIT_PRISM_REPO — repo path comes only from -C <path> in argv.
+        let env = MapEnv(HashMap::from([("CLAUDECODE", "1")]));
+        let exec = SpyExec::new(ExitCode::SUCCESS);
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        // Invoke with -C <repo> prefix — the bug scenario from issue #356.
+        let argv = ["git", "-C", repo_str, "diff", "HEAD~1..HEAD"];
+        let code = run_shim(&argv, &env, &exec, &mut guard);
+
+        // The shim must have dispatched to the handler (not passthrough).
+        assert!(
+            !exec.called.get(),
+            "expected handler dispatch via -C path, not passthrough"
+        );
+        assert_eq!(code, ExitCode::SUCCESS, "handler should return SUCCESS");
+    }
+
+    #[test]
     fn it_passes_through_when_current_dir_is_unavailable() {
         // GIT_PRISM_REPO not set, and current_dir cannot be determined.
         // run_shim must fall through to passthrough rather than panicking.
@@ -639,5 +715,42 @@ mod tests {
             classification_to_subcommand(&Classification::Passthrough),
             ShimSubcommand::Other
         );
+    }
+    #[test]
+    fn resolve_repo_path_with_no_overrides_returns_cwd() {
+        let cwd = std::env::current_dir().expect("test requires a readable cwd");
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &[]);
+        assert_eq!(result, Some(cwd));
+    }
+
+    #[test]
+    fn resolve_repo_path_with_single_relative_override_joins_onto_cwd() {
+        let cwd = std::env::current_dir().expect("test requires a readable cwd");
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &["src"]);
+        assert_eq!(result, Some(cwd.join("src")));
+    }
+
+    #[test]
+    fn resolve_repo_path_absolute_segment_resets_base() {
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &["rel", "/abs"]);
+        assert_eq!(result, Some(std::path::PathBuf::from("/abs")));
+    }
+
+    #[test]
+    fn resolve_repo_path_two_relative_segments_fold_in_order() {
+        let cwd = std::env::current_dir().expect("test requires a readable cwd");
+        let env = MapEnv(HashMap::new());
+        let result = resolve_repo_path(&env, &["a", "b"]);
+        assert_eq!(result, Some(cwd.join("a").join("b")));
+    }
+
+    #[test]
+    fn resolve_repo_path_returns_none_when_cwd_unavailable() {
+        let env = MapEnv(HashMap::from([("GIT_PRISM_CWD_UNAVAILABLE", "1")]));
+        let result = resolve_repo_path(&env, &[]);
+        assert_eq!(result, None);
     }
 }
