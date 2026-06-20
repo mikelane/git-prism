@@ -432,7 +432,7 @@ mod tests {
         // After #367 the numeric-PR-number branch is gone; a branch-name arg
         // (or anything else) passes through like every other gh subcommand.
         assert_eq!(
-            classify(&["gh", "pr", "diff", "my-branch"]),
+            classification(&["gh", "pr", "diff", "my-branch"]),
             Classification::Passthrough
         );
     }
@@ -1155,7 +1155,7 @@ mod tests {
     fn it_passes_through_git_show_with_branch_colon_path() {
         // git show origin/main:.lefthook.yml — object spec, must NOT try peel_to_commit
         assert_eq!(
-            classify(&["git", "show", "origin/main:.lefthook.yml"]),
+            classification(&["git", "show", "origin/main:.lefthook.yml"]),
             Classification::Passthrough
         );
     }
@@ -1164,11 +1164,7 @@ mod tests {
     fn it_passes_through_git_show_with_sha_colon_path() {
         // git show 0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json
         assert_eq!(
-            classify(&[
-                "git",
-                "show",
-                "0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json"
-            ]),
+            classification(&["git", "show", "0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json"]),
             Classification::Passthrough
         );
     }
@@ -1177,7 +1173,7 @@ mod tests {
     fn it_passes_through_git_show_with_head_colon_empty_path() {
         // git show HEAD: — tree spec, must pass through
         assert_eq!(
-            classify(&["git", "show", "HEAD:"]),
+            classification(&["git", "show", "HEAD:"]),
             Classification::Passthrough
         );
     }
@@ -1186,7 +1182,7 @@ mod tests {
     fn it_classifies_git_show_commit_message_search_as_snapshot() {
         // git show :/fix typo — colon-slash is commit search, NOT blob spec; before-colon is empty
         assert_eq!(
-            classify(&["git", "show", ":/fix typo"]),
+            classification(&["git", "show", ":/fix typo"]),
             Classification::ShowSnapshot { sha: ":/fix typo" }
         );
     }
@@ -1195,7 +1191,7 @@ mod tests {
     fn it_classifies_git_show_plain_sha_without_colon_as_snapshot() {
         // git show abc1234 — no colon at all, stays intercepted
         assert_eq!(
-            classify(&["git", "show", "abc1234"]),
+            classification(&["git", "show", "abc1234"]),
             Classification::ShowSnapshot { sha: "abc1234" }
         );
     }
@@ -1204,7 +1200,7 @@ mod tests {
     fn it_passes_through_git_show_head_colon_nested_path() {
         // git show HEAD:dir/file.txt — rev:path is a blob spec
         assert_eq!(
-            classify(&["git", "show", "HEAD:dir/file.txt"]),
+            classification(&["git", "show", "HEAD:dir/file.txt"]),
             Classification::Passthrough
         );
     }
@@ -1213,7 +1209,7 @@ mod tests {
     fn it_classifies_git_show_bare_colon_slash_regex_as_snapshot() {
         // git show :/regex — before-colon is empty, so it's commit-search syntax
         assert_eq!(
-            classify(&["git", "show", ":/another regex"]),
+            classification(&["git", "show", ":/another regex"]),
             Classification::ShowSnapshot {
                 sha: ":/another regex"
             }
@@ -1380,7 +1376,7 @@ mod tests {
     fn it_passes_through_git_show_stage0_blob_spec() {
         // git show :staged.txt — stage-0 index blob spec; empty before-colon is valid
         assert_eq!(
-            classify(&["git", "show", ":staged.txt"]),
+            classification(&["git", "show", ":staged.txt"]),
             Classification::Passthrough
         );
     }
@@ -1389,7 +1385,7 @@ mod tests {
     fn it_passes_through_git_show_explicit_stage0_blob_spec() {
         // git show :0:staged.txt — explicit stage-0 index blob spec
         assert_eq!(
-            classify(&["git", "show", ":0:staged.txt"]),
+            classification(&["git", "show", ":0:staged.txt"]),
             Classification::Passthrough
         );
     }
@@ -1398,7 +1394,7 @@ mod tests {
     fn it_passes_through_git_show_explicit_stage1_blob_spec() {
         // git show :1:file — merge stage 1 (common ancestor)
         assert_eq!(
-            classify(&["git", "show", ":1:file.txt"]),
+            classification(&["git", "show", ":1:file.txt"]),
             Classification::Passthrough
         );
     }
@@ -1407,7 +1403,7 @@ mod tests {
     fn it_passes_through_git_show_explicit_stage3_blob_spec() {
         // git show :3:file — merge stage 3 (theirs)
         assert_eq!(
-            classify(&["git", "show", ":3:conflict.txt"]),
+            classification(&["git", "show", ":3:conflict.txt"]),
             Classification::Passthrough
         );
     }
@@ -1416,7 +1412,7 @@ mod tests {
     fn it_passes_through_git_show_rev_colon_absolute_path() {
         // git show HEAD:/some/absolute/path — rev:abs-path is a valid blob lookup
         assert_eq!(
-            classify(&["git", "show", "HEAD:/some/absolute/path"]),
+            classification(&["git", "show", "HEAD:/some/absolute/path"]),
             Classification::Passthrough
         );
     }
