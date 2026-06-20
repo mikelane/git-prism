@@ -552,6 +552,21 @@ def step_hooks_status_mentions_path_shim(context: Context) -> None:
     )
 
 
+@then("the output does not contain the handler error marker")
+def step_output_no_handler_error(context: Context) -> None:
+    """Assert that stderr contains no 'git-prism shim: handler error' message.
+
+    This string appears when the shim intercepts a command but its handler
+    fails (e.g. peel-to-commit on a blob spec).  Its absence confirms the
+    shim either passed through cleanly or handled the command without error.
+    """
+    error_marker = "git-prism shim: handler error"
+    stderr = context.result.stderr or ""
+    assert error_marker not in stderr, (
+        f"Unexpected handler error in shim stderr:\n{stderr}"
+    )
+
+
 @then("the hooks status output indicates path-shim is not installed")
 def step_hooks_status_not_installed(context: Context) -> None:
     """Assert the hooks status output reports path-shim as not installed.

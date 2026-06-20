@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`git show <rev>:<path>` blob/object specs now pass through to real git** instead of failing with a peel-to-commit error (`was blob while trying to peel to commit`). The shim detects `<rev>:<path>` and `<rev>:` (tree spec) by checking that the text before `:` is non-empty and the text after `:` does not begin with `/`. Plain `git show <commit-ish>` and `:/<regex>` commit-message search continue to be intercepted and return structured JSON. (#381)
 - **`git log A..B` (and the shim's interception of it) no longer fails on diverged history.** `walk_commits` computed the two-dot range with a hand-rolled walk that stopped only on the exact base OID and followed first-parent only, so when `base` was not an ancestor of `head` (a branch whose base has advanced — the normal case) the walk ran off to the root commit and errored with `commit <root> has no parent but base <base> not yet reached`. It now uses gix's `rev_walk` with the base as a hidden tip and `ByCommitTime(NewestFirst)` sorting, matching `git rev-list --reverse base..head` for diverged, merge, octopus, and disjoint histories. (#382)
 
 ## [0.10.0] — 2026-06-06

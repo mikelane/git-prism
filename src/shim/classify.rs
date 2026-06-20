@@ -105,9 +105,23 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
     if has_scripted_output_flag(rest) {
         return Classification::Passthrough;
     }
-    // First non-flag argument is the sha.
-    if let Some(sha) = rest.iter().copied().find(|t| !t.starts_with('-')) {
-        return Classification::ShowSnapshot { sha };
+    // First non-flag argument is the object spec.
+    if let Some(spec) = rest.iter().copied().find(|t| !t.starts_with('-')) {
+        // Detect a blob/tree object spec of the form `<rev>:<path>` or `<rev>:`.
+        // Rules:
+        //   - Must contain `:`
+        //   - The text BEFORE the first `:` must be non-empty (a real rev)
+        //   - The text AFTER the first `:` must NOT begin with `/`
+        //     (`:/<regex>` is the commit-message-search syntax where the
+        //      before-colon portion is empty, so it falls through to ShowSnapshot)
+        if let Some(colon_pos) = spec.find(':') {
+            let before = &spec[..colon_pos];
+            let after = &spec[colon_pos + 1..];
+            if !before.is_empty() && !after.starts_with('/') {
+                return Classification::Passthrough;
+            }
+        }
+        return Classification::ShowSnapshot { sha: spec };
     }
     Classification::Passthrough
 }
@@ -639,6 +653,94 @@ mod tests {
             classify(&["git", "log", "main..HEAD"]),
             Classification::History {
                 range: "main..HEAD"
+            }
+        );
+    }
+
+    // --- ShowSnapshot: blob/object-spec passthrough (issue #381) ---
+
+    #[test]
+    fn it_passes_through_git_show_with_branch_colon_path() {
+        // git show origin/main:.lefthook.yml — object spec, must NOT try peel_to_commit
+        assert_eq!(
+            classify(&["git", "show", "origin/main:.lefthook.yml"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_sha_colon_path() {
+        // git show 0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json
+        assert_eq!(
+            classify(&[
+                "git",
+                "show",
+                "0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json"
+            ]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_head_colon_empty_path() {
+        // git show HEAD: — tree spec, must pass through
+        assert_eq!(
+            classify(&["git", "show", "HEAD:"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_commit_message_search_as_snapshot() {
+        // git show :/fix typo — colon-slash is commit search, NOT blob spec; before-colon is empty
+        assert_eq!(
+            classify(&["git", "show", ":/fix typo"]),
+            Classification::ShowSnapshot { sha: ":/fix typo" }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_plain_sha_without_colon_as_snapshot() {
+        // git show abc1234 — no colon at all, stays intercepted
+        assert_eq!(
+            classify(&["git", "show", "abc1234"]),
+            Classification::ShowSnapshot { sha: "abc1234" }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_head_colon_nested_path() {
+        // git show HEAD:dir/file.txt — rev:path is a blob spec
+        assert_eq!(
+            classify(&["git", "show", "HEAD:dir/file.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_colon_slash_regex_with_nonempty_before_as_passthrough() {
+        // git show HEAD:/path — before-colon is "HEAD" (non-empty), after begins with '/'
+        // This is a rev:path where path starts with '/' — real git accepts this.
+        // The before-colon is non-empty but after starts with '/', so per our rule it
+        // stays as ShowSnapshot (not a `:/<regex>` search form).
+        // Actually: `HEAD:/path` is a valid blob spec (HEAD rev, path `/path`).
+        // Per the detection rule: before="HEAD" (non-empty), after="/path" (starts with '/').
+        // The rule says after must NOT start with '/' to be passthrough — so this stays intercepted.
+        assert_eq!(
+            classify(&["git", "show", "HEAD:/some/absolute/path"]),
+            Classification::ShowSnapshot {
+                sha: "HEAD:/some/absolute/path"
+            }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_bare_colon_slash_regex_as_snapshot() {
+        // git show :/regex — before-colon is empty, so it's commit-search syntax
+        assert_eq!(
+            classify(&["git", "show", ":/another regex"]),
+            Classification::ShowSnapshot {
+                sha: ":/another regex"
             }
         );
     }

@@ -232,3 +232,28 @@ Feature: PATH-shim wrapper for structured git output
     And I run "git-prism hooks uninstall --path-shim" with the isolated HOME
     Then the exit code is 0
     And the directory "$HOME/.local/share/git-prism/bin" does not exist
+
+  # -------------------------------------------------------------------------
+  # Blob/object-spec passthrough (#381)
+  #
+  # git show <rev>:<path> prints the file content at that revision.  Before
+  # this fix the shim tried to peel the whole "<rev>:<path>" string to a
+  # commit, which always errored with "was blob while trying to peel to
+  # commit".  The shim must now pass these specs straight through to real git.
+  # -------------------------------------------------------------------------
+
+  @ISSUE-381
+  Scenario: git show HEAD:<file> passes through and prints the file content
+    Given a fixture git repository with two commits and a tracked file
+    When I run the shim as "git show HEAD:README.md" with CLAUDECODE=1
+    Then the exit code is 0
+    And the output contains "# Readme"
+    And the output does not contain the handler error marker
+
+  @ISSUE-381
+  Scenario: plain git show <sha> (no colon) still returns the JSON snapshot manifest
+    Given a fixture git repository with two commits
+    When I run the shim as "git show HEAD" with CLAUDECODE=1
+    Then the exit code is 0
+    And the output is valid JSON
+    And the JSON output has a "snapshots" key
