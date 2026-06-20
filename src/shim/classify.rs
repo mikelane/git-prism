@@ -718,14 +718,11 @@ mod tests {
     }
 
     #[test]
-    fn it_classifies_git_show_colon_slash_regex_with_nonempty_before_as_passthrough() {
-        // git show HEAD:/path — before-colon is "HEAD" (non-empty), after begins with '/'
-        // This is a rev:path where path starts with '/' — real git accepts this.
-        // The before-colon is non-empty but after starts with '/', so per our rule it
-        // stays as ShowSnapshot (not a `:/<regex>` search form).
-        // Actually: `HEAD:/path` is a valid blob spec (HEAD rev, path `/path`).
-        // Per the detection rule: before="HEAD" (non-empty), after="/path" (starts with '/').
-        // The rule says after must NOT start with '/' to be passthrough — so this stays intercepted.
+    fn it_classifies_git_show_rev_colon_absolute_path_as_snapshot() {
+        // git show HEAD:/some/absolute/path — before-colon "HEAD" is non-empty, but
+        // after-colon begins with '/'. The detection rule requires the after-colon
+        // text NOT start with '/' to passthrough, so this ambiguous form stays
+        // intercepted as a snapshot rather than being treated as a blob spec.
         assert_eq!(
             classify(&["git", "show", "HEAD:/some/absolute/path"]),
             Classification::ShowSnapshot {
