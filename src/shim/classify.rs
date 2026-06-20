@@ -105,9 +105,24 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
     if has_scripted_output_flag(rest) {
         return Classification::Passthrough;
     }
-    // First non-flag argument is the sha.
-    if let Some(sha) = rest.iter().copied().find(|t| !t.starts_with('-')) {
-        return Classification::ShowSnapshot { sha };
+    // First non-flag argument is the object spec.
+    if let Some(spec) = rest.iter().copied().find(|t| !t.starts_with('-')) {
+        // Any spec containing `:` is a blob/tree/index object spec that real git
+        // resolves without peeling to a commit — pass it through unchanged.
+        //
+        // The ONLY colon-bearing form that is NOT a blob spec is `:/text`, the
+        // commit-message-search syntax.  Every other colon form is an object spec:
+        //   `<rev>:<path>`       — rev-qualified blob
+        //   `<rev>:`             — rev-qualified tree root
+        //   `:<path>`            — stage-0 index blob
+        //   `:N:<path>`          — explicit-stage index blob (N = 0, 1, 2, 3)
+        //   `<rev>:/abs/path`    — rev-qualified absolute-path blob
+        //
+        // Refs cannot contain `:`, so this single rule is sufficient.
+        if spec.contains(':') && !spec.starts_with(":/") {
+            return Classification::Passthrough;
+        }
+        return Classification::ShowSnapshot { sha: spec };
     }
     Classification::Passthrough
 }
@@ -643,6 +658,77 @@ mod tests {
         );
     }
 
+    // --- ShowSnapshot: blob/object-spec passthrough (issue #381) ---
+
+    #[test]
+    fn it_passes_through_git_show_with_branch_colon_path() {
+        // git show origin/main:.lefthook.yml — object spec, must NOT try peel_to_commit
+        assert_eq!(
+            classify(&["git", "show", "origin/main:.lefthook.yml"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_sha_colon_path() {
+        // git show 0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json
+        assert_eq!(
+            classify(&[
+                "git",
+                "show",
+                "0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json"
+            ]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_with_head_colon_empty_path() {
+        // git show HEAD: — tree spec, must pass through
+        assert_eq!(
+            classify(&["git", "show", "HEAD:"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_commit_message_search_as_snapshot() {
+        // git show :/fix typo — colon-slash is commit search, NOT blob spec; before-colon is empty
+        assert_eq!(
+            classify(&["git", "show", ":/fix typo"]),
+            Classification::ShowSnapshot { sha: ":/fix typo" }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_plain_sha_without_colon_as_snapshot() {
+        // git show abc1234 — no colon at all, stays intercepted
+        assert_eq!(
+            classify(&["git", "show", "abc1234"]),
+            Classification::ShowSnapshot { sha: "abc1234" }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_head_colon_nested_path() {
+        // git show HEAD:dir/file.txt — rev:path is a blob spec
+        assert_eq!(
+            classify(&["git", "show", "HEAD:dir/file.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_bare_colon_slash_regex_as_snapshot() {
+        // git show :/regex — before-colon is empty, so it's commit-search syntax
+        assert_eq!(
+            classify(&["git", "show", ":/another regex"]),
+            Classification::ShowSnapshot {
+                sha: ":/another regex"
+            }
+        );
+    }
+
     // --- BlameSnapshot (git blame <path>) ---
 
     #[test]
@@ -794,6 +880,71 @@ mod tests {
                 range: Some("main..HEAD"),
                 pickaxe_term: "foo",
             }
+        );
+    }
+
+    // --- Bug fixes: index/stage blob specs and rev:abs-path must passthrough ---
+
+    #[test]
+    fn it_passes_through_git_show_stage0_blob_spec() {
+        // git show :staged.txt — stage-0 index blob spec; empty before-colon is valid
+        assert_eq!(
+            classify(&["git", "show", ":staged.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_explicit_stage0_blob_spec() {
+        // git show :0:staged.txt — explicit stage-0 index blob spec
+        assert_eq!(
+            classify(&["git", "show", ":0:staged.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_explicit_stage1_blob_spec() {
+        // git show :1:file — merge stage 1 (common ancestor)
+        assert_eq!(
+            classify(&["git", "show", ":1:file.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_explicit_stage3_blob_spec() {
+        // git show :3:file — merge stage 3 (theirs)
+        assert_eq!(
+            classify(&["git", "show", ":3:conflict.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_rev_colon_absolute_path() {
+        // git show HEAD:/some/absolute/path — rev:abs-path is a valid blob lookup
+        assert_eq!(
+            classify(&["git", "show", "HEAD:/some/absolute/path"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_commit_search_as_snapshot() {
+        // git show :/fix typo — :/text is commit-message-search, NOT a blob spec
+        assert_eq!(
+            classify(&["git", "show", ":/fix typo"]),
+            Classification::ShowSnapshot { sha: ":/fix typo" }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_bare_colon_slash_as_snapshot() {
+        // git show :/x — the shortest commit-search form
+        assert_eq!(
+            classify(&["git", "show", ":/x"]),
+            Classification::ShowSnapshot { sha: ":/x" }
         );
     }
 }
