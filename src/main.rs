@@ -5,8 +5,6 @@ pub(crate) mod metrics;
 pub(crate) mod pagination;
 pub(crate) mod privacy;
 mod server;
-// The shim module is complete but not yet wired to argv[0] dispatch (#287).
-#[allow(dead_code)]
 mod shim;
 mod shim_cmd;
 mod telemetry;
@@ -15,9 +13,11 @@ mod treesitter;
 
 use std::path::PathBuf;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
 use git::refs::{RefRange, parse_range, validate_commit_range};
+use shim::real_git::RealGitExec as _;
 use tools::{
     ContextOptions, FunctionContextResponse, ManifestOptions, SnapshotOptions,
     build_function_context_with_options, build_snapshots, collect_all_history_pages,
@@ -161,6 +161,16 @@ enum ShimCommands {
     Status,
 }
 
+fn resolve_cli_repo_path(
+    repo: Option<String>,
+    cwd: impl Fn() -> std::io::Result<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    match repo {
+        Some(r) => Ok(PathBuf::from(r)),
+        None => cwd().context("cannot determine current working directory"),
+    }
+}
+
 /// Dispatch a `git-prism hooks <subcommand>` invocation. Returns the exit
 /// code the process should adopt — 0 on success, non-zero when the
 /// subcommand needs to surface an error to the shell (e.g. v2 -> v1
@@ -275,6 +285,16 @@ async fn main() -> std::process::ExitCode {
             env: &agent_detection::StdEnvSource,
             argv0: args.first().copied().unwrap_or("git"),
         };
+
+        // Per-invocation opt-out: exec the real binary immediately with zero
+        // overhead — no telemetry init, no classification, no metric recording.
+        // This is the first-class escape hatch for callers that set
+        // GIT_PRISM_PASSTHROUGH=1 (or GIT_PRISM_DISABLE=1) to skip the shim
+        // entirely for a specific invocation or test suite run.
+        if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
+            return exec.passthrough(&args);
+        }
+
         // Initialize telemetry when an OTLP endpoint is configured. The guard
         // must live until after run_shim returns — on the exec-replace
         // (passthrough) path the process is replaced and Rust's drop glue
@@ -298,7 +318,7 @@ async fn main() -> std::process::ExitCode {
             &exec,
             &mut telemetry_guard,
         );
-        telemetry_guard.force_flush();
+        telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
         return exit_code;
     }
 
@@ -323,9 +343,7 @@ async fn run() -> anyhow::Result<()> {
             include_function_analysis,
             max_response_tokens,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let options = ManifestOptions {
                 include_patterns: vec![],
                 exclude_patterns: vec![],
@@ -351,9 +369,7 @@ async fn run() -> anyhow::Result<()> {
             repo,
             page_size,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let ref_range = parse_range(&range);
             validate_commit_range(&ref_range, "history")?;
             let (base_ref, head_ref) = match ref_range {
@@ -376,9 +392,7 @@ async fn run() -> anyhow::Result<()> {
             repo,
             include_diff_hunks,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let ref_range = parse_range(&range);
             validate_commit_range(&ref_range, "snapshot")?;
             let (base_ref, head_ref) = match ref_range {
@@ -403,9 +417,7 @@ async fn run() -> anyhow::Result<()> {
             function_names,
             max_response_tokens,
         } => {
-            let repo_path = repo.map(PathBuf::from).unwrap_or_else(|| {
-                std::env::current_dir().expect("cannot determine current directory")
-            });
+            let repo_path = resolve_cli_repo_path(repo, std::env::current_dir)?;
             let ref_range = parse_range(&range);
             validate_commit_range(&ref_range, "context")?;
             let (base_ref, head_ref) = match ref_range {
@@ -479,4 +491,44 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_uses_explicit_repo_without_calling_cwd() {
+        let result = resolve_cli_repo_path(Some("/some/path".into()), || unreachable!());
+        assert_eq!(result.unwrap(), PathBuf::from("/some/path"));
+    }
+
+    #[test]
+    fn it_falls_back_to_cwd_when_repo_is_none() {
+        let result = resolve_cli_repo_path(None, || Ok(PathBuf::from("/cwd")));
+        assert_eq!(result.unwrap(), PathBuf::from("/cwd"));
+    }
+
+    #[test]
+    fn it_returns_clean_error_when_cwd_is_unavailable() {
+        let result = resolve_cli_repo_path(None, || {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "boom"))
+        });
+        let err = result.unwrap_err();
+        let formatted = format!("{err:#}");
+        assert!(
+            formatted.contains("cannot determine current working directory"),
+            "expected error context in: {formatted}"
+        );
+    }
+
+    #[test]
+    fn it_treats_empty_repo_string_as_an_explicit_path() {
+        // `--repo ""` parses to Some(String::new()); the helper returns it as an
+        // explicit empty path (gix resolves "" to cwd downstream) rather than
+        // falling back via cwd. Pin this so a future is_empty() fallback is a
+        // deliberate choice, not an accident.
+        let result = resolve_cli_repo_path(Some(String::new()), || unreachable!());
+        assert_eq!(result.unwrap(), std::path::PathBuf::from(""));
+    }
 }

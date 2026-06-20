@@ -1,6 +1,6 @@
 [package]
 name = "git-prism"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2024"
 description = "Agent-optimized git data MCP server — structured change manifests and full file snapshots for LLM agents"
 license = "Apache-2.0"
@@ -25,6 +25,7 @@ exclude = [
 rmcp = { version = "1.6", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 gix = { version = "0.83", default-features = false, features = ["basic", "blob-diff", "sha1", "status"] }
+gix-traverse = "0.57"
 tree-sitter = "0.26"
 tree-sitter-go = "0.25"
 tree-sitter-python = "0.25"
@@ -56,6 +57,9 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["http-proto"] }
 sha2 = "0.11"
 rand = { version = "0.9", default-features = false, features = ["thread_rng"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 cc = "1"

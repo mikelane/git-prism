@@ -13,6 +13,88 @@ use crate::tools::{
     build_manifest, build_review_change, build_snapshots, build_worktree_manifest,
 };
 
+/// How often the orphan watchdog polls the parent pid.
+#[cfg(unix)]
+const ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Returns `true` when the process should shut down because its parent is effectively
+/// gone, indicated by `ppid == 1`:
+///
+/// - `ppid == 1`: the process was reparented to init/launchd (or, inside a PID
+///   namespace, to that namespace's init) — the Claude Code session that launched
+///   `git-prism serve` exited without closing stdin. Orphaned processes ALWAYS
+///   reparent to PID 1; the `== 1` check catches all real orphans.
+/// - `ppid == 0` is deliberately NOT treated as orphaned: it means the parent
+///   process lives in an ancestor PID namespace, so this process is itself a
+///   namespace/container init (e.g., a container entrypoint). Real orphans reparent
+///   to PID 1; false-killing a serve running as PID 1 would cause a container
+///   shutdown 5s after startup while catching no additional real orphans. See #366.
+///
+/// A healthy `git-prism serve` process started by Claude Code always has a real
+/// launcher pid (a large number), never 0 or 1, so `== 1` does not false-positive
+/// the common case.
+///
+/// The argument is injected for testability — callers pass `libc::getppid() as u32`
+/// in production and a fixed value in unit tests.
+#[cfg(unix)]
+pub(crate) fn should_exit_orphaned(ppid: u32) -> bool {
+    ppid == 1
+}
+
+/// Calls `getppid` via the injected `getppid` closure and delegates to
+/// [`should_exit_orphaned`]. The closure seam makes the wiring unit-testable:
+/// production code passes the real `libc::getppid`; unit tests inject a fixed
+/// value without spawning a background task or touching the process table.
+#[cfg(unix)]
+fn watchdog_should_exit(getppid: impl Fn() -> u32) -> bool {
+    should_exit_orphaned(getppid())
+}
+
+/// Spawn a background task that polls the parent pid every [`ORPHAN_POLL_INTERVAL`]
+/// and hard-exits the process when [`should_exit_orphaned`] returns `true`.
+///
+/// This is a fire-and-forget guard: `run_server` spawns it and then awaits the
+/// serve loop normally; the watchdog runs concurrently on the tokio runtime and
+/// calls `std::process::exit(0)` directly when it detects an orphan, bypassing the
+/// serve future entirely. The hard-exit is intentional — a reparented process has
+/// no meaningful cleanup to do (telemetry flush is best-effort; the OTLP collector
+/// is likely gone too).
+#[cfg(unix)]
+fn spawn_orphan_watchdog() {
+    eprintln!(
+        "git-prism: orphan-watchdog active; polling parent pid every {}s",
+        ORPHAN_POLL_INTERVAL.as_secs()
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(ORPHAN_POLL_INTERVAL).await;
+            if watchdog_should_exit(|| {
+                // SAFETY: `getppid` is a POSIX system call with no preconditions —
+                // it takes no arguments, dereferences no pointers, and touches no
+                // shared state, so there is nothing the caller can violate. It is
+                // also infallible (it cannot return an error).
+                let raw: libc::pid_t = unsafe { libc::getppid() };
+                // `pid_t` is signed but a real ppid is always >= 1; the cast is a
+                // plain widening reinterpretation used only for the `== 1` compare.
+                raw as u32
+            }) {
+                eprintln!(
+                    "git-prism: serve pid {} reparented to init (ppid == 1); parent Claude Code \
+                     session exited — shutting down orphaned daemon",
+                    std::process::id()
+                );
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
+/// On non-Unix targets there is no `getppid()` / init-reparenting signal, so the
+/// orphan watchdog is a no-op. The MCP client owns server lifetime there and the
+/// stdin-EOF path still handles graceful shutdown.
+#[cfg(not(unix))]
+fn spawn_orphan_watchdog() {}
+
 /// Convert a `ChangeScope` variant to a static metric label string.
 fn change_scope_label(scope: ChangeScope) -> &'static str {
     match scope {
@@ -882,9 +964,19 @@ pub async fn run_server() -> anyhow::Result<()> {
         );
     }
     crate::metrics::get().record_session_started();
+    // Spawn the orphan watchdog before starting the serve loop. It runs
+    // concurrently and hard-exits the process if the parent pid becomes 1
+    // (reparented to init/launchd), which happens when the Claude Code session
+    // that launched `git-prism serve` dies without closing stdin.
+    spawn_orphan_watchdog();
+    eprintln!("git-prism: serve pid {} started", std::process::id());
     let server = GitPrismServer::new();
     let transport = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
     server.serve(transport).await?.waiting().await?;
+    eprintln!(
+        "git-prism: serve pid {} stdin closed; shutting down cleanly",
+        std::process::id()
+    );
     // `telemetry` is dropped here at end of scope — this is what flushes
     // any pending spans and metrics on shutdown (see `TelemetryGuard::drop`).
     Ok(())
@@ -1079,6 +1171,87 @@ mod tests {
         assert!(
             server_info.capabilities.prompts.is_none(),
             "prompts capability must not be advertised — this server does not implement prompts"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_exits_via_watchdog_seam_when_ppid_is_one() {
+        assert!(
+            watchdog_should_exit(|| 1),
+            "watchdog_should_exit(|| 1) must return true — seam wires through to should_exit_orphaned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_does_not_exit_via_watchdog_seam_when_ppid_is_zero() {
+        assert!(
+            !watchdog_should_exit(|| 0),
+            "watchdog_should_exit(|| 0) must return false — ppid==0 is a namespace/container init, not an orphan"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_does_not_exit_via_watchdog_seam_when_ppid_is_normal() {
+        assert!(
+            !watchdog_should_exit(|| 4242),
+            "watchdog_should_exit(|| 4242) must return false — live parent pid"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_returns_true_when_ppid_is_init() {
+        assert!(
+            should_exit_orphaned(1),
+            "ppid == 1 means the process was reparented to init/launchd \
+             (the Claude Code session died); serve must exit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_returns_false_when_ppid_is_two() {
+        assert!(
+            !should_exit_orphaned(2),
+            "ppid == 2 means a live parent; serve must not exit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_returns_false_when_ppid_is_three() {
+        // Triangulates that the boundary is `== 1`, not `< 3` or similar.
+        // ppid == 3 is a live ancestor process; serve must not exit.
+        assert!(
+            !should_exit_orphaned(3),
+            "ppid == 3 is a live process; serve must not exit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_returns_false_for_typical_shell_pid() {
+        // Realistic shell pids are in the thousands; must not trigger exit.
+        assert!(
+            !should_exit_orphaned(12345),
+            "ppid == 12345 is a normal shell pid; serve must not exit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_returns_false_when_ppid_is_zero() {
+        // `getppid() == 0` occurs when the parent process lives outside the
+        // current Linux PID namespace — the kernel reports 0 because it cannot
+        // map the parent's real pid into this namespace. This means the process
+        // is itself a namespace/container init (e.g., a container entrypoint),
+        // not an orphaned daemon. Real orphans reparent to PID 1 (#366).
+        assert!(
+            !should_exit_orphaned(0),
+            "ppid == 0 indicates a namespace/container init, not an orphan; serve must not exit"
         );
     }
 

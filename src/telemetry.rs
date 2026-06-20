@@ -9,6 +9,10 @@ use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt
 
 const DEFAULT_SERVICE_NAME: &str = "git-prism";
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Drop-path shutdown deadline. A down OTLP collector must not stall process
+/// teardown (and therefore the agent's `git` call) on `tp.shutdown()` /
+/// `mp.shutdown()`, which are individually unbounded (up to EXPORT_TIMEOUT each).
+const DROP_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Environment variable names for telemetry configuration.
 const ENV_OTLP_ENDPOINT: &str = "GIT_PRISM_OTLP_ENDPOINT";
@@ -52,28 +56,6 @@ impl TelemetryGuard {
         self.tracer_provider.is_some()
     }
 
-    /// Force-flush pending telemetry to the exporter immediately.
-    ///
-    /// The `PeriodicReader` used by the metrics provider only fires on its
-    /// configured interval (default 60 s). A short-lived process — such as the
-    /// shim — exits before the reader ticks, so `Drop` alone never delivers
-    /// metrics. Calling `force_flush` before process exit ensures buffered
-    /// measurements reach the OTLP endpoint.
-    ///
-    /// Safe to call on a no-op guard: it is a documented zero-cost no-op.
-    pub fn force_flush(&mut self) {
-        if let Some(mp) = &self.meter_provider
-            && let Err(e) = mp.force_flush()
-        {
-            eprintln!("git-prism: failed to force-flush metrics: {e}");
-        }
-        if let Some(tp) = &self.tracer_provider
-            && let Err(e) = tp.force_flush()
-        {
-            eprintln!("git-prism: failed to force-flush traces: {e}");
-        }
-    }
-
     /// Best-effort flush with a wall-clock deadline.
     ///
     /// Runs `force_flush` on a background thread and waits at most `timeout`
@@ -90,7 +72,13 @@ impl TelemetryGuard {
         if self.meter_provider.is_none() && self.tracer_provider.is_none() {
             return;
         }
-        // Clone the Arc-backed provider handles so they can be moved into the thread.
+        // Clone the Arc-backed provider handles so they can be moved into the flush thread.
+        // WHY clone rather than take(): `force_flush_bounded` is intentionally non-destructive.
+        // `Drop::drop` is the shutdown gate — it calls `.take()` and runs `tp.shutdown()` /
+        // `mp.shutdown()` to perform the final teardown. If we used `.take()` here, the guard
+        // would hold `None` after the first flush and `Drop` would have nothing to shut down,
+        // silently skipping the final export on process exit. A future reader must not
+        // "simplify" this to `take()`.
         let mp = self.meter_provider.clone();
         let tp = self.tracer_provider.clone();
         let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -113,21 +101,35 @@ impl TelemetryGuard {
     }
 }
 
-/// The design spec targets a 5s flush on shutdown. The SDK's `.shutdown()` handles
-/// its own timing internally, so we rely on its defaults here rather than passing
-/// an explicit timeout.
+/// Bounded Drop-path shutdown: spawns a thread to run `tp.shutdown()` and
+/// `mp.shutdown()`, then waits at most `DROP_SHUTDOWN_TIMEOUT` (500 ms).
+/// If the collector is unreachable and the shutdown thread stalls, the wait
+/// is abandoned and the thread is reaped when the process exits. This mirrors
+/// the `force_flush_bounded` pattern and prevents a dead OTLP collector from
+/// stalling the agent's `git` invocation on process teardown.
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(tp) = self.tracer_provider.take()
-            && let Err(e) = tp.shutdown()
-        {
-            eprintln!("git-prism: failed to flush traces on shutdown: {e}");
+        let tp = self.tracer_provider.take();
+        let mp = self.meter_provider.take();
+        if tp.is_none() && mp.is_none() {
+            return;
         }
-        if let Some(mp) = self.meter_provider.take()
-            && let Err(e) = mp.shutdown()
-        {
-            eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
-        }
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if let Some(tp) = tp
+                && let Err(e) = tp.shutdown()
+            {
+                eprintln!("git-prism: failed to flush traces on shutdown: {e}");
+            }
+            if let Some(mp) = mp
+                && let Err(e) = mp.shutdown()
+            {
+                eprintln!("git-prism: failed to flush metrics on shutdown: {e}");
+            }
+            let _ = tx.send(());
+        });
+        // Bound the wait; abandon a stalled shutdown (process teardown reaps the thread).
+        let _ = rx.recv_timeout(DROP_SHUTDOWN_TIMEOUT);
     }
 }
 
@@ -686,8 +688,8 @@ mod tests {
             tracer_provider: None,
             meter_provider: None,
         };
-        // force_flush on a no-op guard must be a no-op with zero overhead.
-        guard.force_flush();
+        // force_flush_bounded on a no-op guard must be a zero-cost no-op.
+        guard.force_flush_bounded(Duration::from_millis(500));
     }
 
     #[tokio::test]
@@ -703,8 +705,8 @@ mod tests {
             guard.is_active(),
             "guard must be active for this test to exercise flush"
         );
-        // force_flush on an active guard must not panic even when no exporter is reachable.
-        guard.force_flush();
+        // force_flush_bounded on an active guard must not panic even when no exporter is reachable.
+        guard.force_flush_bounded(Duration::from_millis(500));
         // SAFETY: cleanup
         unsafe {
             std::env::remove_var(ENV_OTLP_ENDPOINT);
@@ -712,7 +714,7 @@ mod tests {
         drop(guard);
     }
 
-    /// Double-flush must be idempotent: `force_flush` borrows the providers
+    /// Double-flush must be idempotent: `force_flush_bounded` borrows the providers
     /// (`&mut self`) rather than taking them, so a second call — and a
     /// subsequent `Drop` — must still succeed without panic or double-free.
     /// This is the real shim sequence: flush before exec, then Drop on exit.
@@ -729,14 +731,14 @@ mod tests {
             guard.is_active(),
             "guard must be active for this test to exercise repeated flush"
         );
-        guard.force_flush();
+        guard.force_flush_bounded(Duration::from_millis(500));
         // Second flush must remain a no-panic no-op: providers are still owned.
-        guard.force_flush();
+        guard.force_flush_bounded(Duration::from_millis(500));
         // Guard must still be active after repeated flushes — flush does not
         // consume the providers the way Drop does.
         assert!(
             guard.is_active(),
-            "force_flush must not consume the providers; guard stays active"
+            "force_flush_bounded must not consume the providers; guard stays active"
         );
         // SAFETY: cleanup
         unsafe {
@@ -751,11 +753,11 @@ mod tests {
     #[test]
     fn it_tolerates_double_force_flush_on_noop_guard() {
         let mut guard = TelemetryGuard::noop();
-        guard.force_flush();
-        guard.force_flush();
+        guard.force_flush_bounded(Duration::from_millis(500));
+        guard.force_flush_bounded(Duration::from_millis(500));
         assert!(
             !guard.is_active(),
-            "a no-op guard must stay inactive across repeated force_flush calls"
+            "a no-op guard must stay inactive across repeated force_flush_bounded calls"
         );
         drop(guard);
     }
@@ -789,9 +791,63 @@ mod tests {
         }
         drop(guard);
         assert!(
-            elapsed < EXPORT_TIMEOUT,
-            "bounded flush must abandon a stalled exporter well before the {EXPORT_TIMEOUT:?} \
-             export timeout; took {elapsed:?}"
+            elapsed < Duration::from_secs(1),
+            "bounded flush must abandon a stalled exporter well before the 1s budget \
+             (200ms cap × 5 margin); took {elapsed:?}"
+        );
+    }
+
+    /// Smoke test: the flush+drop *sequence* completes without panic under the
+    /// test runtime.
+    ///
+    /// **Important limitation:** this test does NOT exercise real OTel provider
+    /// shutdown. The production providers (`SdkTracerProvider`, `SdkMeterProvider`)
+    /// are constructed under `#[cfg(not(test))]`-gated code paths; in test builds
+    /// they degrade to no-ops, so `Drop` returns instantly regardless of whether
+    /// the OTLP endpoint is reachable. The assertion here (`< 2 s`) passes even
+    /// at a buggy HEAD where the real binary stalls for ~10.5 s — it provides
+    /// false confidence about the bounded-shutdown property.
+    ///
+    /// The load-bearing guard for the real binary is the end-to-end pentest in
+    /// `tests/shim_structured_teardown_pentest.rs`, which drives the built binary
+    /// against an unroutable TEST-NET-1 endpoint and asserts the whole invocation
+    /// returns under 4 s. That test is the one that fails when the Drop-path
+    /// shutdown is unbounded.
+    #[tokio::test]
+    async fn qa_structured_path_total_teardown_is_bounded_on_black_hole_endpoint() {
+        use crate::shim::STRUCTURED_FLUSH_TIMEOUT;
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // SAFETY: ENV_MUTEX is held — no concurrent env mutation.
+        unsafe {
+            clear_telemetry_env();
+            // Unroutable TEST-NET-1 (RFC 5737): connections hang, exercising the
+            // export-timeout path rather than a fast local connection refusal.
+            std::env::set_var(ENV_OTLP_ENDPOINT, "http://192.0.2.1:4318");
+        }
+        let mut guard = init();
+        assert!(
+            guard.is_active(),
+            "guard must be active to exercise the structured-path teardown"
+        );
+        // SAFETY: cleanup before timing so a slow remove_var doesn't pollute the measurement.
+        unsafe {
+            std::env::remove_var(ENV_OTLP_ENDPOINT);
+        }
+
+        let start = std::time::Instant::now();
+        // Exact main.rs structured-path sequence:
+        guard.force_flush_bounded(STRUCTURED_FLUSH_TIMEOUT); // 500 ms cap
+        drop(guard); // <-- main.rs `return exit_code` drops the guard here
+        let elapsed = start.elapsed();
+
+        // The whole teardown must stay well under a single 5 s EXPORT_TIMEOUT.
+        // A generous 2 s budget (4x the 500 ms flush cap) still fails loudly if
+        // Drop reintroduces the unbounded multi-second stall.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "structured-path teardown (bounded flush + guard Drop) must stay bounded; \
+             a black-hole collector must not stall the agent's git diff on teardown. \
+             took {elapsed:?} (Drop::shutdown is unbounded — #361 stall reintroduced)"
         );
     }
 

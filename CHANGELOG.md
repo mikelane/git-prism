@@ -9,7 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`git -C <path> diff/log/show/blame` now routes through the shim correctly.** Previously the argv classifier looked for the subcommand at a fixed position (`argv[1]`), so leading git global options like `-C <path>`, `-c <name=value>`, `--git-dir <path>` caused the call to be classified as `Passthrough` and raw git output was returned instead of a JSON manifest. The classifier now skips all recognised git global options (both `--opt value` and `--opt=value` forms, and valueless flags like `--no-pager`) before locating the subcommand. When `-C <path>` is present, the path is used as the repository root for manifest building, matching git's own semantics (last `-C` wins). Unrecognised leading `-` tokens fall through to passthrough — the documented safe default. (#356)
+- **`git show` with blob/tree/index object specs now passes through to real git** instead of failing with a peel-to-commit error (`was blob while trying to peel to commit`). Colon-bearing specs — including `<rev>:<path>` (rev-qualified blob), `:<path>` (stage-0 index), `:N:<path>` (explicit-stage index), and `<rev>:/abs/path` (absolute-path blob) — now passthrough. The shim recognizes any spec containing `:` that does NOT start with `:/` as a blob/tree/index spec. Plain `git show <commit-ish>` and `:/regex` commit-message search continue to be intercepted and return structured JSON. (#381)
+- **`git log A..B` (and the shim's interception of it) no longer fails on diverged history.** `walk_commits` computed the two-dot range with a hand-rolled walk that stopped only on the exact base OID and followed first-parent only, so when `base` was not an ancestor of `head` (a branch whose base has advanced — the normal case) the walk ran off to the root commit and errored with `commit <root> has no parent but base <base> not yet reached`. It now uses gix's `rev_walk` with the base as a hidden tip and `ByCommitTime(NewestFirst)` sorting, matching `git rev-list --reverse base..head` for diverged, merge, octopus, and disjoint histories. (#382)
+- **The shim now skips leading git global options (`-C`, `-c`, `--git-dir`, `--work-tree`, etc.) to locate the subcommand**, so `git -C <path> diff/log/show/blame` is intercepted and returns a JSON manifest instead of passing through to raw git. When multiple `-C` values are stacked, they are folded with git's `cd`-semantics (`git -C a -C b` → `cd a; cd b` → repo at `a/b`), matching git's own behavior. Unrecognised leading `-` tokens fall through to passthrough — the documented safe default. (#356)
+
+## [0.10.0] — 2026-06-06
+
+### Changed
+
+- **The shim no longer intercepts `gh pr diff <N>`.** It now passes straight through to the real `gh`, returning the unified diff that `gh pr diff` is contractually expected to produce. Previously the shim rewrote it into a JSON change-manifest, which silently broke reviewers and any tooling that parses the diff output shape. Structured PR review is still available through the git-prism MCP tools (`review_change`, `get_change_manifest`). (#367)
+
+### Fixed
+
+- **The change manifest now labels common non-grammar file types instead of `unknown`.** Common extensions now map to a named language — `.sh` to `shell`, `.yml` to `yaml`, `.j2` to `jinja`, `.md` to `markdown`, `.toml` to `toml`, `.json` to `json`, and more — so `languages_affected` reflects a PR's real composition rather than only the tree-sitter-supported subset. Files without a grammar still correctly report `functions_changed: null`. (#368)
+
+## [0.9.4] — 2026-06-05
+
+### Added
+
+- **Per-invocation shim opt-out via `GIT_PRISM_PASSTHROUGH` / `GIT_PRISM_DISABLE`.** Setting either env var to a truthy value (`1` or case-insensitive `true`) makes the shim `exec` the real `git` / `gh` immediately — before `telemetry::init_quiet()` and before command classification — with near-zero added latency and no recording. This replaces the all-or-nothing `PATH` hack for agent workflows that shell `git` heavily in throwaway tmp repos, where per-call cold-start and telemetry overhead is unwanted and recording ephemeral repos is undesirable anyway. The opt-out exec is recursion-safe (it resolves and runs the real binary, not the shim symlink, even when the shim is first on `PATH`). (#362)
+- **`git-prism serve` now self-terminates when its launching session dies.** The MCP `serve` daemon polls its parent pid every 5 seconds and exits when it detects it has been reparented to init/launchd (`ppid == 1`) — the signal that the Claude Code session that spawned it exited without closing stdin. This prevents the orphaned-daemon accumulation observed in shim-heavy setups (multiple `serve` processes lingering for hours to days). The README now documents the shim-vs-MCP distinction and notes that shim-only users can drop the `serve` registration entirely (`claude mcp remove git-prism`). (#363)
+- **`serve` now logs its lifecycle to stderr.** A pid-tagged "started" line, an "orphan-watchdog active; polling every 5s" line (Unix), and a "stdin closed; shutting down cleanly" line on graceful exit let an operator reconstruct a daemon's full lifetime (started → [watchdog active] → orphaned-exit or clean shutdown) from stderr alone — useful when diagnosing where a `serve` process went. (#371)
+
+### Fixed
+
+- **The `manifest` / `history` / `snapshot` / `context` CLI subcommands no longer panic when the current directory is unavailable.** They resolved the default repo path with `std::env::current_dir().expect(...)`, which panicked with a backtrace if the cwd was deleted or inaccessible (a real case for the shim running in agent-driven throwaway tmp repos). They now return a clean `anyhow` error instead. (#364)
+- **The shim's structured-output path (`git diff` / `log` / `show` / `blame`) no longer stalls on an unreachable OpenTelemetry collector.** The structured path flushed telemetry with an unbounded `force_flush()`, and `main` then dropped the `TelemetryGuard`, whose `Drop` ran unbounded `shutdown()` calls — so a single `git diff` could block for minutes (≈10 s per call was reproduced against a black-hole endpoint: 5 s tracer shutdown + 5 s meter shutdown). Both the explicit flush and the `Drop`-path shutdown are now time-bounded (500 ms each), mirroring the already-bounded passthrough path; a saturated or unreachable collector can no longer stall an intercepted git command. Telemetry still delivers normally when the collector is responsive (proven by an end-to-end data-loss guard against a live capture server). (#361)
+>>>>>>> origin/main
 
 ## [0.9.3] — 2026-06-03
 
