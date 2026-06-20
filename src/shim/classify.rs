@@ -1164,7 +1164,11 @@ mod tests {
     fn it_passes_through_git_show_with_sha_colon_path() {
         // git show 0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json
         assert_eq!(
-            classification(&["git", "show", "0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json"]),
+            classification(&[
+                "git",
+                "show",
+                "0123abcdef1234567890abcdef1234567890abcd:apps/x/package.json"
+            ]),
             Classification::Passthrough
         );
     }
@@ -1421,7 +1425,7 @@ mod tests {
     fn it_classifies_git_show_commit_search_as_snapshot() {
         // git show :/fix typo — :/text is commit-message-search, NOT a blob spec
         assert_eq!(
-            classify(&["git", "show", ":/fix typo"]),
+            classification(&["git", "show", ":/fix typo"]),
             Classification::ShowSnapshot { sha: ":/fix typo" }
         );
     }
@@ -1430,7 +1434,7 @@ mod tests {
     fn it_classifies_git_show_bare_colon_slash_as_snapshot() {
         // git show :/x — the shortest commit-search form
         assert_eq!(
-            classify(&["git", "show", ":/x"]),
+            classification(&["git", "show", ":/x"]),
             Classification::ShowSnapshot { sha: ":/x" }
         );
     }
