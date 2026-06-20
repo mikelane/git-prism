@@ -107,19 +107,20 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
     }
     // First non-flag argument is the object spec.
     if let Some(spec) = rest.iter().copied().find(|t| !t.starts_with('-')) {
-        // Detect a blob/tree object spec of the form `<rev>:<path>` or `<rev>:`.
-        // Rules:
-        //   - Must contain `:`
-        //   - The text BEFORE the first `:` must be non-empty (a real rev)
-        //   - The text AFTER the first `:` must NOT begin with `/`
-        //     (`:/<regex>` is the commit-message-search syntax where the
-        //      before-colon portion is empty, so it falls through to ShowSnapshot)
-        if let Some(colon_pos) = spec.find(':') {
-            let before = &spec[..colon_pos];
-            let after = &spec[colon_pos + 1..];
-            if !before.is_empty() && !after.starts_with('/') {
-                return Classification::Passthrough;
-            }
+        // Any spec containing `:` is a blob/tree/index object spec that real git
+        // resolves without peeling to a commit — pass it through unchanged.
+        //
+        // The ONLY colon-bearing form that is NOT a blob spec is `:/text`, the
+        // commit-message-search syntax.  Every other colon form is an object spec:
+        //   `<rev>:<path>`       — rev-qualified blob
+        //   `<rev>:`             — rev-qualified tree root
+        //   `:<path>`            — stage-0 index blob
+        //   `:N:<path>`          — explicit-stage index blob (N = 0, 1, 2, 3)
+        //   `<rev>:/abs/path`    — rev-qualified absolute-path blob
+        //
+        // Refs cannot contain `:`, so this single rule is sufficient.
+        if spec.contains(':') && !spec.starts_with(":/") {
+            return Classification::Passthrough;
         }
         return Classification::ShowSnapshot { sha: spec };
     }
@@ -718,20 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn it_classifies_git_show_rev_colon_absolute_path_as_snapshot() {
-        // git show HEAD:/some/absolute/path — before-colon "HEAD" is non-empty, but
-        // after-colon begins with '/'. The detection rule requires the after-colon
-        // text NOT start with '/' to passthrough, so this ambiguous form stays
-        // intercepted as a snapshot rather than being treated as a blob spec.
-        assert_eq!(
-            classify(&["git", "show", "HEAD:/some/absolute/path"]),
-            Classification::ShowSnapshot {
-                sha: "HEAD:/some/absolute/path"
-            }
-        );
-    }
-
-    #[test]
     fn it_classifies_git_show_bare_colon_slash_regex_as_snapshot() {
         // git show :/regex — before-colon is empty, so it's commit-search syntax
         assert_eq!(
@@ -893,6 +880,71 @@ mod tests {
                 range: Some("main..HEAD"),
                 pickaxe_term: "foo",
             }
+        );
+    }
+
+    // --- Bug fixes: index/stage blob specs and rev:abs-path must passthrough ---
+
+    #[test]
+    fn it_passes_through_git_show_stage0_blob_spec() {
+        // git show :staged.txt — stage-0 index blob spec; empty before-colon is valid
+        assert_eq!(
+            classify(&["git", "show", ":staged.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_explicit_stage0_blob_spec() {
+        // git show :0:staged.txt — explicit stage-0 index blob spec
+        assert_eq!(
+            classify(&["git", "show", ":0:staged.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_explicit_stage1_blob_spec() {
+        // git show :1:file — merge stage 1 (common ancestor)
+        assert_eq!(
+            classify(&["git", "show", ":1:file.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_explicit_stage3_blob_spec() {
+        // git show :3:file — merge stage 3 (theirs)
+        assert_eq!(
+            classify(&["git", "show", ":3:conflict.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_git_show_rev_colon_absolute_path() {
+        // git show HEAD:/some/absolute/path — rev:abs-path is a valid blob lookup
+        assert_eq!(
+            classify(&["git", "show", "HEAD:/some/absolute/path"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_commit_search_as_snapshot() {
+        // git show :/fix typo — :/text is commit-message-search, NOT a blob spec
+        assert_eq!(
+            classify(&["git", "show", ":/fix typo"]),
+            Classification::ShowSnapshot { sha: ":/fix typo" }
+        );
+    }
+
+    #[test]
+    fn it_classifies_git_show_bare_colon_slash_as_snapshot() {
+        // git show :/x — the shortest commit-search form
+        assert_eq!(
+            classify(&["git", "show", ":/x"]),
+            Classification::ShowSnapshot { sha: ":/x" }
         );
     }
 }
