@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The raw-git hint quotes a `~` that bash expands after `=` or `:`.** `command git blame k=~` would have run `git blame k=/home/u`; such arguments are now single-quoted, while `HEAD~1` stays unquoted. (#387)
 - **`git blame <path>` passes through to real git when the path is staged or modified.** The shim answered from the HEAD snapshot, omitting the uncommitted lines real git attributes to "Not Committed Yet". (#387)
 - **`git show <merge-commit>` passes through to real git.** The shim diffed a merge against its first parent only, listing files (for example everything the merged branch added) that real git's combined diff omits for a clean merge. (#387)
 - **`shim install`/`uninstall` no longer fail forever on a stale temp file.** The atomic write's temp name was `.<rc>.git-prism-<pid>.tmp`, so a leftover from a crashed run with a reused pid made every later write fail. The name now includes a timestamp and counter, and a collision picks another name. (#387)

@@ -67,9 +67,14 @@ fn write_with_hint<W: Write, T: serde::Serialize>(
 /// treats specially, so the hint can be pasted back as the same command.
 fn shell_quote(arg: &str) -> String {
     let is_plain = |c: char| c.is_ascii_alphanumeric() || "_-./:=,@%+~".contains(c);
-    // `~` and `=` are plain mid-word but expand at the start of a word
-    // (home directory, zsh `=cmd` path lookup).
-    let needs_quoting = arg.is_empty() || arg.starts_with(['~', '=']) || !arg.chars().all(is_plain);
+    // A leading `=` triggers zsh `=cmd` path lookup. A `~` expands to the home
+    // directory at the start of a word and, in bash, after `=` or `:`, so it is
+    // plain only directly after an alphanumeric (`HEAD~1`).
+    let has_expanding_tilde = arg
+        .char_indices()
+        .any(|(i, c)| c == '~' && !arg[..i].ends_with(|prev: char| prev.is_ascii_alphanumeric()));
+    let needs_quoting =
+        arg.is_empty() || arg.starts_with('=') || has_expanding_tilde || !arg.chars().all(is_plain);
     if needs_quoting {
         format!("'{}'", arg.replace('\'', r"'\''"))
     } else {
@@ -961,6 +966,13 @@ mod tests {
         assert_eq!(shell_quote("HEAD^"), "'HEAD^'");
         assert_eq!(shell_quote("$(rm -rf x)"), "'$(rm -rf x)'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn it_single_quotes_a_tilde_that_bash_expands_after_an_equals_sign_or_colon() {
+        for arg in ["k=~", "a:~", "x=~/y", "~", "a..~"] {
+            assert_eq!(shell_quote(arg), format!("'{arg}'"));
+        }
     }
 
     #[test]
