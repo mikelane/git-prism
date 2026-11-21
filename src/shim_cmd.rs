@@ -104,7 +104,7 @@ fn strip_managed_blocks_from_startup_files(home: &Path) -> Result<()> {
         if !content.lines().any(is_marker_line) {
             continue;
         }
-        std::fs::write(&path, strip_all_marker_blocks(&content))
+        write_atomically(&path, strip_all_marker_blocks(&content).as_bytes())
             .with_context(|| format!("failed to update {}", path.display()))?;
     }
     Ok(())
@@ -163,9 +163,46 @@ fn write_marker_block(rc_path: &Path) -> Result<()> {
         format!("{cleaned}\n{new_block}")
     };
 
-    std::fs::write(rc_path, new_content)
+    write_atomically(rc_path, new_content.as_bytes())
         .with_context(|| format!("failed to write shim block to {}", rc_path.display()))?;
     Ok(())
+}
+
+/// Replace `path`'s content so a crash mid-write cannot leave it truncated.
+///
+/// Writes a sibling temp file, fsyncs it, then renames it over the target. A
+/// symlinked rc file (dotfile managers) is resolved first so the link survives
+/// and its target is the file replaced. An existing file's permissions carry
+/// over to the replacement.
+fn write_atomically(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let temp = sibling_temp_path(&target);
+    let result =
+        write_synced(&temp, content, &target).and_then(|()| std::fs::rename(&temp, &target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+fn sibling_temp_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.git-prism-{}.tmp", std::process::id()))
+}
+
+fn write_synced(temp: &Path, content: &[u8], original: &Path) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)?;
+    if let Ok(metadata) = std::fs::metadata(original) {
+        file.set_permissions(metadata.permissions())?;
+    }
+    file.write_all(content)?;
+    file.sync_all()
 }
 
 /// Remove every git-prism managed block (and any stray marker lines) from `content`.
@@ -340,6 +377,49 @@ esac"#;
             read(home.path(), ".zshrc").starts_with("export A=1\r\nexport B=2\r\n"),
             "user lines must keep their CRLF endings"
         );
+    }
+
+    #[test]
+    fn it_writes_through_a_symlinked_rc_file_and_keeps_the_link() {
+        let home = TempDir::new().unwrap();
+        let dotfiles = home.path().join("dotfiles");
+        std::fs::create_dir(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("zshrc"), "export A=1\n").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("zshrc"), home.path().join(".zshrc")).unwrap();
+
+        install(home.path(), "/bin/zsh");
+
+        let link = std::fs::symlink_metadata(home.path().join(".zshrc")).unwrap();
+        assert!(link.file_type().is_symlink(), "the symlink must survive");
+        let target = std::fs::read_to_string(dotfiles.join("zshrc")).unwrap();
+        assert!(target.contains(BLOCK_START_MARKER), "target: {target}");
+    }
+
+    #[test]
+    fn it_preserves_the_rc_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = TempDir::new().unwrap();
+        let rc = home.path().join(".zshrc");
+        std::fs::write(&rc, "export A=1\n").unwrap();
+        std::fs::set_permissions(&rc, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        install(home.path(), "/bin/zsh");
+
+        let mode = std::fs::metadata(&rc).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn it_leaves_no_temp_file_behind() {
+        let home = TempDir::new().unwrap();
+        install(home.path(), "/bin/zsh");
+
+        let leftovers: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
     }
 
     #[test]
