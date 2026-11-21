@@ -316,6 +316,7 @@ async fn main() -> std::process::ExitCode {
             &args,
             &agent_detection::StdEnvSource,
             &exec,
+            shim::detect_stdout_kind(),
             &mut telemetry_guard,
         );
         telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);

@@ -89,6 +89,7 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     argv: &[&str],
     env: &E,
     exec: &G,
+    stdout_kind: StdoutKind,
     telemetry_guard: &mut TelemetryGuard,
 ) -> ExitCode {
     let metrics = crate::metrics::get();
@@ -131,10 +132,22 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
             return exec.passthrough(argv);
         }
     };
+    // Output redirected to a file is a script capturing real git output.
+    if stdout_kind == StdoutKind::RegularFile {
+        metrics.record_shim_invocation(ShimOutcome::Passthrough);
+        telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
+        return exec.passthrough(argv);
+    }
     // Only record classification once we are committed to structured dispatch.
     metrics.record_shim_classification(subcommand);
     let mut out_buf = Vec::new();
-    let code = handlers::handle(&classification, &repo_path, &mut out_buf);
+    if handlers::handle(&classification, &repo_path, argv, &mut out_buf).is_err() {
+        // Discard any partial output; real git produces the answer (and its
+        // own stderr and exit code).
+        metrics.record_shim_invocation(ShimOutcome::Passthrough);
+        telemetry_guard.force_flush_bounded(PASSTHROUGH_FLUSH_TIMEOUT);
+        return exec.passthrough(argv);
+    }
 
     // Emit response bytes metric before flushing so the count is always recorded.
     metrics.record_shim_invocation(ShimOutcome::Structured);
@@ -149,7 +162,35 @@ pub(crate) fn run_shim<E: EnvSource, G: RealGitExec>(
     // Shadow run happens AFTER the response is flushed — agent latency is unaffected.
     shadow::maybe_shadow_capture(env, subcommand, argv, exec);
 
-    code
+    ExitCode::SUCCESS
+}
+
+/// What the shim's stdout is attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StdoutKind {
+    /// Redirected to a regular file (`git diff a..b > out.patch`).
+    RegularFile,
+    /// A terminal, pipe, socket, or anything undetectable.
+    Other,
+}
+
+/// Inspect file descriptor 1.  Any failure to inspect reports `Other`.
+#[cfg(unix)]
+pub(crate) fn detect_stdout_kind() -> StdoutKind {
+    use std::os::fd::AsFd;
+
+    let Ok(owned) = std::io::stdout().as_fd().try_clone_to_owned() else {
+        return StdoutKind::Other;
+    };
+    match std::fs::File::from(owned).metadata() {
+        Ok(meta) if meta.is_file() => StdoutKind::RegularFile,
+        _ => StdoutKind::Other,
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn detect_stdout_kind() -> StdoutKind {
+    StdoutKind::Other
 }
 
 /// Map a `Classification` variant to the bounded `ShimSubcommand` label used
@@ -228,6 +269,89 @@ mod tests {
         }
     }
 
+    // ---- hardened passthrough exits (issue #387) ----
+
+    /// Records every argv handed to `passthrough`.
+    struct RecordingExec {
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl RecordingExec {
+        fn new() -> Self {
+            Self {
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RealGitExec for RecordingExec {
+        fn passthrough(&self, argv: &[&str]) -> ExitCode {
+            self.calls
+                .borrow_mut()
+                .push(argv.iter().map(|a| a.to_string()).collect());
+            ExitCode::SUCCESS
+        }
+
+        fn capture(&self, _argv: &[&str]) -> Result<usize, crate::shim::real_git::CaptureError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn it_passes_through_when_stdout_is_a_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_str: &'static str =
+            Box::leak(dir.path().to_string_lossy().into_owned().into_boxed_str());
+        let env = MapEnv(HashMap::from([
+            ("AI_AGENT", "claude-code"),
+            ("GIT_PRISM_REPO", repo_str),
+        ]));
+        let exec = RecordingExec::new();
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        let _ = run_shim(
+            &["git", "diff", "a..b"],
+            &env,
+            &exec,
+            StdoutKind::RegularFile,
+            &mut guard,
+        );
+
+        assert_eq!(
+            *exec.calls.borrow(),
+            vec![vec!["git", "diff", "a..b"]],
+            "a file redirect must exec real git with the original argv"
+        );
+    }
+
+    #[test]
+    fn it_passes_through_when_the_handler_fails() {
+        // An empty tempdir is not a repository, so the manifest handler errors.
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_str: &'static str =
+            Box::leak(dir.path().to_string_lossy().into_owned().into_boxed_str());
+        let env = MapEnv(HashMap::from([
+            ("AI_AGENT", "claude-code"),
+            ("GIT_PRISM_REPO", repo_str),
+        ]));
+        let exec = RecordingExec::new();
+        let mut guard = crate::telemetry::TelemetryGuard::noop();
+
+        let _ = run_shim(
+            &["git", "diff", "a..b"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
+
+        assert_eq!(
+            *exec.calls.borrow(),
+            vec![vec!["git", "diff", "a..b"]],
+            "a handler error must fall back to real git"
+        );
+    }
+
     // ---- decision path tests ----
 
     // ---- passthrough_opt_out_requested unit tests ----
@@ -287,7 +411,13 @@ mod tests {
 
         // Even though this is a classified command (diff), the opt-out must
         // cause an immediate passthrough before any classification runs.
-        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+        let code = run_shim(
+            &["git", "diff", "HEAD~1..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -306,7 +436,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::SUCCESS);
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "diff", "HEAD~1..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -325,7 +461,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::from(2));
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+        let code = run_shim(
+            &["git", "diff", "HEAD~1..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -371,7 +513,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::SUCCESS);
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "diff", "HEAD~1..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             !exec.called.get(),
@@ -388,7 +536,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::SUCCESS);
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "diff", "main..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -403,7 +557,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::SUCCESS);
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "diff", "main..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -417,7 +577,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::SUCCESS);
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "status"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "status"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -435,7 +601,13 @@ mod tests {
         let exec = SpyExec::new(ExitCode::SUCCESS);
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "diff", "main..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),
@@ -480,7 +652,13 @@ mod tests {
         let mut guard = crate::telemetry::TelemetryGuard::noop();
 
         // git diff main..HEAD is a classified command that routes to handle_manifest.
-        let code = run_shim(&["git", "diff", "HEAD~1..HEAD"], &env, &exec, &mut guard);
+        let code = run_shim(
+            &["git", "diff", "HEAD~1..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         // SpyExec must NOT have been called — the handler ran instead.
         assert!(
@@ -530,7 +708,13 @@ mod tests {
 
         // argv is a classified command so it would normally dispatch — but
         // the cwd failure must cause passthrough instead.
-        run_shim(&["git", "diff", "main..HEAD"], &env, &exec, &mut guard);
+        let _ = run_shim(
+            &["git", "diff", "main..HEAD"],
+            &env,
+            &exec,
+            StdoutKind::Other,
+            &mut guard,
+        );
 
         assert!(
             exec.called.get(),

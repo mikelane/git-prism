@@ -122,6 +122,10 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
         if spec.contains(':') && !spec.starts_with(":/") {
             return Classification::Passthrough;
         }
+        // `<rev>^{tree}`, `<rev>^{}` etc. peel to a non-commit object.
+        if spec.contains("^{") {
+            return Classification::Passthrough;
+        }
         return Classification::ShowSnapshot { sha: spec };
     }
     Classification::Passthrough
@@ -138,6 +142,7 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
 /// - `--porcelain` (machine-readable output for `status`, `blame`, etc.)
 /// - `--stat` (diffstat text output)
 /// - `-z` (NUL-terminated output)
+/// - `--quiet` / `--exit-code` (the exit status is the answer, not stdout)
 ///
 /// # SAFETY: `--` separator not honoured
 ///
@@ -160,6 +165,8 @@ fn has_scripted_output_flag(tokens: &[&str]) -> bool {
             || *tok == "--porcelain"
             || *tok == "--stat"
             || *tok == "-z"
+            || *tok == "--quiet"
+            || *tok == "--exit-code"
     })
 }
 
@@ -221,6 +228,46 @@ mod tests {
     use super::*;
 
     // --- Passthrough cases ---
+
+    #[test]
+    fn it_passes_through_diff_quiet() {
+        assert_eq!(
+            classify(&["git", "diff", "--quiet", "a..b"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_diff_exit_code() {
+        assert_eq!(
+            classify(&["git", "diff", "--exit-code", "a..b"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_show_tree_peel_spec() {
+        assert_eq!(
+            classify(&["git", "show", "HEAD^{tree}"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_passes_through_show_empty_peel_spec() {
+        assert_eq!(
+            classify(&["git", "show", "v1^{}"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_still_snapshots_plain_show_head() {
+        assert_eq!(
+            classify(&["git", "show", "HEAD"]),
+            Classification::ShowSnapshot { sha: "HEAD" }
+        );
+    }
 
     // --- gh classification ---
 

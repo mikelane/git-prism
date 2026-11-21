@@ -2,11 +2,10 @@
 //!
 //! Each handler resolves the repository via `gix::discover`, calls the
 //! corresponding tool function, serialises the result to stdout, and returns
-//! `ExitCode::SUCCESS`.
+//! `Ok(())`.
 
 use std::io::Write;
 use std::path::Path;
-use std::process::ExitCode;
 
 use crate::git::reader::RepoReader;
 use crate::git::refs::RefRange;
@@ -23,20 +22,19 @@ use crate::tools::{
 };
 
 /// Dispatch a classified git command to the appropriate tool function and
-/// write the JSON result to `out`.  Returns `ExitCode::SUCCESS` on success
-/// or `ExitCode::FAILURE` on error.
+/// write the JSON result to `out`.
+///
+/// Errors are returned, never printed: the caller falls back to real git, so
+/// no shim text may reach stderr.  `argv` is the original git command line.
 pub(crate) fn handle<W: Write>(
     classification: &Classification<'_>,
     repo_path: &Path,
+    _argv: &[&str],
     out: &mut W,
-) -> ExitCode {
-    match dispatch(classification, repo_path, out) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("git-prism shim: handler error: {e}");
-            ExitCode::FAILURE
-        }
-    }
+) -> anyhow::Result<()> {
+    dispatch(classification, repo_path, out).inspect_err(|e| {
+        tracing::debug!(error = %e, "shim handler failed; falling back to real git");
+    })
 }
 
 fn dispatch<W: Write>(
@@ -362,8 +360,7 @@ mod tests {
             range: "HEAD~1..HEAD",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
@@ -379,8 +376,7 @@ mod tests {
             range: "HEAD~1..HEAD",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
@@ -395,8 +391,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // build_snapshots returns a response with a "files" array.
@@ -412,8 +407,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let commit = json
@@ -457,7 +451,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let commit_sha = json["commit"]["sha"].as_str().unwrap();
         assert_eq!(commit_sha.len(), 40, "sha must be 40 hex chars");
@@ -475,7 +469,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // The fixture commits "second commit" as HEAD.
         assert_eq!(json["commit"]["subject"].as_str().unwrap(), "second commit");
@@ -492,7 +486,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let parents = json["commit"]["parents"].as_array().unwrap();
         assert_eq!(
@@ -513,7 +507,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let epoch = json["commit"]["author"]["date_epoch"].as_i64().unwrap();
         assert!(epoch > 0, "date_epoch must be a positive unix timestamp");
@@ -525,7 +519,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let committer = &json["commit"]["committer"];
         // Exact-value assertions — the fixture sets user.name=Test, user.email=test@test.com.
@@ -550,7 +544,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let files_changed = json["diffstat"]["files_changed"].as_u64().unwrap();
         let files_count = json["files"].as_array().unwrap().len() as u64;
@@ -565,8 +559,7 @@ mod tests {
         let (_dir, path) = init_repo_with_two_commits();
         let classification = Classification::BlameSnapshot { path: "hello.txt" };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // build_snapshots returns a response with a "files" array.
@@ -656,8 +649,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(
             json["commit"]["subject"].as_str().unwrap(),
@@ -689,8 +681,7 @@ mod tests {
             pickaxe_term: "hello",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // build_function_context_with_options returns a response with a "functions" array.
@@ -716,12 +707,8 @@ mod tests {
 
         let classification = Classification::ShowSnapshot { sha: "v1.0" };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(
-            code,
-            ExitCode::SUCCESS,
-            "handle should exit SUCCESS for annotated tag, got non-zero"
-        );
+        handle(&classification, &path, &[], &mut out)
+            .expect("handle should succeed for annotated tag");
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
@@ -761,23 +748,21 @@ mod tests {
         let target_sha = head_sha(&path);
 
         let mut out_tag = Vec::new();
-        assert_eq!(
-            handle(
-                &Classification::ShowSnapshot { sha: "v1.0" },
-                &path,
-                &mut out_tag
-            ),
-            ExitCode::SUCCESS
-        );
+        handle(
+            &Classification::ShowSnapshot { sha: "v1.0" },
+            &path,
+            &[],
+            &mut out_tag,
+        )
+        .unwrap();
         let mut out_sha = Vec::new();
-        assert_eq!(
-            handle(
-                &Classification::ShowSnapshot { sha: &target_sha },
-                &path,
-                &mut out_sha
-            ),
-            ExitCode::SUCCESS
-        );
+        handle(
+            &Classification::ShowSnapshot { sha: &target_sha },
+            &path,
+            &[],
+            &mut out_sha,
+        )
+        .unwrap();
 
         let json_tag: serde_json::Value = serde_json::from_slice(&out_tag).unwrap();
         let json_sha: serde_json::Value = serde_json::from_slice(&out_sha).unwrap();
@@ -816,12 +801,8 @@ mod tests {
             range: "v0.1..v0.2",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(
-            code,
-            ExitCode::SUCCESS,
-            "manifest over annotated tag range must exit SUCCESS"
-        );
+        handle(&classification, &path, &[], &mut out)
+            .expect("manifest over annotated tag range must succeed");
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let files = json
