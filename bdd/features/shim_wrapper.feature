@@ -257,3 +257,23 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the output is valid JSON
     And the JSON output has a "snapshots" key
+
+  # -------------------------------------------------------------------------
+  # shim-run entry point and pure-passthrough symlink (#387)
+  #
+  # Interception is reachable only through `git-prism shim-run git ...`, which
+  # an interactive rc shell function calls. A binary invoked as git/gh (stale
+  # symlink on PATH) never intercepts.
+  # -------------------------------------------------------------------------
+
+  @ISSUE-387
+  Scenario: A program that runs git through a stale git symlink gets real git output
+    Given a fixture git repository with two commits
+    When a program runs "git diff -M --no-color --no-ext-diff HEAD~1..HEAD" through the stale git symlink with CLAUDECODE=1
+    Then the output equals real git's output and the exit codes match
+
+  @ISSUE-387
+  Scenario: shim-run with stdout redirected to a file writes real git output
+    Given a fixture git repository with two commits
+    When I run shim-run as "git diff HEAD~1..HEAD" with CLAUDECODE=1 and stdout redirected to a file
+    Then the output equals real git's output and the exit codes match

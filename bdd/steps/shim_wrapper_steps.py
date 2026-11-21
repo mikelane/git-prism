@@ -98,11 +98,14 @@ def _run_shim(
     args: list[str],
     extra_env: dict[str, str] | None = None,
 ) -> None:
-    """Invoke the shim symlink (as 'git') with a controlled environment.
+    """Invoke ``git-prism shim-run git <args>`` with a controlled environment.
 
-    Prepends the shim directory to PATH so that 'git' resolves to the shim.
-    Strips all known agent env vars first, then applies extra_env on top.
+    ``shim-run`` is the entry point the rc shell function calls (#387). A
+    stale shim directory still sits first on PATH so the real-git resolver
+    must skip it. Strips all known agent env vars first, then applies
+    extra_env on top.
     """
+    binary = _find_binary(context)
     shim_dir = _build_shim_dir(context)
     env = _clean_env()
     env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
@@ -110,7 +113,7 @@ def _run_shim(
         env.update(extra_env)
 
     context.result = subprocess.run(  # noqa: S603
-        ["git"] + args,
+        [str(binary), "shim-run", "git"] + args,
         capture_output=True,
         text=True,
         env=env,
@@ -276,13 +279,90 @@ def step_run_shim_with_env_dumper(context: Context) -> None:
     env["CLAUDECODE"] = "1"
 
     context.result = subprocess.run(  # noqa: S603
-        ["git"],
+        [str(_find_binary(context)), "shim-run", "git"],
         capture_output=True,
         text=True,
         env=env,
         cwd=context.repo_path,
         check=False,
         timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+
+
+@when('a program runs "{command}" through the stale git symlink with CLAUDECODE=1')
+def step_program_runs_git_via_symlink(context: Context, command: str) -> None:
+    """Run git via the legacy symlink; the binary must behave as pure passthrough."""
+    shim_dir = _build_shim_dir(context)
+    env = _clean_env()
+    env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
+    env["CLAUDECODE"] = "1"
+    args = _parse_shim_command(command)
+    context.result = subprocess.run(  # noqa: S603
+        ["git"] + args,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+    reference_env = _clean_env()
+    context.reference = subprocess.run(  # noqa: S603
+        ["/usr/bin/git"] + args,
+        capture_output=True,
+        text=True,
+        env=reference_env,
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+
+
+@when('I run shim-run as "{command}" with CLAUDECODE=1 and stdout redirected to a file')
+def step_shim_run_stdout_to_file(context: Context, command: str) -> None:
+    """Run shim-run with stdout redirected to a regular file."""
+    binary = _find_binary(context)
+    env = _clean_env()
+    env["CLAUDECODE"] = "1"
+    args = _parse_shim_command(command)
+    out_path = Path(tempfile.mkdtemp()) / "out.txt"
+    context.cleanup_dirs.append(str(out_path.parent))
+    with out_path.open("wb") as out:
+        completed = subprocess.run(  # noqa: S603
+            [str(binary), "shim-run", "git"] + args,
+            stdout=out,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=context.repo_path,
+            check=False,
+            timeout=_SHIM_TIMEOUT_SECONDS,
+        )
+    context.result = subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        out_path.read_text(),
+        completed.stderr.decode(),
+    )
+    context.reference = subprocess.run(  # noqa: S603
+        ["/usr/bin/git"] + args,
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+
+
+@then("the output equals real git's output and the exit codes match")
+def step_output_equals_real_git(context: Context) -> None:
+    """Assert byte-for-byte stdout and exit-code parity with /usr/bin/git."""
+    assert context.result.stdout == context.reference.stdout, (
+        f"stdout differs from real git.\nshim: {context.result.stdout[:300]!r}\n"
+        f"git: {context.reference.stdout[:300]!r}"
+    )
+    assert context.result.returncode == context.reference.returncode, (
+        f"exit code {context.result.returncode} != {context.reference.returncode}"
     )
 
 
