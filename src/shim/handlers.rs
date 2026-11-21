@@ -148,6 +148,11 @@ fn handle_show_snapshot<W: Write>(
     out: &mut W,
 ) -> anyhow::Result<()> {
     let commit = build_show_commit_detail(repo_path, sha)?;
+    if commit.parents.len() > 1 {
+        // Real git shows a combined diff for a merge commit; a first-parent
+        // manifest would list files git omits. Decline so git answers.
+        anyhow::bail!("{sha} is a merge commit; real git shows a combined diff");
+    }
 
     let files: Vec<ShowFileEntry> = if commit.parents.is_empty() {
         // Root commit: no parent, so `<sha>^` doesn't resolve.  Walk the
