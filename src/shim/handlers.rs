@@ -352,7 +352,50 @@ fn working_tree_matches_head(repo_path: &Path, path: &str) -> anyhow::Result<boo
     let Some(head_blob) = head_regular_file_bytes(&reader, path)? else {
         return Ok(false);
     };
+    if content_conversion_may_apply(reader.repo(), path) {
+        return Ok(false);
+    }
     Ok(working_tree_file_equals(&repo_path.join(path), &head_blob))
+}
+
+/// Gitattributes that make git rewrite working-tree content before blaming it
+/// (`convert_to_git`): eol normalization, clean filters, ident expansion and
+/// re-encoding. `crlf` is the legacy spelling of `text`/`eol`.
+const CONVERSION_ATTRIBUTES: [&str; 6] = [
+    "text",
+    "eol",
+    "crlf",
+    "filter",
+    "ident",
+    "working-tree-encoding",
+];
+
+/// True when git might convert the working-tree file before blaming it, in
+/// which case raw bytes cannot be compared with the HEAD blob.
+///
+/// Declining is always safe, so any doubt (an attribute lookup that fails, a
+/// `core.eol` setting, `core.autocrlf` other than false) answers true.
+fn content_conversion_may_apply(repo: &gix::Repository, path: &str) -> bool {
+    config_enables_conversion(repo) || attributes_enable_conversion(repo, path).unwrap_or(true)
+}
+
+fn config_enables_conversion(repo: &gix::Repository) -> bool {
+    let config = repo.config_snapshot();
+    let autocrlf_enabled =
+        config.string("core.autocrlf").is_some() && config.boolean("core.autocrlf") != Some(false);
+    autocrlf_enabled || config.string("core.eol").is_some()
+}
+
+fn attributes_enable_conversion(repo: &gix::Repository, path: &str) -> anyhow::Result<bool> {
+    use gix::worktree::stack::state::attributes::Source;
+    let index = repo.index_or_empty()?;
+    let mut stack = repo.attributes_only(&index, Source::WorktreeThenIdMapping)?;
+    let mut outcome = stack.selected_attribute_matches(CONVERSION_ATTRIBUTES);
+    let platform = stack.at_entry(path, Some(gix::index::entry::Mode::FILE))?;
+    platform.matching_attributes(&mut outcome);
+    Ok(outcome
+        .iter_selected()
+        .any(|m| !m.assignment.state.is_unspecified()))
 }
 
 fn is_plain_repo_relative(path: &str) -> bool {
