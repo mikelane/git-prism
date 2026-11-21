@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`shim install` keeps a dangling rc symlink (`.zshrc -> dotfiles/zshrc`, target not yet created) as a symlink** and creates the target, instead of replacing the link with a regular file. (#387)
 - **`git log a...b` passes through to real git.** The handler reported only `a..b`; real git lists the symmetric difference, commits from both sides. (#387)
 - **`git diff a...b` passes through to real git.** The handler collapsed `...` to `..` and reported base-side changes that real git (merge-base to `b`) omits. (#387)
 - **The shim execs real git when its handler fails** instead of printing a git-prism error. The buffered partial output is discarded, and the caller sees real git's stdout, stderr, and exit status. (#387)

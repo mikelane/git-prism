@@ -218,11 +218,11 @@ fn write_marker_block(rc_path: &Path) -> Result<()> {
 /// Replace `path`'s content so a crash mid-write cannot leave it truncated.
 ///
 /// Writes a sibling temp file, fsyncs it, then renames it over the target. A
-/// symlinked rc file (dotfile managers) is resolved first so the link survives
-/// and its target is the file replaced. An existing file's permissions carry
-/// over to the replacement.
+/// symlinked rc file (dotfile managers), dangling or not, is resolved first so
+/// the link survives and its target is the file replaced. An existing file's
+/// permissions carry over to the replacement.
 fn write_atomically(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = resolve_write_target(path);
     let temp = sibling_temp_path(&target);
     let result =
         write_synced(&temp, content, &target).and_then(|()| std::fs::rename(&temp, &target));
@@ -230,6 +230,26 @@ fn write_atomically(path: &Path, content: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+
+/// Longest symlink chain followed before giving up (Linux `MAXSYMLINKS`).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// The file a write to `path` must replace. `canonicalize` fails on a dangling
+/// symlink, so follow the links by hand: the write then creates the missing
+/// target instead of replacing the link with a regular file.
+fn resolve_write_target(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let Ok(link) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = current.parent().map_or(link.clone(), |dir| dir.join(&link));
+    }
+    path.to_path_buf()
 }
 
 fn sibling_temp_path(target: &Path) -> PathBuf {
