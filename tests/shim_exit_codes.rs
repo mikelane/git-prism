@@ -11,11 +11,15 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// When the resolver finds a `git` entry that passes the executable check but
-/// the process-replacement call fails with `PermissionDenied` (e.g. a directory
-/// named `git`), the shim must exit 126, NOT 127.
+/// When the resolver finds a `git` regular file that carries an execute bit but
+/// the process-replacement call fails with `PermissionDenied` (here: the bit is
+/// set for group/other only, so the owner may not run it), the shim must exit
+/// 126, NOT 127. A directory named `git` is a different case: a shell skips
+/// it, and so does the resolver (see `shim_gate3_rc_function_pentest`).
 #[test]
 fn it_exits_126_when_real_git_is_found_but_unexecutable() {
+    use std::os::unix::fs::PermissionsExt;
+
     let bin = env!("CARGO_BIN_EXE_git-prism");
     let tmp = TempDir::new().unwrap();
     let shim_dir = tmp.path().join("shimbin");
@@ -27,10 +31,11 @@ fn it_exits_126_when_real_git_is_found_but_unexecutable() {
     let shim_git = shim_dir.join("git");
     symlink(bin, &shim_git).unwrap();
 
-    // The "real git" is a *directory* named `git`: it passes the resolver's
-    // `is_executable` check (directories carry the exec bit) but launching it
-    // fails with EACCES / PermissionDenied — the found-but-unexecutable case.
-    std::fs::create_dir(real_dir.join("git")).unwrap();
+    // The "real git" is a regular file the owner cannot execute: it passes the
+    // resolver's execute-bit check but launching it fails with EACCES.
+    let real_git = real_dir.join("git");
+    std::fs::write(&real_git, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&real_git, std::fs::Permissions::from_mode(0o011)).unwrap();
 
     let path = format!("{}:{}", shim_dir.display(), real_dir.display());
 

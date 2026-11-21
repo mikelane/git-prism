@@ -415,12 +415,14 @@ fn canonical_eq(a: &Path, b: &Path) -> bool {
     ca == cb
 }
 
-/// Return `true` when `path` exists and is executable by the current user.
+/// Return `true` when `path` is a regular file (symlinks followed) carrying an
+/// execute bit. Directories also carry execute bits but a shell's command
+/// lookup skips them, so the resolver must too.
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
-        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
 
@@ -687,6 +689,37 @@ mod tests {
         // test is to pin the behavior so a future change to the fallback branch
         // (e.g. adding the missing shim-skip) is a visible diff here.
         let _ = resolve_real_git("/nonexistent/git-prism", &env);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_skips_a_directory_named_git_and_finds_the_real_one_after_it() {
+        let decoy = TempDir::new().unwrap();
+        fs::create_dir(decoy.path().join("git")).unwrap();
+        let real = TempDir::new().unwrap();
+        let real_git = make_executable_file(real.path(), "git");
+
+        let path_val = format!("{}:{}", decoy.path().display(), real.path().display());
+        let env = env_with_path(&path_val);
+
+        assert_eq!(
+            resolve_real_git("/nonexistent/git-prism", &env),
+            Some(real_git)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_follows_a_symlink_to_a_regular_file() {
+        let target_dir = TempDir::new().unwrap();
+        let target = make_executable_file(target_dir.path(), "real-git");
+        let link_dir = TempDir::new().unwrap();
+        let link = link_dir.path().join("git");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let env = env_with_path(&link_dir.path().display().to_string());
+
+        assert_eq!(resolve_real_git("/nonexistent/git-prism", &env), Some(link));
     }
 
     #[cfg(unix)]
