@@ -339,6 +339,15 @@ fn handle_blame_snapshot<W: Write>(
         include_diff_hunks: false,
     };
     let result = build_snapshots(repo_path, "HEAD^", "HEAD", &[path.to_string()], &options)?;
+    let path_missing_at_head = result
+        .files
+        .iter()
+        .any(|file| file.after.is_none() && file.error.is_none() && !file.is_binary);
+    if path_missing_at_head {
+        // Real git blame fails (exit 128) for a path absent at HEAD; decline so
+        // the caller gets git's own error and exit code, not an empty success.
+        anyhow::bail!("path {path} does not exist at HEAD");
+    }
     write_with_hint(out, &result, argv)?;
     Ok(())
 }
@@ -605,6 +614,23 @@ mod tests {
         assert!(
             json.get("files").and_then(|f| f.as_array()).is_some(),
             "expected 'files' array in blame output, got: {json}"
+        );
+    }
+
+    #[test]
+    fn it_declines_blame_snapshot_for_a_path_missing_at_head() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let classification = Classification::BlameSnapshot {
+            path: "no-such-file.txt",
+        };
+        let mut out = Vec::new();
+
+        let result = handle(&classification, &path, &[], &mut out);
+
+        assert!(result.is_err(), "missing path must decline so git errors");
+        assert!(
+            out.is_empty(),
+            "nothing may be written for a declined blame"
         );
     }
 
