@@ -98,21 +98,49 @@ fn remove_legacy_path_shim(home: &Path) -> Result<()> {
 fn strip_managed_blocks_from_startup_files(home: &Path) -> Result<()> {
     for name in ALL_STARTUP_FILES {
         let path = home.join(name);
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Some(content) = read_startup_file(&path)? else {
             continue;
         };
-        if !content.lines().any(is_marker_line) {
+        if !has_any_marker_line(&content) {
             continue;
         }
-        write_atomically(&path, strip_all_marker_blocks(&content).as_bytes())
+        write_atomically(&path, &strip_all_marker_blocks(&content))
             .with_context(|| format!("failed to update {}", path.display()))?;
     }
     Ok(())
 }
 
-fn is_marker_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed == BLOCK_START_MARKER || trimmed == BLOCK_END_MARKER
+/// Read a startup file as raw bytes (marker lines are ASCII, so user content in
+/// any encoding is carried through untouched). `None` means the file does not
+/// exist; any other failure names the file instead of being skipped.
+fn read_startup_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn is_marker_line(line: &[u8]) -> bool {
+    is_start_marker(line) || is_end_marker(line)
+}
+
+fn is_start_marker(line: &[u8]) -> bool {
+    line.trim_ascii() == BLOCK_START_MARKER.as_bytes()
+}
+
+fn is_end_marker(line: &[u8]) -> bool {
+    line.trim_ascii() == BLOCK_END_MARKER.as_bytes()
+}
+
+fn lines(content: &[u8]) -> impl Iterator<Item = &[u8]> {
+    // `split_inclusive` keeps each line's own terminator, so a CRLF rc file's
+    // user lines come back byte for byte.
+    content.split_inclusive(|byte| *byte == b'\n')
+}
+
+fn has_any_marker_line(content: &[u8]) -> bool {
+    lines(content).any(is_marker_line)
 }
 
 fn remove_legacy_symlinks(home: &Path) -> Result<()> {
@@ -144,26 +172,20 @@ fn remove_legacy_symlinks(home: &Path) -> Result<()> {
 /// from hand-edits, interrupted writes, or prior buggy runs) then appends
 /// exactly one canonical block.  Creates the file if it doesn't exist.
 fn write_marker_block(rc_path: &Path) -> Result<()> {
-    let existing = if rc_path.exists() {
-        std::fs::read_to_string(rc_path)
-            .with_context(|| format!("failed to read rc file {}", rc_path.display()))?
-    } else {
-        String::new()
-    };
+    let existing = read_startup_file(rc_path)?.unwrap_or_default();
 
     let new_block =
         format!("{BLOCK_START_MARKER}\n{SHIM_FUNCTION_BLOCK_BODY}\n{BLOCK_END_MARKER}\n");
 
-    let cleaned = strip_all_marker_blocks(&existing);
+    let mut new_content = strip_all_marker_blocks(&existing);
 
     // Append the single canonical block with a blank-line separator.
-    let new_content = if cleaned.is_empty() {
-        new_block
-    } else {
-        format!("{cleaned}\n{new_block}")
-    };
+    if !new_content.is_empty() {
+        new_content.push(b'\n');
+    }
+    new_content.extend_from_slice(new_block.as_bytes());
 
-    write_atomically(rc_path, new_content.as_bytes())
+    write_atomically(rc_path, &new_content)
         .with_context(|| format!("failed to write shim block to {}", rc_path.display()))?;
     Ok(())
 }
@@ -218,17 +240,15 @@ fn write_synced(temp: &Path, content: &[u8], original: &Path) -> std::io::Result
 /// (e.g. `echo "# >>> git-prism shim >>>"`) is preserved unchanged.  Only a
 /// line whose entire trimmed content is the marker string is treated as a
 /// block boundary.
-fn strip_all_marker_blocks(content: &str) -> String {
-    let mut kept_lines: Vec<&str> = Vec::new();
+fn strip_all_marker_blocks(content: &[u8]) -> Vec<u8> {
+    let mut kept_lines: Vec<&[u8]> = Vec::new();
     let mut inside_block = false;
 
-    // `split_inclusive` keeps each line's own terminator, so a CRLF rc file's
-    // user lines come back byte for byte.
-    for line in content.split_inclusive('\n') {
-        if line.trim() == BLOCK_START_MARKER {
+    for line in lines(content) {
+        if is_start_marker(line) {
             // Enter managed block; discard this line.
             inside_block = true;
-        } else if line.trim() == BLOCK_END_MARKER {
+        } else if is_end_marker(line) {
             // Exit managed block; discard this line regardless of whether we
             // saw a matching START (handles orphaned END markers).
             inside_block = false;
@@ -241,14 +261,14 @@ fn strip_all_marker_blocks(content: &str) -> String {
     // Trim trailing blank lines introduced by block removal.
     while kept_lines
         .last()
-        .is_some_and(|line| line.trim_end_matches(['\r', '\n']).is_empty())
+        .is_some_and(|line| line.iter().all(|byte| matches!(byte, b'\r' | b'\n')))
     {
         kept_lines.pop();
     }
 
     let mut result = kept_lines.concat();
-    if !result.is_empty() && !result.ends_with('\n') {
-        result.push('\n');
+    if !result.is_empty() && !result.ends_with(b"\n") {
+        result.push(b'\n');
     }
     result
 }
@@ -280,15 +300,17 @@ fn run_status_with_io(home: &Path, out: &mut dyn Write) -> Result<()> {
 
 fn startup_file_with_function_block(home: &Path) -> Option<&'static str> {
     ALL_STARTUP_FILES.into_iter().find(|name| {
-        std::fs::read_to_string(home.join(name))
-            .is_ok_and(|content| has_marker_block(&content) && content.contains("shim-run"))
+        std::fs::read(home.join(name))
+            .is_ok_and(|content| has_marker_block(&content) && mentions_shim_run(&content))
     })
 }
 
-fn has_marker_block(content: &str) -> bool {
-    content
-        .lines()
-        .any(|line| line.trim() == BLOCK_START_MARKER)
+fn has_marker_block(content: &[u8]) -> bool {
+    lines(content).any(is_start_marker)
+}
+
+fn mentions_shim_run(content: &[u8]) -> bool {
+    content.windows(b"shim-run".len()).any(|w| w == b"shim-run")
 }
 
 fn report_legacy_path_shim(home: &Path, out: &mut dyn Write) -> Result<()> {
@@ -300,8 +322,8 @@ fn report_legacy_path_shim(home: &Path, out: &mut dyn Write) -> Result<()> {
         writeln!(out, "legacy PATH shim: present at {}", dir.display())?;
     }
     let legacy_block_file = ALL_STARTUP_FILES.into_iter().find(|name| {
-        std::fs::read_to_string(home.join(name))
-            .is_ok_and(|content| has_marker_block(&content) && !content.contains("shim-run"))
+        std::fs::read(home.join(name))
+            .is_ok_and(|content| has_marker_block(&content) && !mentions_shim_run(&content))
     });
     if let Some(name) = legacy_block_file {
         writeln!(out, "legacy PATH shim: present in ~/{name}")?;
@@ -407,6 +429,31 @@ esac"#;
 
         let mode = std::fs::metadata(&rc).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn it_preserves_non_utf8_bytes_when_installing_and_uninstalling() {
+        let home = TempDir::new().unwrap();
+        let rc = home.path().join(".zshrc");
+        std::fs::write(&rc, b"# caf\xe9\n").unwrap();
+
+        install(home.path(), "/bin/zsh");
+        assert!(std::fs::read(&rc).unwrap().starts_with(b"# caf\xe9\n"));
+        assert!(status(home.path()).contains("shim: installed in ~/.zshrc"));
+
+        run_uninstall_with_io(home.path(), &mut Vec::new()).unwrap();
+        assert_eq!(std::fs::read(&rc).unwrap(), b"# caf\xe9\n");
+        assert!(status(home.path()).contains("shim: not installed"));
+    }
+
+    #[test]
+    fn it_fails_naming_the_file_when_a_startup_file_cannot_be_read() {
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir(home.path().join(".zshenv")).unwrap();
+
+        let err = run_uninstall_with_io(home.path(), &mut Vec::new()).unwrap_err();
+
+        assert!(format!("{err:#}").contains(".zshenv"), "err: {err:#}");
     }
 
     #[test]
