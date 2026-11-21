@@ -1,9 +1,12 @@
-//! PATH-shim entry point for git-prism.
+//! Shim entry point for git-prism.
 //!
-//! When the `git-prism` binary is invoked as `git` (via a symlink), `run_shim`
-//! intercepts agent-issued git commands and routes them to structured JSON
-//! output from the existing `tools::*` functions.  Non-agent invocations and
-//! unrecognised subcommands are passed through to the real git binary.
+//! The interactive-shell `git` function installed by `git-prism shim install`
+//! calls `git-prism shim-run git <args>`.  `run_shim` then intercepts
+//! agent-issued git commands and routes them to structured JSON output from
+//! the existing `tools::*` functions.  Non-agent invocations and unrecognised
+//! subcommands are passed through to the real git binary.  A binary invoked
+//! directly as `git` or `gh` (a stale legacy symlink) is pure passthrough and
+//! never reaches this module's interception logic.
 
 pub(crate) mod classify;
 pub(crate) mod handlers;

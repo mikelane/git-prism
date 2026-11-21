@@ -110,7 +110,7 @@ enum Commands {
         #[command(subcommand)]
         command: ShimCommands,
     },
-    /// Uninstall legacy redirect-hook entries; query/install/uninstall the PATH shim
+    /// Uninstall legacy redirect-hook entries; deprecated aliases for `shim install|uninstall|status`
     Hooks {
         #[command(subcommand)]
         command: HooksCommands,
@@ -119,7 +119,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum HooksCommands {
-    /// Install the PATH shim (redirect hook removed in v0.9.0; use --path-shim or `git-prism shim install`)
+    /// Install the shell-function shim (redirect hook removed in v0.9.0; use `git-prism shim install`)
     Install {
         /// Accepted for backwards compatibility; ignored (redirect hook removed in v0.9.0)
         #[arg(long, value_parser = ["user", "project", "local"])]
@@ -157,7 +157,7 @@ enum ShimCommands {
     },
     /// Remove the shell function block and any legacy PATH-shim symlinks/blocks
     Uninstall,
-    /// Report whether the shim is installed and show the shim directory
+    /// Report whether the shell function is installed in the rc file and flag any legacy PATH shim
     Status,
 }
 
@@ -207,12 +207,12 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             eprintln!(
                 "error: the redirect hook (bash_redirect_hook.py) was removed in v0.9.0.\n\
                  \n\
-                 Use the PATH shim instead:\n\
+                 Use the shell-function shim instead:\n\
                  \n\
                  \x20 git-prism shim install\n\
                  \n\
-                 The shim intercepts git at the PATH layer and is a strict superset of the\n\
-                 redirect hook's coverage. If you had the old hook installed, remove it first:\n\
+                 The shim installs a `git` shell function that routes agent-issued git commands\n\
+                 through git-prism, and is a strict superset of the redirect hook's coverage. If you had the old hook installed, remove it first:\n\
                  \n\
                  \x20 git-prism hooks uninstall --scope user   # or --scope project / local\n\
                  \n\
