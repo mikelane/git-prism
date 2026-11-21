@@ -182,10 +182,12 @@ fn write_marker_block(rc_path: &Path) -> Result<()> {
 /// line whose entire trimmed content is the marker string is treated as a
 /// block boundary.
 fn strip_all_marker_blocks(content: &str) -> String {
-    let mut result = String::with_capacity(content.len());
+    let mut kept_lines: Vec<&str> = Vec::new();
     let mut inside_block = false;
 
-    for line in content.lines() {
+    // `split_inclusive` keeps each line's own terminator, so a CRLF rc file's
+    // user lines come back byte for byte.
+    for line in content.split_inclusive('\n') {
         if line.trim() == BLOCK_START_MARKER {
             // Enter managed block; discard this line.
             inside_block = true;
@@ -194,20 +196,24 @@ fn strip_all_marker_blocks(content: &str) -> String {
             // saw a matching START (handles orphaned END markers).
             inside_block = false;
         } else if !inside_block {
-            result.push_str(line);
-            result.push('\n');
+            kept_lines.push(line);
         }
         // Lines inside a managed block are silently dropped.
     }
 
-    // Trim trailing blank lines introduced by block removal, but preserve a
-    // single trailing newline when the original content ended with one.
-    let trimmed = result.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!("{trimmed}\n")
+    // Trim trailing blank lines introduced by block removal.
+    while kept_lines
+        .last()
+        .is_some_and(|line| line.trim_end_matches(['\r', '\n']).is_empty())
+    {
+        kept_lines.pop();
     }
+
+    let mut result = kept_lines.concat();
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }
 
 /// Remove the function block and every legacy PATH-shim artifact.
@@ -321,6 +327,19 @@ esac"#;
             std::os::unix::fs::symlink("/nonexistent/git-prism", dir.join(name)).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn it_preserves_crlf_line_endings_of_user_content() {
+        let home = TempDir::new().unwrap();
+        std::fs::write(home.path().join(".zshrc"), "export A=1\r\nexport B=2\r\n").unwrap();
+
+        install(home.path(), "/bin/zsh");
+
+        assert!(
+            read(home.path(), ".zshrc").starts_with("export A=1\r\nexport B=2\r\n"),
+            "user lines must keep their CRLF endings"
+        );
     }
 
     #[test]
