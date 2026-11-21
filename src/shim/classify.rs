@@ -112,7 +112,7 @@ fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
     };
     let range = match positionals.as_slice() {
         [] => None,
-        [only] if has_ref_range(only) => Some(*only),
+        [only] if has_ref_range(only) && !is_three_dot_range(only) => Some(*only),
         _ => return Classification::Passthrough,
     };
     // Pickaxe check BEFORE ref-range check (mirrors Python order).
@@ -483,12 +483,10 @@ mod tests {
     }
 
     #[test]
-    fn it_classifies_git_log_three_dot_range_as_history() {
+    fn it_passes_through_git_log_three_dot_range() {
         assert_eq!(
             classify(&["git", "log", "main...HEAD"]),
-            Classification::History {
-                range: "main...HEAD"
-            }
+            Classification::Passthrough
         );
     }
 
