@@ -143,14 +143,14 @@ Feature: PATH-shim wrapper for structured git output
     And the output contains "diff --git"
 
   @ISSUE-287
-  Scenario: Shim sets GIT_PRISM_INSIDE_SHIM=1 in the child process environment
-    # Verifies the sentinel propagation: the real git invoked by the shim
-    # must run with GIT_PRISM_INSIDE_SHIM=1 set so nested git calls inside
-    # lefthook/cargo/etc. never re-enter structured-JSON mode.
+  Scenario: Shim does not leak GIT_PRISM_INSIDE_SHIM into the child process environment
+    # Real git's children (hooks, aliases, editors) must see an unmodified
+    # environment. Recursion is prevented by the resolver skipping git-prism
+    # binaries, not by an inherited sentinel.
     Given a fixture git repository with two commits
     And an env-dumper script that captures the child environment
     When I run the shim as "git" pointing at the env-dumper with CLAUDECODE=1
-    Then the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"
+    Then the env-dumper output does not contain "GIT_PRISM_INSIDE_SHIM"
 
   @ISSUE-299
   Scenario: Real-git resolver skips the shim directory when walking PATH

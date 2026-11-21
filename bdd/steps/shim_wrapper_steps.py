@@ -552,9 +552,9 @@ def step_new_commit_exists(context: Context) -> None:
     )
 
 
-@then('the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"')
-def step_env_dumper_contains_sentinel(context: Context) -> None:
-    """Assert the env-dumper output file records GIT_PRISM_INSIDE_SHIM=1."""
+@then('the env-dumper output does not contain "GIT_PRISM_INSIDE_SHIM"')
+def step_env_dumper_lacks_sentinel(context: Context) -> None:
+    """Assert the env-dumper output file has no GIT_PRISM_INSIDE_SHIM entry."""
     dumper_file = Path(context.dumper_output_file)
     assert dumper_file.exists(), (
         f"Env-dumper output file does not exist: {dumper_file}\n"
@@ -562,8 +562,8 @@ def step_env_dumper_contains_sentinel(context: Context) -> None:
         f"shim stderr: {context.result.stderr}"
     )
     contents = dumper_file.read_text()
-    assert "GIT_PRISM_INSIDE_SHIM=1" in contents, (
-        f"GIT_PRISM_INSIDE_SHIM=1 not found in env-dumper output:\n{contents}"
+    assert "GIT_PRISM_INSIDE_SHIM" not in contents, (
+        f"GIT_PRISM_INSIDE_SHIM leaked into the env-dumper output:\n{contents}"
     )
 
 
