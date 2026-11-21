@@ -37,6 +37,7 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the output is valid JSON
     And the JSON output has a "files" array
+    And the JSON has key "git_prism_hint"
 
   @ISSUE-287
   Scenario: Agent plus git diff with three-dot range produces JSON with files array

@@ -29,35 +29,62 @@ use crate::tools::{
 pub(crate) fn handle<W: Write>(
     classification: &Classification<'_>,
     repo_path: &Path,
-    _argv: &[&str],
+    argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
-    dispatch(classification, repo_path, out).inspect_err(|e| {
+    dispatch(classification, repo_path, argv, out).inspect_err(|e| {
         tracing::debug!(error = %e, "shim handler failed; falling back to real git");
     })
+}
+
+const HINT_KEY: &str = "git_prism_hint";
+
+/// Write `value` as pretty JSON with a top-level hint telling the reader how
+/// to get the raw git output the shim replaced.  Shim-only: MCP and CLI
+/// output never pass through here.
+fn write_with_hint<W: Write, T: serde::Serialize>(
+    out: &mut W,
+    value: &T,
+    argv: &[&str],
+) -> anyhow::Result<()> {
+    let mut json = serde_json::to_value(value)?;
+    let raw_git_args = argv.get(1..).unwrap_or_default().join(" ");
+    let hint =
+        format!("git-prism structured output. For raw git output run: command git {raw_git_args}");
+    json.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("shim output is not a JSON object"))?
+        .insert(HINT_KEY.to_string(), serde_json::Value::String(hint));
+    serde_json::to_writer_pretty(out, &json)?;
+    Ok(())
 }
 
 fn dispatch<W: Write>(
     classification: &Classification<'_>,
     repo_path: &Path,
+    argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
     match classification {
-        Classification::Manifest { range } => handle_manifest(range, repo_path, out),
-        Classification::History { range } => handle_history(range, repo_path, out),
+        Classification::Manifest { range } => handle_manifest(range, repo_path, argv, out),
+        Classification::History { range } => handle_history(range, repo_path, argv, out),
         Classification::FunctionContext {
             range,
             pickaxe_term,
-        } => handle_function_context(*range, pickaxe_term, repo_path, out),
-        Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, out),
-        Classification::BlameSnapshot { path } => handle_blame_snapshot(path, repo_path, out),
+        } => handle_function_context(*range, pickaxe_term, repo_path, argv, out),
+        Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, argv, out),
+        Classification::BlameSnapshot { path } => handle_blame_snapshot(path, repo_path, argv, out),
         Classification::Passthrough => {
             anyhow::bail!("dispatch called with Passthrough — caller bug")
         }
     }
 }
 
-fn handle_manifest<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
+fn handle_manifest<W: Write>(
+    range: &str,
+    repo_path: &Path,
+    argv: &[&str],
+    out: &mut W,
+) -> anyhow::Result<()> {
     let options = ManifestOptions {
         include_patterns: vec![],
         exclude_patterns: vec![],
@@ -72,11 +99,16 @@ fn handle_manifest<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyh
             collect_all_worktree_manifest_pages(repo_path, base, &options, 500)?
         }
     };
-    serde_json::to_writer_pretty(out, &result)?;
+    write_with_hint(out, &result, argv)?;
     Ok(())
 }
 
-fn handle_history<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
+fn handle_history<W: Write>(
+    range: &str,
+    repo_path: &Path,
+    argv: &[&str],
+    out: &mut W,
+) -> anyhow::Result<()> {
     let (base, head) = match parse_range(range) {
         RefRange::CommitRange { base, head } => (base, head),
         RefRange::WorktreeCompare { .. } => {
@@ -90,7 +122,7 @@ fn handle_history<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyho
         max_response_tokens: None,
     };
     let result = collect_all_history_pages(repo_path, base, head, &options, 500)?;
-    serde_json::to_writer_pretty(out, &result)?;
+    write_with_hint(out, &result, argv)?;
     Ok(())
 }
 
@@ -98,6 +130,7 @@ fn handle_function_context<W: Write>(
     range: Option<&str>,
     _pickaxe_term: &str,
     repo_path: &Path,
+    argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
     let effective_range = range.unwrap_or("HEAD~1..HEAD");
@@ -114,11 +147,16 @@ fn handle_function_context<W: Write>(
         max_response_tokens: Some(8192),
     };
     let result = build_function_context_with_options(repo_path, base, head, &options)?;
-    serde_json::to_writer_pretty(out, &result)?;
+    write_with_hint(out, &result, argv)?;
     Ok(())
 }
 
-fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
+fn handle_show_snapshot<W: Write>(
+    sha: &str,
+    repo_path: &Path,
+    argv: &[&str],
+    out: &mut W,
+) -> anyhow::Result<()> {
     let commit = build_show_commit_detail(repo_path, sha)?;
 
     let files: Vec<ShowFileEntry> = if commit.parents.is_empty() {
@@ -177,7 +215,7 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
         token_estimate: 0,
     };
     result.token_estimate = estimate_response_tokens(&result);
-    serde_json::to_writer_pretty(out, &result)?;
+    write_with_hint(out, &result, argv)?;
     Ok(())
 }
 
@@ -289,6 +327,7 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
 fn handle_blame_snapshot<W: Write>(
     path: &str,
     repo_path: &Path,
+    argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
     // `git blame <path>` maps to get_file_snapshots for the whole file at HEAD.
@@ -300,7 +339,7 @@ fn handle_blame_snapshot<W: Write>(
         include_diff_hunks: false,
     };
     let result = build_snapshots(repo_path, "HEAD^", "HEAD", &[path.to_string()], &options)?;
-    serde_json::to_writer_pretty(out, &result)?;
+    write_with_hint(out, &result, argv)?;
     Ok(())
 }
 
@@ -671,6 +710,68 @@ mod tests {
             !body.contains("feat: the subject"),
             "subject must not leak into body"
         );
+    }
+
+    #[test]
+    fn it_adds_a_raw_git_hint_to_intercepted_json() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let classification = Classification::Manifest {
+            range: "HEAD~1..HEAD",
+        };
+        let mut out = Vec::new();
+        handle(&classification, &path, &["git", "diff", "A..B"], &mut out).unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            json["git_prism_hint"],
+            "git-prism structured output. For raw git output run: command git diff A..B"
+        );
+    }
+
+    #[test]
+    fn it_adds_the_hint_to_every_handler_kind() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let sha = head_sha(&path);
+        let cases = [
+            Classification::History {
+                range: "HEAD~1..HEAD",
+            },
+            Classification::ShowSnapshot { sha: &sha },
+            Classification::BlameSnapshot { path: "world.txt" },
+            Classification::FunctionContext {
+                range: Some("HEAD~1..HEAD"),
+                pickaxe_term: "x",
+            },
+        ];
+        for classification in &cases {
+            let mut out = Vec::new();
+            handle(classification, &path, &["git", "log", "-p"], &mut out).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(
+                json["git_prism_hint"],
+                "git-prism structured output. For raw git output run: command git log -p"
+            );
+        }
+    }
+
+    #[test]
+    fn it_leaves_tool_output_without_a_hint() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let result = collect_all_manifest_pages(
+            &path,
+            "HEAD~1",
+            "HEAD",
+            &ManifestOptions {
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+                include_function_analysis: false,
+                max_response_tokens: Some(8192),
+            },
+            500,
+        )
+        .unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json.get("git_prism_hint").is_none());
     }
 
     #[test]
