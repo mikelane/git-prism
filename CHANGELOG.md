@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The raw-git hint quotes an argument that starts with `=`**, which zsh would otherwise expand to a command path when the hint is pasted back. (#387)
 - **`shim install` keeps a dangling rc symlink (`.zshrc -> dotfiles/zshrc`, target not yet created) as a symlink** and creates the target, instead of replacing the link with a regular file. (#387)
 - **`git log a...b` passes through to real git.** The handler reported only `a..b`; real git lists the symmetric difference, commits from both sides. (#387)
 - **`git diff a...b` passes through to real git.** The handler collapsed `...` to `..` and reported base-side changes that real git (merge-base to `b`) omits. (#387)

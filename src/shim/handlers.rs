@@ -68,7 +68,9 @@ fn write_with_hint<W: Write, T: serde::Serialize>(
 /// treats specially, so the hint can be pasted back as the same command.
 fn shell_quote(arg: &str) -> String {
     let is_plain = |c: char| c.is_ascii_alphanumeric() || "_-./:=,@%+~".contains(c);
-    let needs_quoting = arg.is_empty() || arg.starts_with('~') || !arg.chars().all(is_plain);
+    // `~` and `=` are plain mid-word but expand at the start of a word
+    // (home directory, zsh `=cmd` path lookup).
+    let needs_quoting = arg.is_empty() || arg.starts_with(['~', '=']) || !arg.chars().all(is_plain);
     if needs_quoting {
         format!("'{}'", arg.replace('\'', r"'\''"))
     } else {
@@ -987,5 +989,12 @@ mod tests {
         assert_eq!(shell_quote("HEAD^"), "'HEAD^'");
         assert_eq!(shell_quote("$(rm -rf x)"), "'$(rm -rf x)'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn it_single_quotes_every_character_that_expands_at_the_start_of_a_word() {
+        for arg in ["=ls", "~user", "{a,b}", "!!", "#x", "*.rs", "?x", "[ab]"] {
+            assert_eq!(shell_quote(arg), format!("'{arg}'"));
+        }
     }
 }
