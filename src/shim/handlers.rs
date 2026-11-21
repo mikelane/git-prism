@@ -48,7 +48,13 @@ fn write_with_hint<W: Write, T: serde::Serialize>(
     argv: &[&str],
 ) -> anyhow::Result<()> {
     let mut json = serde_json::to_value(value)?;
-    let raw_git_args = argv.get(1..).unwrap_or_default().join(" ");
+    let raw_git_args = argv
+        .get(1..)
+        .unwrap_or_default()
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     let hint =
         format!("git-prism structured output. For raw git output run: command git {raw_git_args}");
     json.as_object_mut()
@@ -56,6 +62,18 @@ fn write_with_hint<W: Write, T: serde::Serialize>(
         .insert(HINT_KEY.to_string(), serde_json::Value::String(hint));
     serde_json::to_writer_pretty(out, &json)?;
     Ok(())
+}
+
+/// POSIX-single-quote `arg` unless it is made only of characters no shell
+/// treats specially, so the hint can be pasted back as the same command.
+fn shell_quote(arg: &str) -> String {
+    let is_plain = |c: char| c.is_ascii_alphanumeric() || "_-./:=,@%+~".contains(c);
+    let needs_quoting = arg.is_empty() || arg.starts_with('~') || !arg.chars().all(is_plain);
+    if needs_quoting {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    } else {
+        arg.to_string()
+    }
 }
 
 fn dispatch<W: Write>(
@@ -952,5 +970,22 @@ mod tests {
         );
 
         drop(dir);
+    }
+
+    #[test]
+    fn it_leaves_plain_arguments_unquoted() {
+        for arg in ["diff", "HEAD~1..HEAD", "--name-only", "src/a_b.rs", "a=b,c"] {
+            assert_eq!(shell_quote(arg), arg);
+        }
+    }
+
+    #[test]
+    fn it_single_quotes_arguments_a_shell_would_split_or_expand() {
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("~/x"), "'~/x'");
+        assert_eq!(shell_quote("HEAD^"), "'HEAD^'");
+        assert_eq!(shell_quote("$(rm -rf x)"), "'$(rm -rf x)'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }
