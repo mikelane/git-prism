@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The shim is now a `git` shell function in your interactive rc file, not a `git` symlink on `PATH`.** `git-prism shim install` writes a marker-delimited `function git { … }` block to `~/.zshrc` (or `~/.bashrc` when `$SHELL` is bash) that runs `git-prism shim-run git "$@"`, or real git if `git-prism` is not on `PATH`. It no longer creates `~/.local/share/git-prism/bin/{git,gh}` or edits `PATH`. Shell functions are not inherited by child processes, so only `git` commands an agent types into its shell are intercepted. Any program that execs git (Python `subprocess`, `make`, `sh -c`, scripts) now gets real git output, byte for byte. Under the PATH shim, a Python script launched from an agent session ran `git diff -M --no-color --no-ext-diff A..B` and received a JSON manifest with exit status 0. Agent detection reads environment variables that every child process inherits, so the script looked like the agent. As a result, `make`, `sh -c`, and wrapper scripts are no longer intercepted. A typed command piped into a program (`git diff A..B | git apply`) still is. Claude Code's shell snapshot captures rc functions on zsh. This is unverified on bash. See [ADR 0012](docs/decisions/0012-shim-as-shell-function.md). (#387)
+  **Migration:** re-run `git-prism shim install`. It removes the old PATH blocks and symlinks automatically. Remove any hand-written `export PATH=…/git-prism/bin…` lines, then restart your agent session.
+- **A git-prism binary invoked as `git` or `gh` no longer intercepts.** It execs the real binary unchanged, so a stale symlink from 0.10.0 and earlier is inert. Interception is reachable only through `git-prism shim-run git <args>`. (#387)
+
+### Added
+
+- **Intercepted shim output carries a `git_prism_hint` field** naming the raw-git command, for example `"git-prism structured output. For raw git output run: command git diff HEAD~1..HEAD"`. `command git` bypasses the shell function. MCP and CLI output are unchanged. (#387)
+
 ### Fixed
+
+- **The shim execs real git when its handler fails** instead of printing a git-prism error. The buffered partial output is discarded, and the caller sees real git's stdout, stderr, and exit status. (#387)
+- **Shim commands with stdout redirected to a regular file (`git diff A..B > x.patch`) pass through to real git**, so captured output is byte-for-byte git. (#387)
+- **`--quiet` and `--exit-code` pass through to real git.** The exit status is the answer for these flags, and the shim always exited 0. (#387)
+- **`git show <rev>^{tree}` and other `^{…}` peel specs pass through to real git** instead of failing to peel to a commit. (#387)
+- **Real-binary resolution skips other git-prism installs on `PATH`.** Two shim directories on `PATH` could previously exec each other in a loop (`gh` → `gh`). (#387)
 
 - **`git show` with blob/tree/index object specs now passes through to real git** instead of failing with a peel-to-commit error (`was blob while trying to peel to commit`). Colon-bearing specs — including `<rev>:<path>` (rev-qualified blob), `:<path>` (stage-0 index), `:N:<path>` (explicit-stage index), and `<rev>:/abs/path` (absolute-path blob) — now passthrough. The shim recognizes any spec containing `:` that does NOT start with `:/` as a blob/tree/index spec. Plain `git show <commit-ish>` and `:/regex` commit-message search continue to be intercepted and return structured JSON. (#381)
 - **`git log A..B` (and the shim's interception of it) no longer fails on diverged history.** `walk_commits` computed the two-dot range with a hand-rolled walk that stopped only on the exact base OID and followed first-parent only, so when `base` was not an ancestor of `head` (a branch whose base has advanced — the normal case) the walk ran off to the root commit and errored with `commit <root> has no parent but base <base> not yet reached`. It now uses gix's `rev_walk` with the base as a hidden tip and `ByCommitTime(NewestFirst)` sorting, matching `git rev-list --reverse base..head` for diverged, merge, octopus, and disjoint histories. (#382)

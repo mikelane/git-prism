@@ -60,16 +60,16 @@ sessions.
 git-prism works through two independent mechanisms. They do different things and
 can be used together or separately:
 
-| | PATH shim (`git-prism shim install`) | MCP server (`git-prism serve`) |
+| | Shell shim (`git-prism shim install`) | MCP server (`git-prism serve`) |
 |---|---|---|
-| **What it intercepts** | `git` and `gh` CLI calls made by the agent | Direct calls to git-prism MCP tools (`get_change_manifest`, `get_function_context`, etc.) |
-| **How it runs** | One-shot process per intercepted command; exits immediately | Long-running stdio server; one process per Claude Code session |
+| **What it intercepts** | `git` commands the agent types into its shell | Direct calls to git-prism MCP tools (`get_change_manifest`, `get_function_context`, etc.) |
+| **How it runs** | One-shot process per typed `git` command; exits immediately | Long-running stdio server; one process per Claude Code session |
 | **Needs MCP registration?** | No | Yes (`claude mcp add`) |
 
-**If you only use the PATH shim** (agents call `git`/`gh` directly and you
-haven't registered git-prism as an MCP server), you don't need the MCP
-registration at all -- and you can remove it to avoid the orphaned `serve`
-processes described below.
+**If you only use the shim** (agents type `git` commands and you haven't
+registered git-prism as an MCP server), you don't need the MCP registration at
+all -- and you can remove it to avoid the orphaned `serve` processes described
+below.
 
 **If you use the MCP tools** (`get_change_manifest`, etc.) in your agent
 prompts, you need the MCP server registration.
@@ -98,11 +98,11 @@ claude mcp remove git-prism
 ## Redirect hook (removed in v0.9.0)
 
 Earlier versions bundled a Claude Code `PreToolUse` redirect hook, installed via
-`git-prism hooks install`. It was **removed in v0.9.0**: the [PATH shim](#path-shim)
-below is a strict superset of its coverage and the hook's structural blind spots
-made it the weaker of the two. See
-[ADR 0010](docs/decisions/0010-shim-direct-call-interception.md) and
-[ADR 0011](docs/decisions/0011-redirect-hook-removal.md) for the rationale.
+`git-prism hooks install`. It was **removed in v0.9.0** in favor of the
+[shim](#shell-shim) below. See
+[ADR 0011](docs/decisions/0011-redirect-hook-removal.md) for the removal and
+[ADR 0012](docs/decisions/0012-shim-as-shell-function.md) for the current shim
+design.
 
 `git-prism hooks install` now exits with an error directing you to
 `git-prism shim install`. If you ran the old redirect hook, clean up its leftover
@@ -113,39 +113,59 @@ git-prism hooks uninstall   # removes the legacy git-prism-bash-redirect-v1 sett
 git-prism hooks status      # reports whether a legacy entry remains, and at which scope
 ```
 
-## PATH shim
+## Shell shim
 
-> **Install is Unix-only.** `git-prism shim install` creates a symlink and relies
-> on process-level interception; it cleanly bails on non-Unix platforms
-> ("not supported on non-Unix platforms"). The passthrough code paths build and
-> run on Windows (see [#322](https://github.com/mikelane/git-prism/pull/332)), but
-> the install flow itself assumes macOS or Linux.
+> **Unix only.** The shim needs a POSIX shell (zsh or bash) and real-git
+> resolution, which git-prism implements only on Unix. On other platforms the
+> shim cannot find real git and exits 127.
 
 ### What it does and why
 
-A Claude Code `PreToolUse` hook only ever fires inside Claude Code's `PreToolUse`
-pipeline. Agents that shell out to `git` through other channels — a subprocess,
-a shell tool, a build script, a wrapper — never hit it. That blind spot is why
-the bundled redirect hook was removed in favor of the PATH shim, which closes the
-gap at the process level.
+`git-prism shim install` adds a `git` shell function to your interactive rc file.
+When an AI agent types a `git` command into its shell, the function sends it
+through `git-prism shim-run git …`. git-prism then either returns structured JSON
+(the same data the MCP tools return) or execs real git unchanged.
 
-When installed, `git-prism` is placed on your `PATH` as a binary literally named
-`git`, ahead of the real git. Every `git` invocation flows through git-prism
-first. The shim then decides, per command:
+The rule is: **git-prism intercepts only when the language model will read git's
+output itself. A program that runs git gets byte-for-byte git output.** Shell
+functions are not inherited by child processes. A Python `subprocess`, `make`,
+`sh -c`, `xargs git`, or a shell script finds the real `git` on `PATH` and never
+reaches git-prism. Earlier releases put a `git` symlink on `PATH`, which also
+caught those programs. One of them received JSON where it expected a diff, and
+it did not report an error. See
+[ADR 0012](docs/decisions/0012-shim-as-shell-function.md).
 
-- **AI agent + a watch-list subcommand with a ref range** → route to git-prism's
-  structured-JSON path (the same data the MCP tools return) instead of porcelain.
-  The watch list is `diff`, `log`, `show`, `blame`, and pickaxe forms
-  (`-S`/`-G`), but **only when a ref range is present** (e.g. `git diff main..HEAD`).
-- **Everything else** — humans, CI, non-agents, ref-range-less commands like
-  `git status` or a bare `git diff` — falls straight through to the real git
-  binary, unchanged.
+**Intercepted** (agent detected, typed command, stdout not redirected to a file):
 
-Agent detection reuses the env-var-only logic behind
-[`git-prism agent-detect`](#agent-detection): no agent signal (or `CI=true`)
-means vanilla git, always. The classifier and watch list live in
-[`src/shim/classify.rs`](src/shim/classify.rs); the real-git resolver that walks
-`PATH` (skipping the shim's own directory) lives in `src/shim/real_git.rs`.
+| Command | Returns |
+|---|---|
+| `git diff <a>..<b>` | change manifest |
+| `git log <a>..<b>` | commit history |
+| `git log -S <term>` / `-G <regex>` (range optional) | function context |
+| `git show <commit-ish>` | file snapshots |
+| `git blame <path>` | file snapshots |
+
+The intercepted JSON includes a top-level `git_prism_hint` field naming the raw
+command, for example
+`"For raw git output run: command git diff HEAD~1..HEAD"`.
+
+**Passed through to real git:**
+
+- any program that execs `git` (scripts, build tools, subprocesses)
+- any subcommand not in the table above, and `git diff` / `git log` without a
+  ref range (`git status`, a bare `git diff`)
+- scripted-output flags: `--format`, `--pretty`, `-s`/`--no-patch`,
+  `--porcelain`, `--stat`, `-z`, `--quiet`, `--exit-code`
+- `git show` object specs that are not commits: `<rev>:<path>`, `:<path>`,
+  `<rev>^{tree}`, and similar
+- stdout redirected to a regular file (`git diff a..b > x.patch`)
+- any command git-prism fails to answer: the partial output is discarded and
+  real git runs, so you see git's own output, error message, and exit status
+- callers that are not agents, and `CI=true`
+
+Agent detection uses the env-var logic behind
+[`git-prism agent-detect`](#agent-detection). The classifier is in
+[`src/shim/classify.rs`](src/shim/classify.rs).
 
 ### Install
 
@@ -153,96 +173,131 @@ means vanilla git, always. The classifier and watch list live in
 git-prism shim install
 ```
 
-This creates a symlink at `~/.local/share/git-prism/bin/git` pointing at the
-git-prism binary and prints both the created path and the line to add to your
-shell profile:
-
 ```
-Created symlink: /home/you/.local/share/git-prism/bin/git
-Add this to your shell init (~/.zshrc or ~/.bashrc):
-  export PATH="$HOME/.local/share/git-prism/bin:$PATH"
+Installed git shim function in ~/.zshrc
+Restart your agent session so its shell snapshot picks up the function.
 ```
 
-Add that `export` line to your shell profile so the shim directory precedes the
-real git on `PATH`, then open a new shell.
+The rc file is `~/.bashrc` when the basename of `$SHELL` is `bash`. Otherwise it
+is `~/.zshrc`. The block is never written to `~/.zshenv` or `~/.bash_profile`.
+zsh reads `.zshenv` for every shell, scripts included. Install writes this block:
 
-To check status or remove the shim:
+```sh
+# >>> git-prism shim >>>
+function git {
+  if command -v git-prism >/dev/null 2>&1; then
+    command git-prism shim-run git "$@"
+  else
+    command git "$@"
+  fi
+}
+# <<< git-prism shim <<<
+```
+
+If `git-prism` is not on `PATH`, the function runs real git. Re-running install
+is idempotent.
+
+**Restart your agent session after installing.** Claude Code sources your rc
+files once at launch into a shell snapshot and reuses that snapshot for every
+Bash tool call. A running session does not see the new function. The snapshot
+capturing rc functions has been verified for zsh. It is **not yet verified for
+bash**.
+
+**Upgrading from a PATH-shim install (0.10.0 and earlier):** re-run
+`git-prism shim install`. It removes the old PATH-prepend blocks from
+`~/.zshenv`, `~/.zshrc`, `~/.bash_profile`, and `~/.bashrc`, and the
+`~/.local/share/git-prism/bin/{git,gh}` symlinks. It removes that directory if it
+is then empty. Delete any `export PATH=…/git-prism/bin…` line you added by hand,
+then restart your agent session. A leftover symlink is harmless: when the binary
+is invoked as `git` or `gh`, it execs the real binary without intercepting.
+
+> **Deprecated:** `git-prism hooks install --path-shim` still works, prints a
+> deprecation warning, and writes the same function block. Use
+> `git-prism shim install` instead.
+
+### Status
 
 ```bash
-git-prism shim status     # reports installed / not installed + directory
-git-prism shim uninstall  # removes the symlink
+git-prism shim status
 ```
 
-> **Deprecated:** `git-prism hooks install --path-shim` still works in this
-> release but prints a deprecation warning. Use `git-prism shim install` instead.
+```
+shim: installed in ~/.zshrc
+```
+
+If artifacts from a PATH-shim install remain, status reports them as well, for
+example `legacy PATH shim: present at /home/you/.local/share/git-prism/bin`,
+followed by a line telling you to run `git-prism shim install` to migrate.
 
 ### Smoke test
 
-```bash
-# 1. Install and wire up PATH
-git-prism shim install
-export PATH="$HOME/.local/share/git-prism/bin:$PATH"
-
-# 2. As a non-agent, you get vanilla git — passthrough
-git --version            # prints the real git version
-
-# 3. As an agent, a ref-range diff is intercepted and returns structured JSON
-AI_AGENT=smoke-test git diff HEAD~1..HEAD | head -c 80
-# => {"metadata":{ ... structured manifest ...
-
-# 4. A ref-range-less command always passes through, even for an agent
-AI_AGENT=smoke-test git status   # plain porcelain
-```
-
-### Escape hatch and loop prevention
-
-The shim sets `GIT_PRISM_INSIDE_SHIM=1` in every child process it spawns. When
-the shim sees that variable already set, it forces passthrough — so nested git
-calls (a `lefthook` pre-push hook, `cargo`'s internal git, a build script that
-shells out to git) never recurse back into the shim and loop. You can set it
-yourself to force vanilla git for one command:
+In a new interactive shell (or after `source ~/.zshrc`), inside a repository
+with at least two commits:
 
 ```bash
-GIT_PRISM_INSIDE_SHIM=1 git diff main..HEAD   # bypasses the shim
+# Not an agent: real git
+git diff HEAD~1..HEAD | head -1
+# => diff --git a/f.txt b/f.txt
+
+# As an agent, a ref-range diff returns structured JSON
+AI_AGENT=smoke-test git diff HEAD~1..HEAD | grep git_prism_hint
+# =>   "git_prism_hint": "git-prism structured output. For raw git output run: command git diff HEAD~1..HEAD",
+
+# Redirected to a file: real git, even for an agent
+AI_AGENT=smoke-test git diff HEAD~1..HEAD > out.patch && head -1 out.patch
+# => diff --git a/f.txt b/f.txt
+
+# A program running git: real git, even for an agent
+AI_AGENT=smoke-test sh -c 'git diff HEAD~1..HEAD' | head -1
+# => diff --git a/f.txt b/f.txt
 ```
 
-### Per-invocation opt-out (`GIT_PRISM_PASSTHROUGH`)
+### Getting raw git output
 
-Set `GIT_PRISM_PASSTHROUGH=1` (or the alias `GIT_PRISM_DISABLE=1`) to make the
-shim exec the real git/gh **immediately** — before telemetry init, before
-classification, with near-zero added latency:
+`command git …` skips shell functions and runs real git:
 
 ```bash
-GIT_PRISM_PASSTHROUGH=1 git diff main..HEAD   # real git, no shim overhead
+command git diff main..HEAD | git apply -R   # porcelain, never JSON
 ```
 
-This is the first-class alternative to putting `/usr/bin` ahead of the shim on
-`PATH`. Use it to wrap a test suite or tight loop where shim processing and
-telemetry are not desirable:
+Use it when a typed command pipes git into another program. A pipe is not a
+file, so `git diff a..b | git apply` is intercepted and sends JSON to
+`git apply`.
+
+To turn the shim off for a whole command or session, set
+`GIT_PRISM_PASSTHROUGH=1` (or the alias `GIT_PRISM_DISABLE=1`). `shim-run` then
+execs real git before it starts telemetry or classifies the command. Accepted
+truthy values are `1` and `true` (case-insensitive). Any other value, or unset,
+leaves the shim active.
 
 ```bash
-GIT_PRISM_PASSTHROUGH=1 cargo test   # git calls inside tests skip the shim
+GIT_PRISM_PASSTHROUGH=1 git diff main..HEAD   # real git
 ```
 
-Accepted truthy values: `1`, `true` (case-insensitive). Any other value (or
-unset) leaves the shim active.
+The shim sets `GIT_PRISM_INSIDE_SHIM=1` in the environment of the real git it
+runs. When `shim-run` sees that variable, it passes through. This prevents
+recursion if a git hook or alias starts an interactive shell that defines the
+function again.
 
 ### Debugging
 
-Set `GIT_PRISM_DEBUG_RESOLVER=1` to print the resolved real-git path to stderr,
-so you can confirm which `git` binary the shim is delegating to:
+Set `GIT_PRISM_DEBUG_RESOLVER=1` to print the resolved real-git path to stderr
+when the shim passes a command through:
 
 ```bash
 GIT_PRISM_DEBUG_RESOLVER=1 git status
 # (stderr) git-prism shim: resolved real git to /usr/bin/git
 ```
 
+The resolver walks `PATH` and skips any candidate that is a git-prism binary,
+so a leftover symlink cannot make the shim exec itself.
+
 ### Coexisting with rtk
 
-If you use [rtk](https://github.com/rtk-rs) (or any tool that also wraps `git`
-on `PATH`), the two wrappers will fight over the same command. Tell rtk to leave
-`git` alone by adding it to rtk's exclude list in
-`~/Library/Application Support/rtk/config.toml`:
+[rtk](https://github.com/rtk-rs)'s Claude Code hook rewrites `git …` commands
+to `rtk git …`. rtk then runs git as a child process, which never sees the shell
+function, so git-prism never intercepts. To use the shim for `git`, add it to
+rtk's exclude list in `~/Library/Application Support/rtk/config.toml`:
 
 ```toml
 exclude_commands = ["git"]
@@ -251,15 +306,21 @@ exclude_commands = ["git"]
 ### Uninstall
 
 ```bash
-git-prism hooks uninstall --path-shim   # removes the symlink
-git-prism hooks status                  # reflects path-shim presence/absence
+git-prism shim uninstall
 ```
 
-After uninstalling, remove the `export PATH=...` line you added to your shell
-profile.
+```
+Removed git-prism shim.
+```
 
-A narrated end-to-end walkthrough of the shim lives at
-[`demo/path-shim.mp4`](demo/path-shim.mp4).
+Uninstall removes the function block and any PATH-shim artifacts left from older
+releases. `git-prism hooks uninstall --path-shim` does the same. Restart your
+agent session afterwards. The running session's snapshot still defines the
+function, and it keeps intercepting until the session restarts.
+
+[`demo/path-shim.mp4`](demo/path-shim.mp4) is a narrated walkthrough of the
+PATH-symlink design used in 0.10.0 and earlier. It does not show the current
+install flow.
 
 ## Agent detection
 
@@ -800,7 +861,7 @@ Optional OpenTelemetry instrumentation, disabled by default and opt-in via envir
 | `GIT_PRISM_OTLP_HEADERS` | Planned, not yet wired ([#43](https://github.com/mikelane/git-prism/issues/43)). Setting this variable has no effect today; managed OTLP backends that require auth headers need a local collector proxy. | unset |
 | `GIT_PRISM_SERVICE_NAME` | Service name reported to the backend. | `git-prism` |
 | `GIT_PRISM_SERVICE_VERSION` | Service version reported to the backend. | crate version |
-| `GIT_PRISM_PASSTHROUGH` | Set to `1` or `true` to skip shim processing and telemetry entirely for a single invocation. See [Per-invocation opt-out](#per-invocation-opt-out-git_prism_passthrough). | unset |
+| `GIT_PRISM_PASSTHROUGH` | Set to `1` or `true` to skip shim processing and telemetry entirely for a single invocation. See [Getting raw git output](#getting-raw-git-output). | unset |
 | `GIT_PRISM_DISABLE` | Alias for `GIT_PRISM_PASSTHROUGH`. | unset |
 
 Quick start with Jaeger (any OTLP-compatible backend works):

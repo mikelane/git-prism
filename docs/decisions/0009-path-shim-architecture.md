@@ -1,6 +1,6 @@
 # ADR 0009: PATH Shim Architecture
 
-- **Status**: Implemented
+- **Status**: Partially superseded by [ADR 0012](0012-shim-as-shell-function.md) (§1–§2 replaced by the rc shell function; §3–§6 still apply)
 - **Date**: 2026-05-29
 - **Context**: Epic #284 — a PATH shim that intercepts agent `git` calls outside Claude Code's hook pipeline
 
