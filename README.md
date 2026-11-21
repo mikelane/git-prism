@@ -154,8 +154,12 @@ command, for example
 - any program that execs `git` (scripts, build tools, subprocesses)
 - any subcommand not in the table above, and `git diff` / `git log` without a
   ref range (`git status`, a bare `git diff`)
-- scripted-output flags: `--format`, `--pretty`, `-s`/`--no-patch`,
-  `--porcelain`, `--stat`, `-z`, `--quiet`, `--exit-code`
+- any option or argument the structured output does not honour: scripted-output
+  flags (`--format`, `--pretty`, `-s`/`--no-patch`, `--porcelain`, `--stat`,
+  `-z`, `--quiet`, `--exit-code`), `-n`/`--max-count`, `-R`, `-w`, `--no-index`,
+  unknown options, `--` pathspecs, and extra positional arguments. Only a short
+  allowlist of presentation flags (`--no-color`, `--oneline`, `--name-only`, ...)
+  plus one range, object, or path is intercepted
 - `git show` object specs that are not commits: `<rev>:<path>`, `:<path>`,
   `<rev>^{tree}`, and similar
 - stdout redirected to a regular file (`git diff a..b > x.patch`)
@@ -177,6 +181,12 @@ git-prism shim install
 Installed git shim function in ~/.zshrc
 Restart your agent session so its shell snapshot picks up the function.
 ```
+
+Install replaces the rc file atomically (temp file, fsync, rename), follows a
+symlinked rc file to its target, and keeps its permissions. A `# >>> git-prism
+shim >>>` line with no matching end marker makes install and uninstall stop with
+a message naming the file and line, without writing anything; remove the stray
+line yourself and re-run. Non-UTF-8 content in an rc file is preserved.
 
 The rc file is `~/.bashrc` when the basename of `$SHELL` is `bash`. Otherwise it
 is `~/.zshrc`. The block is never written to `~/.zshenv` or `~/.bash_profile`.

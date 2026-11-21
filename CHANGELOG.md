@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shim commands with stdout redirected to a regular file (`git diff A..B > x.patch`) pass through to real git**, so captured output is byte-for-byte git. (#387)
 - **`--quiet` and `--exit-code` pass through to real git.** The exit status is the answer for these flags, and the shim always exited 0. (#387)
 - **`git show <rev>^{tree}` and other `^{…}` peel specs pass through to real git** instead of failing to peel to a commit. (#387)
+- **`shim install` and `uninstall` write the rc file atomically** (temp file, fsync, rename), so a crash mid-write no longer truncates it. A symlinked rc file is written through and stays a symlink; file mode is preserved. (#387)
+- **A `# >>> git-prism shim >>>` marker with no end marker no longer makes install delete the rest of the file.** Install and uninstall now fail with a message naming the file and line and write nothing. Remove the stray marker line and re-run. (#387)
+- **`shim uninstall` no longer reports success while the function block remains in a non-UTF-8 rc file.** Marker handling works on raw bytes and preserves other content; unreadable startup files fail with their name instead of being skipped. (#387)
+- **The shim passes through to real git for options and arguments it cannot honour:** unknown options, `--no-index`, `-R`, `-n`/`--max-count`, `blame -w`/`-L`, `--` pathspecs and extra positionals. These previously returned JSON that ignored them, with exit status 0. (#387)
+- **A directory named `git` on `PATH` is skipped** when resolving real git, as a shell does, instead of exiting 126. (#387)
+- **The raw-git hint quotes arguments** that a shell would split or expand, so it can be pasted back. (#387)
+- **The shim no longer sets `GIT_PRISM_INSIDE_SHIM=1` in real git's environment**, so git hooks, aliases and editors see an unmodified environment. (#387)
 - **Real-binary resolution skips other git-prism installs on `PATH`.** Two shim directories on `PATH` could previously exec each other in a loop (`gh` → `gh`). (#387)
 
 - **`git show` with blob/tree/index object specs now passes through to real git** instead of failing with a peel-to-commit error (`was blob while trying to peel to commit`). Colon-bearing specs — including `<rev>:<path>` (rev-qualified blob), `:<path>` (stage-0 index), `:N:<path>` (explicit-stage index), and `<rev>:/abs/path` (absolute-path blob) — now passthrough. The shim recognizes any spec containing `:` that does NOT start with `:/` as a blob/tree/index spec. Plain `git show <commit-ish>` and `:/regex` commit-message search continue to be intercepted and return structured JSON. (#381)

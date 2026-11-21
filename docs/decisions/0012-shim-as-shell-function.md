@@ -99,7 +99,7 @@ Even for a typed command, `shim-run` execs real git in these cases:
 | `GIT_PRISM_PASSTHROUGH` or `GIT_PRISM_DISABLE` is `1`/`true` | Explicit opt-out. Checked before telemetry starts. |
 | `GIT_PRISM_INSIDE_SHIM` is set | Manual loop-break/escape hatch. The shim no longer sets it for real git; the resolver skipping git-prism binaries prevents recursion. |
 | No agent detected (or `CI=true`) | A human typing `git` gets git. |
-| The classifier returns `Passthrough` | The subcommand or form is not on the watch list, or it has a scripted-output flag. `--quiet` and `--exit-code` are now on that list because the caller wants the exit status, not stdout. `git show <rev>^{…}` peel specs now pass through as well. |
+| The classifier returns `Passthrough` | The subcommand or form is not on the watch list, or it carries an option or argument the handler does not honour (scripted-output flags, `-n`, `-R`, `--` pathspecs, unknown options, extra positionals). The classifier intercepts only an allowlist of presentation flags plus one range, object, or path. `--quiet` and `--exit-code` are now on that list because the caller wants the exit status, not stdout. `git show <rev>^{…}` peel specs now pass through as well. |
 | stdout is a regular file | `git diff A..B > x.patch` is a capture for a program, so it gets real bytes. Detected with `fstat` on fd 1. |
 | The handler returns an error | The buffered partial output is discarded and real git runs. The caller sees git's own stdout, stderr, and exit status instead of a git-prism error message. |
 
