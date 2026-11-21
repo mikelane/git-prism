@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`git blame <path>` passes through to real git when the path is staged or modified.** The shim answered from the HEAD snapshot, omitting the uncommitted lines real git attributes to "Not Committed Yet". (#387)
 - **`git show <merge-commit>` passes through to real git.** The shim diffed a merge against its first parent only, listing files (for example everything the merged branch added) that real git's combined diff omits for a clean merge. (#387)
 - **`shim install`/`uninstall` no longer fail forever on a stale temp file.** The atomic write's temp name was `.<rc>.git-prism-<pid>.tmp`, so a leftover from a crashed run with a reused pid made every later write fail. The name now includes a timestamp and counter, and a collision picks another name. (#387)
 - **`git log -S`/`-G` (pickaxe) passes through to real git.** The shim returned function context for the whole range and ignored the term, so `git log -S zzz A..B` showed commits real git would not list. The shim no longer intercepts pickaxe searches. (#387)

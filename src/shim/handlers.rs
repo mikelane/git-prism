@@ -319,12 +319,31 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
     (subject, body)
 }
 
+/// True when `path` is staged or modified relative to HEAD (including a rename
+/// source or target).
+fn path_differs_from_head(repo_path: &Path, path: &str) -> anyhow::Result<bool> {
+    let reader =
+        RepoReader::open(repo_path).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
+    let changes = reader
+        .diff_worktree()
+        .map_err(|e| anyhow::anyhow!("failed to read working tree status: {e}"))?;
+    Ok(changes
+        .files
+        .iter()
+        .any(|file| file.path == path || file.old_path.as_deref() == Some(path)))
+}
+
 fn handle_blame_snapshot<W: Write>(
     path: &str,
     repo_path: &Path,
     argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
+    if path_differs_from_head(repo_path, path)? {
+        // Real git blames the working-tree file, attributing uncommitted lines
+        // to "Not Committed Yet"; the HEAD snapshot would omit them.
+        anyhow::bail!("{path} has uncommitted changes; real git blames the working tree");
+    }
     // `git blame <path>` maps to get_file_snapshots for the whole file at HEAD.
     let options = SnapshotOptions {
         include_before: false,
