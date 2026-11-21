@@ -68,117 +68,108 @@ fn classify_git<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
     }
 }
 
-fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
-    // Scripted-output flags take priority — caller wants text, not JSON.
-    if has_scripted_output_flag(rest) {
-        return Classification::Passthrough;
+/// Options that only change how git prints a result the handler already
+/// reports in full, so intercepting them cannot change the answer.
+const PRESENTATION_FLAGS: [&str; 2] = ["--no-color", "--color"];
+const LOG_FLAGS: [&str; 3] = ["--oneline", "--decorate", "--no-decorate"];
+const DIFF_FLAGS: [&str; 3] = ["--name-only", "--name-status", "--no-ext-diff"];
+const SHOW_FLAGS: [&str; 2] = ["--name-only", "--name-status"];
+
+/// Collect the positional arguments of `tokens`, or `None` when any option is
+/// not one the handler honours.
+///
+/// A handler returns the whole answer for one range or object. Any option or
+/// argument that would narrow, reorder, or reinterpret that answer (`--`
+/// pathspecs, `-n`, `-R`, `--no-index`, a typo) must reach real git, which
+/// either honours it or rejects it with its own exit status. `allowed_flags`
+/// extends the presentation-only flags every command accepts. With
+/// `pickaxe`, `-S`/`-G` (attached or followed by a term) are accepted too.
+fn honoured_positionals<'a>(
+    tokens: &[&'a str],
+    allowed_flags: &[&str],
+    pickaxe: bool,
+) -> Option<Vec<&'a str>> {
+    let mut positionals = Vec::new();
+    let mut iter = tokens.iter().copied().peekable();
+    while let Some(token) = iter.next() {
+        if !token.starts_with('-') || token == "-" {
+            positionals.push(token);
+        } else if pickaxe && (token == "-S" || token == "-G") {
+            // The following token is the term unless it is the range.
+            let _term = iter.next_if(|next| !has_ref_range(next));
+        } else if pickaxe && (token.starts_with("-S") || token.starts_with("-G")) {
+            continue;
+        } else if !PRESENTATION_FLAGS.contains(&token) && !allowed_flags.contains(&token) {
+            return None;
+        }
     }
+    Some(positionals)
+}
+
+fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
+    let Some(positionals) = honoured_positionals(rest, &LOG_FLAGS, true) else {
+        return Classification::Passthrough;
+    };
+    let range = match positionals.as_slice() {
+        [] => None,
+        [only] if has_ref_range(only) => Some(*only),
+        _ => return Classification::Passthrough,
+    };
     // Pickaxe check BEFORE ref-range check (mirrors Python order).
     if let Some(term) = pickaxe_term(rest) {
-        let range = rest.iter().copied().find(|t| has_ref_range(t));
         return Classification::FunctionContext {
             range,
             pickaxe_term: term,
         };
     }
-    // Ref-range check.
-    if let Some(range) = rest.iter().copied().find(|t| has_ref_range(t)) {
-        return Classification::History { range };
+    match range {
+        Some(range) => Classification::History { range },
+        None => Classification::Passthrough,
     }
-    Classification::Passthrough
 }
 
 fn classify_diff<'a>(rest: &[&'a str]) -> Classification<'a> {
-    // Scripted-output flags take priority — caller wants text, not JSON.
-    if has_scripted_output_flag(rest) {
-        return Classification::Passthrough;
+    match honoured_positionals(rest, &DIFF_FLAGS, false).as_deref() {
+        Some([range]) if has_ref_range(range) => Classification::Manifest { range },
+        _ => Classification::Passthrough,
     }
-    if let Some(range) = rest.iter().copied().find(|t| has_ref_range(t)) {
-        return Classification::Manifest { range };
-    }
-    Classification::Passthrough
 }
 
 fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
-    // Scripted-output flags mean the caller wants text, not JSON.
-    if has_scripted_output_flag(rest) {
+    let Some(positionals) = honoured_positionals(rest, &SHOW_FLAGS, false) else {
+        return Classification::Passthrough;
+    };
+    // Exactly one object spec; several (or a `--` pathspec) are real git's job.
+    let [spec] = positionals.as_slice() else {
+        return Classification::Passthrough;
+    };
+    // Any spec containing `:` is a blob/tree/index object spec that real git
+    // resolves without peeling to a commit — pass it through unchanged.
+    //
+    // The ONLY colon-bearing form that is NOT a blob spec is `:/text`, the
+    // commit-message-search syntax.  Every other colon form is an object spec:
+    //   `<rev>:<path>`       — rev-qualified blob
+    //   `<rev>:`             — rev-qualified tree root
+    //   `:<path>`            — stage-0 index blob
+    //   `:N:<path>`          — explicit-stage index blob (N = 0, 1, 2, 3)
+    //   `<rev>:/abs/path`    — rev-qualified absolute-path blob
+    //
+    // Refs cannot contain `:`, so this single rule is sufficient.
+    if spec.contains(':') && !spec.starts_with(":/") {
         return Classification::Passthrough;
     }
-    // First non-flag argument is the object spec.
-    if let Some(spec) = rest.iter().copied().find(|t| !t.starts_with('-')) {
-        // Any spec containing `:` is a blob/tree/index object spec that real git
-        // resolves without peeling to a commit — pass it through unchanged.
-        //
-        // The ONLY colon-bearing form that is NOT a blob spec is `:/text`, the
-        // commit-message-search syntax.  Every other colon form is an object spec:
-        //   `<rev>:<path>`       — rev-qualified blob
-        //   `<rev>:`             — rev-qualified tree root
-        //   `:<path>`            — stage-0 index blob
-        //   `:N:<path>`          — explicit-stage index blob (N = 0, 1, 2, 3)
-        //   `<rev>:/abs/path`    — rev-qualified absolute-path blob
-        //
-        // Refs cannot contain `:`, so this single rule is sufficient.
-        if spec.contains(':') && !spec.starts_with(":/") {
-            return Classification::Passthrough;
-        }
-        // `<rev>^{tree}`, `<rev>^{}` etc. peel to a non-commit object.
-        if spec.contains("^{") {
-            return Classification::Passthrough;
-        }
-        return Classification::ShowSnapshot { sha: spec };
+    // `<rev>^{tree}`, `<rev>^{}` etc. peel to a non-commit object.
+    if spec.contains("^{") {
+        return Classification::Passthrough;
     }
-    Classification::Passthrough
-}
-
-/// Return `true` when the argv slice contains any flag that requests
-/// scripted/machine-readable text output from git (the caller wants raw git
-/// output, not a JSON manifest).
-///
-/// Flags covered:
-/// - `--format=<val>` and `--format` (pretty-print format string)
-/// - `--pretty=<val>` and `--pretty` (pretty-print preset or format string)
-/// - `-s` / `--no-patch` (suppress diff, often paired with `--format`)
-/// - `--porcelain` (machine-readable output for `status`, `blame`, etc.)
-/// - `--stat` (diffstat text output)
-/// - `-z` (NUL-terminated output)
-/// - `--quiet` / `--exit-code` (the exit status is the answer, not stdout)
-///
-/// # SAFETY: `--` separator not honoured
-///
-/// git treats `--` as the end of flags and the start of pathspecs, so
-/// `git diff a..b -- --stat` passes `--stat` as a filename, not a flag.
-/// This scanner does not track `--` and would incorrectly treat that
-/// `--stat` as a scripted-output flag, causing passthrough when interception
-/// was correct.  This is a theoretical input (no real caller names a file
-/// `--stat`) and adding a runtime guard would complicate the hot path for
-/// no practical benefit.  If it becomes real, scan for `--` first and stop
-/// checking beyond it.
-fn has_scripted_output_flag(tokens: &[&str]) -> bool {
-    tokens.iter().any(|tok| {
-        tok.starts_with("--format=")
-            || tok.starts_with("--pretty=")
-            || *tok == "--format"
-            || *tok == "--pretty"
-            || *tok == "-s"
-            || *tok == "--no-patch"
-            || *tok == "--porcelain"
-            || *tok == "--stat"
-            || *tok == "-z"
-            || *tok == "--quiet"
-            || *tok == "--exit-code"
-    })
+    Classification::ShowSnapshot { sha: spec }
 }
 
 fn classify_blame<'a>(rest: &[&'a str]) -> Classification<'a> {
-    // Scripted-output flags (e.g. --porcelain) mean the caller wants raw text.
-    if has_scripted_output_flag(rest) {
-        return Classification::Passthrough;
+    match honoured_positionals(rest, &[], false).as_deref() {
+        Some([path]) => Classification::BlameSnapshot { path },
+        _ => Classification::Passthrough,
     }
-    // First non-flag argument is the path.
-    if let Some(path) = rest.iter().copied().find(|t| !t.starts_with('-')) {
-        return Classification::BlameSnapshot { path };
-    }
-    Classification::Passthrough
 }
 
 /// Return `true` if `token` contains `..` with at least one character on
@@ -788,12 +779,20 @@ mod tests {
     }
 
     #[test]
-    fn it_classifies_git_blame_with_flags_before_path() {
+    fn it_classifies_git_blame_with_a_presentation_flag_before_path() {
         assert_eq!(
-            classify(&["git", "blame", "-w", "src/main.rs"]),
+            classify(&["git", "blame", "--no-color", "src/main.rs"]),
             Classification::BlameSnapshot {
                 path: "src/main.rs"
             }
+        );
+    }
+
+    #[test]
+    fn it_passes_through_blame_whitespace_flag_the_handler_ignores() {
+        assert_eq!(
+            classify(&["git", "blame", "-w", "src/main.rs"]),
+            Classification::Passthrough
         );
     }
 
@@ -991,6 +990,47 @@ mod tests {
         assert_eq!(
             classify(&["git", "show", ":/x"]),
             Classification::ShowSnapshot { sha: ":/x" }
+        );
+    }
+
+    // --- Unhonoured options must reach real git ---
+
+    #[test]
+    fn it_passes_through_options_and_arguments_the_handlers_do_not_honour() {
+        let cases: [&[&str]; 14] = [
+            &["git", "diff", "--bogus", "a..b"],
+            &["git", "diff", "--no-index", "a..b"],
+            &["git", "diff", "-R", "a..b"],
+            &["git", "diff", "a..b", "--", "path"],
+            &["git", "diff", "a..b", "other"],
+            &["git", "log", "--bogus", "a..b"],
+            &["git", "log", "-n", "0", "a..b"],
+            &["git", "log", "-n0", "a..b"],
+            &["git", "log", "--max-count=1", "a..b"],
+            &["git", "log", "a..b", "--", "path"],
+            &["git", "log", "-S", "foo", "main"],
+            &["git", "show", "--bogus", "abc1234"],
+            &["git", "show", "abc1234", "def5678"],
+            &["git", "blame", "src/main.rs", "extra-arg"],
+        ];
+        for argv in cases {
+            assert_eq!(classify(argv), Classification::Passthrough, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn it_passes_through_show_with_a_pathspec() {
+        assert_eq!(
+            classify(&["git", "show", "abc1234", "--", "f.txt"]),
+            Classification::Passthrough
+        );
+    }
+
+    #[test]
+    fn it_still_intercepts_a_diff_with_a_presentation_flag() {
+        assert_eq!(
+            classify(&["git", "diff", "--no-color", "--name-only", "a..b"]),
+            Classification::Manifest { range: "a..b" }
         );
     }
 }
