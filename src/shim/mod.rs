@@ -225,7 +225,16 @@ fn resolve_repo_path(env: &dyn EnvSource) -> Option<PathBuf> {
     if env.get("GIT_PRISM_CWD_UNAVAILABLE").is_some() {
         return None;
     }
-    std::env::current_dir().ok()
+    std::env::current_dir()
+        .inspect_err(|e| {
+            // `kind` only: the io::Error carries no path, but keep spans
+            // free of anything path-shaped per src/privacy.rs.
+            tracing::debug!(
+                error_kind = ?e.kind(),
+                "cannot determine cwd; falling back to real git"
+            );
+        })
+        .ok()
 }
 
 #[cfg(test)]

@@ -458,9 +458,9 @@ mod tests {
             &["git", "log", "-S", "main..HEAD"],
             &["git", "log", "--pickaxe-regex", "-S", "x", "main..HEAD"],
         ];
-        for argv in cases {
-            assert_eq!(classify(argv), Classification::Passthrough, "{argv:?}");
-        }
+        let classified = cases.map(|argv| (argv, classify(argv)));
+        let expected = cases.map(|argv| (argv, Classification::Passthrough));
+        assert_eq!(classified, expected);
     }
 
     // --- ShowSnapshot (git show <sha>) ---
@@ -848,9 +848,9 @@ mod tests {
             &["git", "show", "abc1234", "def5678"],
             &["git", "blame", "src/main.rs", "extra-arg"],
         ];
-        for argv in cases {
-            assert_eq!(classify(argv), Classification::Passthrough, "{argv:?}");
-        }
+        let classified = cases.map(|argv| (argv, classify(argv)));
+        let expected = cases.map(|argv| (argv, Classification::Passthrough));
+        assert_eq!(classified, expected);
     }
 
     #[test]

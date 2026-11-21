@@ -21,7 +21,7 @@ fn hooks_install_path_shim(home: &TempDir, extra: &[&str]) -> std::process::Outp
 }
 
 #[test]
-fn hooks_install_path_shim_dry_run_does_not_write_the_rc_block() {
+fn it_does_not_write_the_rc_block_for_a_path_shim_dry_run() {
     let home = TempDir::new().unwrap();
 
     let out = hooks_install_path_shim(&home, &["--dry-run"]);
@@ -36,7 +36,7 @@ fn hooks_install_path_shim_dry_run_does_not_write_the_rc_block() {
 }
 
 #[test]
-fn hooks_install_path_shim_writes_the_function_block_and_warns() {
+fn it_writes_the_function_block_and_warns_for_the_deprecated_path_shim_alias() {
     let home = TempDir::new().unwrap();
 
     let out = hooks_install_path_shim(&home, &[]);

@@ -181,9 +181,9 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
         .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?;
     match command {
         HooksCommands::Install {
-            scope,
+            scope: _,
             dry_run,
-            force,
+            force: _,
             path_shim,
         } => {
             if path_shim {
@@ -191,7 +191,6 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 eprintln!(
                     "warning: --path-shim is deprecated; use `git-prism shim install` instead"
                 );
-                let _ = force;
                 if dry_run {
                     println!(
                         "dry-run: would add the git shim function to your interactive rc file (not written)"
@@ -203,7 +202,6 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             }
             // hooks install without --path-shim: the redirect hook was removed in v0.9.0.
             // Scope argument is accepted by clap but ignored — we always error.
-            let _ = scope;
             eprintln!(
                 "error: the redirect hook (bash_redirect_hook.py) was removed in v0.9.0.\n\
                  \n\
@@ -261,7 +259,7 @@ fn run_shim_entry(shim_argv: &[&str]) -> std::process::ExitCode {
             return std::process::ExitCode::from(127);
         }
     };
-    let exec = shim::real_git::StdRealGitExec {
+    let real_git_exec = shim::real_git::StdRealGitExec {
         env: &agent_detection::StdEnvSource,
         argv0: &current_exe,
     };
@@ -269,7 +267,7 @@ fn run_shim_entry(shim_argv: &[&str]) -> std::process::ExitCode {
     // Per-invocation opt-out: exec the real binary immediately with zero
     // overhead (GIT_PRISM_PASSTHROUGH=1 / GIT_PRISM_DISABLE=1).
     if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
-        return exec.passthrough(shim_argv);
+        return real_git_exec.passthrough(shim_argv);
     }
 
     // Use `init_quiet`: this runs once per intercepted git command, so a
@@ -279,7 +277,7 @@ fn run_shim_entry(shim_argv: &[&str]) -> std::process::ExitCode {
     let exit_code = shim::run_shim(
         shim_argv,
         &agent_detection::StdEnvSource,
-        &exec,
+        &real_git_exec,
         shim::detect_stdout_kind(),
         &mut telemetry_guard,
     );

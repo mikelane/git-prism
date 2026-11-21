@@ -32,7 +32,11 @@ pub(crate) fn handle<W: Write>(
     out: &mut W,
 ) -> anyhow::Result<()> {
     dispatch(classification, repo_path, argv, out).inspect_err(|e| {
-        tracing::debug!(error = %e, "shim handler failed; falling back to real git");
+        tracing::debug!(
+            error_kind = crate::privacy::classify_error_kind(&format!("{e:#}")),
+            error = %e,
+            "shim handler failed; falling back to real git"
+        );
     })
 }
 
@@ -111,7 +115,7 @@ fn handle_manifest<W: Write>(
         include_function_analysis: false,
         max_response_tokens: Some(8192),
     };
-    let result = match parse_range(range) {
+    let manifest = match parse_range(range) {
         RefRange::CommitRange { base, head } => {
             collect_all_manifest_pages(repo_path, base, head, &options, 500)?
         }
@@ -119,7 +123,7 @@ fn handle_manifest<W: Write>(
             collect_all_worktree_manifest_pages(repo_path, base, &options, 500)?
         }
     };
-    write_with_hint(out, &result, argv)?;
+    write_with_hint(out, &manifest, argv)?;
     Ok(())
 }
 
@@ -141,8 +145,8 @@ fn handle_history<W: Write>(
         include_function_analysis: true,
         max_response_tokens: None,
     };
-    let result = collect_all_history_pages(repo_path, base, head, &options, 500)?;
-    write_with_hint(out, &result, argv)?;
+    let history = collect_all_history_pages(repo_path, base, head, &options, 500)?;
+    write_with_hint(out, &history, argv)?;
     Ok(())
 }
 
@@ -208,14 +212,14 @@ fn handle_show_snapshot<W: Write>(
         deletions,
     };
 
-    let mut result = ShowManifestResponse {
+    let mut show_response = ShowManifestResponse {
         commit,
         diffstat,
         files,
         token_estimate: 0,
     };
-    result.token_estimate = estimate_response_tokens(&result);
-    write_with_hint(out, &result, argv)?;
+    show_response.token_estimate = estimate_response_tokens(&show_response);
+    write_with_hint(out, &show_response, argv)?;
     Ok(())
 }
 
@@ -357,8 +361,8 @@ fn handle_blame_snapshot<W: Write>(
         line_range: None,
         include_diff_hunks: false,
     };
-    let result = build_snapshots(repo_path, "HEAD^", "HEAD", &[path.to_string()], &options)?;
-    let path_missing_at_head = result
+    let snapshots = build_snapshots(repo_path, "HEAD^", "HEAD", &[path.to_string()], &options)?;
+    let path_missing_at_head = snapshots
         .files
         .iter()
         .any(|file| file.after.is_none() && file.error.is_none() && !file.is_binary);
@@ -367,7 +371,7 @@ fn handle_blame_snapshot<W: Write>(
         // the caller gets git's own error and exit code, not an empty success.
         anyhow::bail!("path {path} does not exist at HEAD");
     }
-    write_with_hint(out, &result, argv)?;
+    write_with_hint(out, &snapshots, argv)?;
     Ok(())
 }
 
@@ -773,26 +777,41 @@ mod tests {
         );
     }
 
+    const LOG_P_HINT: &str =
+        "git-prism structured output. For raw git output run: command git log -p";
+
+    fn hint_for(classification: &Classification<'_>, path: &Path) -> serde_json::Value {
+        let mut out = Vec::new();
+        handle(classification, path, &["git", "log", "-p"], &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        json["git_prism_hint"].clone()
+    }
+
     #[test]
-    fn it_adds_the_hint_to_every_handler_kind() {
+    fn it_adds_the_hint_to_history_output() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let classification = Classification::History {
+            range: "HEAD~1..HEAD",
+        };
+
+        assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
+    }
+
+    #[test]
+    fn it_adds_the_hint_to_show_snapshot_output() {
         let (_dir, path) = init_repo_with_two_commits();
         let sha = head_sha(&path);
-        let cases = [
-            Classification::History {
-                range: "HEAD~1..HEAD",
-            },
-            Classification::ShowSnapshot { sha: &sha },
-            Classification::BlameSnapshot { path: "world.txt" },
-        ];
-        for classification in &cases {
-            let mut out = Vec::new();
-            handle(classification, &path, &["git", "log", "-p"], &mut out).unwrap();
-            let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-            assert_eq!(
-                json["git_prism_hint"],
-                "git-prism structured output. For raw git output run: command git log -p"
-            );
-        }
+        let classification = Classification::ShowSnapshot { sha: &sha };
+
+        assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
+    }
+
+    #[test]
+    fn it_adds_the_hint_to_blame_snapshot_output() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let classification = Classification::BlameSnapshot { path: "world.txt" };
+
+        assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
     }
 
     #[test]
@@ -953,9 +972,8 @@ mod tests {
 
     #[test]
     fn it_leaves_plain_arguments_unquoted() {
-        for arg in ["diff", "HEAD~1..HEAD", "--name-only", "src/a_b.rs", "a=b,c"] {
-            assert_eq!(shell_quote(arg), arg);
-        }
+        let args = ["diff", "HEAD~1..HEAD", "--name-only", "src/a_b.rs", "a=b,c"];
+        assert_eq!(args.map(shell_quote), args.map(String::from));
     }
 
     #[test]
@@ -970,15 +988,13 @@ mod tests {
 
     #[test]
     fn it_single_quotes_a_tilde_that_bash_expands_after_an_equals_sign_or_colon() {
-        for arg in ["k=~", "a:~", "x=~/y", "~", "a..~"] {
-            assert_eq!(shell_quote(arg), format!("'{arg}'"));
-        }
+        let args = ["k=~", "a:~", "x=~/y", "~", "a..~"];
+        assert_eq!(args.map(shell_quote), args.map(|arg| format!("'{arg}'")));
     }
 
     #[test]
     fn it_single_quotes_every_character_that_expands_at_the_start_of_a_word() {
-        for arg in ["=ls", "~user", "{a,b}", "!!", "#x", "*.rs", "?x", "[ab]"] {
-            assert_eq!(shell_quote(arg), format!("'{arg}'"));
-        }
+        let args = ["=ls", "~user", "{a,b}", "!!", "#x", "*.rs", "?x", "[ab]"];
+        assert_eq!(args.map(shell_quote), args.map(|arg| format!("'{arg}'")));
     }
 }

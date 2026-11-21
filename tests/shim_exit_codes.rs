@@ -59,7 +59,7 @@ fn it_exits_126_when_real_git_is_found_but_unexecutable() {
 /// exists), as a legacy PATH shim to migrate, and must NOT claim the shim
 /// function is installed.
 #[test]
-fn shim_status_reports_a_dangling_legacy_symlink_as_legacy_not_installed() {
+fn it_reports_a_dangling_legacy_symlink_as_legacy_not_installed() {
     let bin = env!("CARGO_BIN_EXE_git-prism");
     let home = TempDir::new().unwrap();
     let shim_dir = home.path().join(".local/share/git-prism/bin");

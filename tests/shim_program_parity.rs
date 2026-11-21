@@ -160,7 +160,19 @@ fn it_intercepts_via_shim_run() {
         String::from_utf8_lossy(&out.stderr)
     );
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(json.get("files").is_some(), "expected a files key: {json}");
+    let files = json["files"].as_array().expect("files array");
+    // Second commit renamed a.txt to b.txt; the manifest must name the new path
+    // and carry the structured-output hint.
+    assert!(
+        files.iter().any(|file| file["path"] == "b.txt"),
+        "expected b.txt in files: {json}"
+    );
+    assert!(
+        json["git_prism_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.ends_with(&format!("command git diff {range}"))),
+        "expected the raw git hint: {json}"
+    );
 }
 
 #[test]

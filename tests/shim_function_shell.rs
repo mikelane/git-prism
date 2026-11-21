@@ -164,7 +164,8 @@ fn typed_git_diff_is_structured_json(shell: Shell) {
             String::from_utf8_lossy(&out.stdout)
         )
     });
-    assert!(json.get("files").is_some(), "expected files key: {json}");
+    assert_eq!(json["files"][0]["path"], "a.txt", "files: {json}");
+    assert_eq!(json["files"][0]["lines_added"], 1, "files: {json}");
 }
 
 fn a_child_process_gets_real_git_bytes(shell: Shell) {

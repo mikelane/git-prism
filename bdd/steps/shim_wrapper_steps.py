@@ -93,6 +93,33 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
+def _isolated_home_env(context: Context) -> dict[str, str]:
+    """Return a copy of os.environ with HOME pointed at context.isolated_home.
+
+    SHELL is pinned to zsh so install targets ~/.zshrc regardless of the
+    runner's ambient shell (/bin/bash on GitHub Actions).
+    """
+    env = os.environ.copy()
+    env["HOME"] = str(context.isolated_home)
+    env["SHELL"] = "/bin/zsh"
+    return env
+
+
+def _run_real_git(
+    context: Context, args: list[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run /usr/bin/git with agent env vars stripped, as the parity reference."""
+    return subprocess.run(  # noqa: S603
+        ["/usr/bin/git", *args],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+
+
 def _run_shim(
     context: Context,
     args: list[str],
@@ -113,7 +140,7 @@ def _run_shim(
         env.update(extra_env)
 
     context.result = subprocess.run(  # noqa: S603
-        [str(binary), "shim-run", "git"] + args,
+        [str(binary), "shim-run", "git", *args],
         capture_output=True,
         text=True,
         env=env,
@@ -298,7 +325,7 @@ def step_program_runs_git_via_symlink(context: Context, command: str) -> None:
     env["CLAUDECODE"] = "1"
     args = _parse_shim_command(command)
     context.result = subprocess.run(  # noqa: S603
-        ["git"] + args,
+        ["git", *args],
         capture_output=True,
         text=True,
         env=env,
@@ -306,16 +333,7 @@ def step_program_runs_git_via_symlink(context: Context, command: str) -> None:
         check=False,
         timeout=_SHIM_TIMEOUT_SECONDS,
     )
-    reference_env = _clean_env()
-    context.reference = subprocess.run(  # noqa: S603
-        ["/usr/bin/git"] + args,
-        capture_output=True,
-        text=True,
-        env=reference_env,
-        cwd=context.repo_path,
-        check=False,
-        timeout=_SHIM_TIMEOUT_SECONDS,
-    )
+    context.reference = _run_real_git(context, args)
 
 
 @when('I run shim-run as "{command}" with CLAUDECODE=1 and stdout redirected to a file')
@@ -329,7 +347,7 @@ def step_shim_run_stdout_to_file(context: Context, command: str) -> None:
     context.cleanup_dirs.append(str(out_path.parent))
     with out_path.open("wb") as out:
         completed = subprocess.run(  # noqa: S603
-            [str(binary), "shim-run", "git"] + args,
+            [str(binary), "shim-run", "git", *args],
             stdout=out,
             stderr=subprocess.PIPE,
             env=env,
@@ -343,15 +361,7 @@ def step_shim_run_stdout_to_file(context: Context, command: str) -> None:
         out_path.read_text(),
         completed.stderr.decode(),
     )
-    context.reference = subprocess.run(  # noqa: S603
-        ["/usr/bin/git"] + args,
-        capture_output=True,
-        text=True,
-        env=_clean_env(),
-        cwd=context.repo_path,
-        check=False,
-        timeout=_SHIM_TIMEOUT_SECONDS,
-    )
+    context.reference = _run_real_git(context, args)
 
 
 @then("the output equals real git's output and the exit codes match")
@@ -370,9 +380,7 @@ def step_output_equals_real_git(context: Context) -> None:
 def step_hooks_install_path_shim(context: Context) -> None:
     """Run hooks install --path-shim with the isolated HOME directory."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
-    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "install", "--path-shim"],
@@ -388,9 +396,7 @@ def step_hooks_install_path_shim(context: Context) -> None:
 def step_hooks_install_path_shim_again(context: Context) -> None:
     """Run hooks install --path-shim a second time (idempotency check)."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
-    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "install", "--path-shim"],
@@ -406,9 +412,7 @@ def step_hooks_install_path_shim_again(context: Context) -> None:
 def step_hooks_uninstall_path_shim(context: Context) -> None:
     """Run hooks uninstall --path-shim with the isolated HOME directory."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
-    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "uninstall", "--path-shim"],
@@ -424,9 +428,7 @@ def step_hooks_uninstall_path_shim(context: Context) -> None:
 def step_hooks_status_with_isolated_home(context: Context) -> None:
     """Run hooks status with the isolated HOME directory."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
-    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "status"],
@@ -496,20 +498,6 @@ def step_json_has_commits_array(context: Context) -> None:
     data = _parse_result_json(context)
     assert isinstance(data, dict) and isinstance(data.get("commits"), list), (
         f"Expected JSON with 'commits' array, got: {str(data)[:500]}"
-    )
-
-
-@then('the JSON output has a "function_context" shape')
-def step_json_has_function_context(context: Context) -> None:
-    """Assert the JSON output has the function-context wire shape.
-
-    build_function_context_with_options returns {"functions": [...], ...}.
-    The Gherkin step says "function_context shape" as a semantic label;
-    the actual top-level key in the JSON response is "functions".
-    """
-    data = _parse_result_json(context)
-    assert isinstance(data, dict) and isinstance(data.get("functions"), list), (
-        f"Expected JSON with 'functions' list (function_context shape), got: {str(data)[:500]}"
     )
 
 

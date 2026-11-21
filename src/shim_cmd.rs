@@ -171,24 +171,24 @@ fn has_any_marker_line(content: &[u8]) -> bool {
 }
 
 fn remove_legacy_symlinks(home: &Path) -> Result<()> {
-    let dir = legacy_shim_dir(home);
+    let shim_dir = legacy_shim_dir(home);
     for name in hooks::PATH_SHIM_LINK_NAMES {
-        let link = dir.join(name);
-        let is_symlink = std::fs::symlink_metadata(&link)
+        let link_path = shim_dir.join(name);
+        let is_symlink = std::fs::symlink_metadata(&link_path)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false);
         if is_symlink {
-            std::fs::remove_file(&link)
-                .with_context(|| format!("failed to remove symlink {}", link.display()))?;
+            std::fs::remove_file(&link_path)
+                .with_context(|| format!("failed to remove symlink {}", link_path.display()))?;
         }
     }
-    let dir_is_empty = dir
+    let is_shim_dir_empty = shim_dir
         .read_dir()
         .map(|mut entries| entries.next().is_none())
         .unwrap_or(false);
-    if dir_is_empty {
-        std::fs::remove_dir(&dir)
-            .with_context(|| format!("failed to remove directory {}", dir.display()))?;
+    if is_shim_dir_empty {
+        std::fs::remove_dir(&shim_dir)
+            .with_context(|| format!("failed to remove directory {}", shim_dir.display()))?;
     }
     Ok(())
 }
@@ -199,12 +199,12 @@ fn remove_legacy_symlinks(home: &Path) -> Result<()> {
 /// from hand-edits, interrupted writes, or prior buggy runs) then appends
 /// exactly one canonical block.  Creates the file if it doesn't exist.
 fn write_marker_block(rc_path: &Path) -> Result<()> {
-    let existing = read_startup_file(rc_path)?.unwrap_or_default();
+    let existing_content = read_startup_file(rc_path)?.unwrap_or_default();
 
     let new_block =
         format!("{BLOCK_START_MARKER}\n{SHIM_FUNCTION_BLOCK_BODY}\n{BLOCK_END_MARKER}\n");
 
-    let mut new_content = strip_blocks_from_file(rc_path, &existing)?;
+    let mut new_content = strip_blocks_from_file(rc_path, &existing_content)?;
 
     // Append the single canonical block with a blank-line separator.
     if !new_content.is_empty() {
@@ -226,11 +226,11 @@ fn write_marker_block(rc_path: &Path) -> Result<()> {
 fn write_atomically(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let target = resolve_write_target(path);
     for _ in 0..TEMP_NAME_ATTEMPTS {
-        let temp = sibling_temp_path(&target);
-        match write_synced(&temp, content, &target) {
+        let temp_path = sibling_temp_path(&target);
+        match write_synced(&temp_path, content, &target) {
             // Someone else's file owns this name: never touch it, pick another.
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-            written => return finish_write(written, &temp, &target),
+            written => return finish_write(written, &temp_path, &target),
         }
     }
     Err(std::io::Error::new(
@@ -241,11 +241,11 @@ fn write_atomically(path: &Path, content: &[u8]) -> std::io::Result<()> {
 
 /// Rename the synced temp file over `target`, removing it if anything failed.
 fn finish_write(written: std::io::Result<()>, temp: &Path, target: &Path) -> std::io::Result<()> {
-    let result = written.and_then(|()| std::fs::rename(temp, target));
-    if result.is_err() {
+    let rename_outcome = written.and_then(|()| std::fs::rename(temp, target));
+    if rename_outcome.is_err() {
         let _ = std::fs::remove_file(temp);
     }
-    result
+    rename_outcome
 }
 
 /// Longest symlink chain followed before giving up (Linux `MAXSYMLINKS`).
@@ -263,7 +263,10 @@ fn resolve_write_target(path: &Path) -> PathBuf {
         let Ok(link) = std::fs::read_link(&current) else {
             return current;
         };
-        current = current.parent().map_or(link.clone(), |dir| dir.join(&link));
+        current = match current.parent() {
+            Some(dir) => dir.join(&link),
+            None => link,
+        };
     }
     path.to_path_buf()
 }
@@ -279,12 +282,14 @@ fn sibling_temp_path(target: &Path) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
     let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = target
+    let target_file_name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let pid = std::process::id();
-    target.with_file_name(format!(".{name}.git-prism-{pid}-{nanos}-{sequence}.tmp"))
+    target.with_file_name(format!(
+        ".{target_file_name}.git-prism-{pid}-{nanos}-{sequence}.tmp"
+    ))
 }
 
 fn write_synced(temp: &Path, content: &[u8], original: &Path) -> std::io::Result<()> {
@@ -351,11 +356,11 @@ fn strip_all_marker_blocks(content: &[u8]) -> Result<Vec<u8>, UnterminatedBlock>
         kept_lines.pop();
     }
 
-    let mut result = kept_lines.concat();
-    if !result.is_empty() && !result.ends_with(b"\n") {
-        result.push(b'\n');
+    let mut stripped_content = kept_lines.concat();
+    if !stripped_content.is_empty() && !stripped_content.ends_with(b"\n") {
+        stripped_content.push(b'\n');
     }
-    Ok(result)
+    Ok(stripped_content)
 }
 
 /// Remove the function block and every legacy PATH-shim artifact.
@@ -406,12 +411,12 @@ fn mentions_shim_run(content: &[u8]) -> bool {
 }
 
 fn report_legacy_path_shim(home: &Path, out: &mut dyn Write) -> Result<()> {
-    let dir = legacy_shim_dir(home);
+    let shim_dir = legacy_shim_dir(home);
     let has_symlinks = hooks::PATH_SHIM_LINK_NAMES
         .iter()
-        .any(|name| std::fs::symlink_metadata(dir.join(name)).is_ok());
+        .any(|name| std::fs::symlink_metadata(shim_dir.join(name)).is_ok());
     if has_symlinks {
-        writeln!(out, "legacy PATH shim: present at {}", dir.display())?;
+        writeln!(out, "legacy PATH shim: present at {}", shim_dir.display())?;
     }
     let legacy_block_file = ALL_STARTUP_FILES.into_iter().find(|name| {
         std::fs::read(home.join(name))
@@ -738,22 +743,34 @@ esac"#;
 
         run_uninstall_with_io(home.path(), &mut Vec::new()).unwrap();
 
-        for name in [".zshenv", ".zshrc", ".bashrc", ".bash_profile"] {
+        let names = [".zshenv", ".zshrc", ".bashrc", ".bash_profile"];
+        let with_markers = names.map(|name| {
             let content = read(home.path(), name);
-            assert!(!content.contains(BLOCK_START_MARKER), "{name}: {content}");
-            assert!(!content.contains(BLOCK_END_MARKER), "{name}: {content}");
-        }
+            (
+                name,
+                content.contains(BLOCK_START_MARKER) || content.contains(BLOCK_END_MARKER),
+            )
+        });
+        assert_eq!(with_markers, names.map(|name| (name, false)));
         assert!(!dir.exists());
     }
 
     #[test]
     fn it_uninstalls_when_nothing_is_installed() {
         let home = TempDir::new().unwrap();
-        run_uninstall_with_io(home.path(), &mut Vec::new()).unwrap();
+        let mut out = Vec::new();
+
+        run_uninstall_with_io(home.path(), &mut out).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "Removed git-prism shim.\n");
+        assert!(
+            !home.path().join(".zshrc").exists(),
+            "uninstall created ~/.zshrc"
+        );
     }
 
     #[test]
-    fn status_reports_not_installed_when_absent() {
+    fn it_reports_not_installed_when_absent() {
         let home = TempDir::new().unwrap();
         let out = status(home.path());
         assert!(out.contains("shim: not installed"), "out: {out}");
@@ -761,7 +778,7 @@ esac"#;
     }
 
     #[test]
-    fn status_reports_the_rc_file_after_install() {
+    fn it_reports_the_rc_file_after_install() {
         let home = TempDir::new().unwrap();
         install(home.path(), "zsh");
         let out = status(home.path());
@@ -769,7 +786,7 @@ esac"#;
     }
 
     #[test]
-    fn status_reports_a_legacy_symlink_dir() {
+    fn it_reports_a_legacy_symlink_dir() {
         let home = TempDir::new().unwrap();
         let dir = seed_legacy_symlinks(home.path());
         let out = status(home.path());
@@ -780,7 +797,7 @@ esac"#;
     }
 
     #[test]
-    fn status_reports_a_legacy_path_block_without_symlinks() {
+    fn it_reports_a_legacy_path_block_without_symlinks() {
         let home = TempDir::new().unwrap();
         std::fs::write(home.path().join(".zshenv"), legacy_block()).unwrap();
         let out = status(home.path());
