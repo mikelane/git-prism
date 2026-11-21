@@ -12,6 +12,8 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -223,11 +225,25 @@ fn write_marker_block(rc_path: &Path) -> Result<()> {
 /// permissions carry over to the replacement.
 fn write_atomically(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let target = resolve_write_target(path);
-    let temp = sibling_temp_path(&target);
-    let result =
-        write_synced(&temp, content, &target).and_then(|()| std::fs::rename(&temp, &target));
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let temp = sibling_temp_path(&target);
+        match write_synced(&temp, content, &target) {
+            // Someone else's file owns this name: never touch it, pick another.
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            written => return finish_write(written, &temp, &target),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no unused temp file name",
+    ))
+}
+
+/// Rename the synced temp file over `target`, removing it if anything failed.
+fn finish_write(written: std::io::Result<()>, temp: &Path, target: &Path) -> std::io::Result<()> {
+    let result = written.and_then(|()| std::fs::rename(temp, target));
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(temp);
     }
     result
 }
@@ -252,12 +268,23 @@ fn resolve_write_target(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Names tried before an `AlreadyExists` collision is reported as an error.
+const TEMP_NAME_ATTEMPTS: usize = 5;
+
+/// A temp name unique per call: pid alone repeats across runs, so a stale file
+/// from a crashed install with a reused pid would block every later install.
 fn sibling_temp_path(target: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
     let name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    target.with_file_name(format!(".{name}.git-prism-{}.tmp", std::process::id()))
+    let pid = std::process::id();
+    target.with_file_name(format!(".{name}.git-prism-{pid}-{nanos}-{sequence}.tmp"))
 }
 
 fn write_synced(temp: &Path, content: &[u8], original: &Path) -> std::io::Result<()> {
@@ -551,6 +578,26 @@ esac"#;
             strip_all_marker_blocks(content.as_bytes()),
             Err(UnterminatedBlock { start_line: 3 })
         );
+    }
+
+    #[test]
+    fn it_installs_despite_a_stale_temp_file_with_a_reused_pid() {
+        let home = TempDir::new().unwrap();
+        let stale = home
+            .path()
+            .join(format!(".zshrc.git-prism-{}.tmp", std::process::id()));
+        std::fs::write(&stale, "stale").unwrap();
+
+        install(home.path(), "/bin/zsh");
+
+        assert!(read(home.path(), ".zshrc").contains(BLOCK_START_MARKER));
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "stale");
+    }
+
+    #[test]
+    fn it_names_each_temp_file_attempt_differently() {
+        let target = Path::new("/home/u/.zshrc");
+        assert_ne!(sibling_temp_path(target), sibling_temp_path(target));
     }
 
     #[test]
