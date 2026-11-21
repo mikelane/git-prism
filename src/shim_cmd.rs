@@ -91,8 +91,33 @@ fn legacy_shim_dir(home: &Path) -> PathBuf {
 /// Only symlinks are removed; a regular file a user placed in the directory is
 /// left alone, and so is the directory when anything remains in it.
 fn remove_legacy_path_shim(home: &Path) -> Result<()> {
+    ensure_startup_files_are_well_formed(home)?;
     strip_managed_blocks_from_startup_files(home)?;
     remove_legacy_symlinks(home)
+}
+
+/// Fail before anything is written when a startup file holds a marker block
+/// that cannot be removed safely, so a refusal leaves every file untouched.
+fn ensure_startup_files_are_well_formed(home: &Path) -> Result<()> {
+    for name in ALL_STARTUP_FILES {
+        let path = home.join(name);
+        if let Some(content) = read_startup_file(&path)? {
+            strip_blocks_from_file(&path, &content)?;
+        }
+    }
+    Ok(())
+}
+
+fn strip_blocks_from_file(path: &Path, content: &[u8]) -> Result<Vec<u8>> {
+    strip_all_marker_blocks(content).map_err(|unterminated| {
+        anyhow::anyhow!(
+            "{}: line {}: found `{BLOCK_START_MARKER}` with no matching `{BLOCK_END_MARKER}`. \
+             Refusing to guess which lines are git-prism's. Remove the stray marker line \
+             yourself, then re-run.",
+            path.display(),
+            unterminated.start_line
+        )
+    })
 }
 
 fn strip_managed_blocks_from_startup_files(home: &Path) -> Result<()> {
@@ -104,7 +129,7 @@ fn strip_managed_blocks_from_startup_files(home: &Path) -> Result<()> {
         if !has_any_marker_line(&content) {
             continue;
         }
-        write_atomically(&path, &strip_all_marker_blocks(&content))
+        write_atomically(&path, &strip_blocks_from_file(&path, &content)?)
             .with_context(|| format!("failed to update {}", path.display()))?;
     }
     Ok(())
@@ -177,7 +202,7 @@ fn write_marker_block(rc_path: &Path) -> Result<()> {
     let new_block =
         format!("{BLOCK_START_MARKER}\n{SHIM_FUNCTION_BLOCK_BODY}\n{BLOCK_END_MARKER}\n");
 
-    let mut new_content = strip_all_marker_blocks(&existing);
+    let mut new_content = strip_blocks_from_file(rc_path, &existing)?;
 
     // Append the single canonical block with a blank-line separator.
     if !new_content.is_empty() {
@@ -227,35 +252,48 @@ fn write_synced(temp: &Path, content: &[u8], original: &Path) -> std::io::Result
     file.sync_all()
 }
 
+/// A START marker whose END never appears (1-based line of the START).
+#[derive(Debug, PartialEq, Eq)]
+struct UnterminatedBlock {
+    start_line: usize,
+}
+
 /// Remove every git-prism managed block (and any stray marker lines) from `content`.
 ///
-/// Handles all corruption forms:
+/// Handles these corruption forms:
 ///   - Well-formed START..END pairs (any number of them)
-///   - Truncated block: START present, END missing
 ///   - Inverted block: END appears before START
 ///   - Orphaned END markers with no preceding START
+///
+/// A START with no END is refused rather than stripped to end of file: the
+/// lines after it may be the user's, and deleting them cannot be undone.
 ///
 /// Marker detection uses full-line equality (`line.trim() == MARKER`), not
 /// substring matching.  A user line that merely *mentions* the marker text
 /// (e.g. `echo "# >>> git-prism shim >>>"`) is preserved unchanged.  Only a
 /// line whose entire trimmed content is the marker string is treated as a
 /// block boundary.
-fn strip_all_marker_blocks(content: &[u8]) -> Vec<u8> {
+fn strip_all_marker_blocks(content: &[u8]) -> Result<Vec<u8>, UnterminatedBlock> {
     let mut kept_lines: Vec<&[u8]> = Vec::new();
-    let mut inside_block = false;
+    let mut open_block_line: Option<usize> = None;
 
-    for line in lines(content) {
+    for (index, line) in lines(content).enumerate() {
+        let inside_block = open_block_line.is_some();
         if is_start_marker(line) {
             // Enter managed block; discard this line.
-            inside_block = true;
+            open_block_line.get_or_insert(index + 1);
         } else if is_end_marker(line) {
             // Exit managed block; discard this line regardless of whether we
             // saw a matching START (handles orphaned END markers).
-            inside_block = false;
+            open_block_line = None;
         } else if !inside_block {
             kept_lines.push(line);
         }
         // Lines inside a managed block are silently dropped.
+    }
+
+    if let Some(start_line) = open_block_line {
+        return Err(UnterminatedBlock { start_line });
     }
 
     // Trim trailing blank lines introduced by block removal.
@@ -270,7 +308,7 @@ fn strip_all_marker_blocks(content: &[u8]) -> Vec<u8> {
     if !result.is_empty() && !result.ends_with(b"\n") {
         result.push(b'\n');
     }
-    result
+    Ok(result)
 }
 
 /// Remove the function block and every legacy PATH-shim artifact.
@@ -454,6 +492,38 @@ esac"#;
         let err = run_uninstall_with_io(home.path(), &mut Vec::new()).unwrap_err();
 
         assert!(format!("{err:#}").contains(".zshenv"), "err: {err:#}");
+    }
+
+    #[test]
+    fn it_writes_nothing_when_any_startup_file_has_an_unterminated_block() {
+        let home = TempDir::new().unwrap();
+        std::fs::write(home.path().join(".zshenv"), legacy_block()).unwrap();
+        let broken = format!("export A=1\n{BLOCK_START_MARKER}\nexport KEEP=me\n");
+        std::fs::write(home.path().join(".zshrc"), &broken).unwrap();
+
+        let err = run_install_with_io(home.path(), "zsh", &mut Vec::new()).unwrap_err();
+
+        assert!(format!("{err:#}").contains(".zshrc"), "err: {err:#}");
+        assert_eq!(read(home.path(), ".zshenv"), legacy_block());
+        assert_eq!(read(home.path(), ".zshrc"), broken);
+    }
+
+    #[test]
+    fn it_strips_an_orphaned_end_marker_but_keeps_surrounding_lines() {
+        let content = format!("a\n{BLOCK_END_MARKER}\nb\n");
+        assert_eq!(
+            strip_all_marker_blocks(content.as_bytes()),
+            Ok(b"a\nb\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn it_reports_the_line_of_an_unterminated_start_marker() {
+        let content = format!("a\nb\n{BLOCK_START_MARKER}\nc\n");
+        assert_eq!(
+            strip_all_marker_blocks(content.as_bytes()),
+            Err(UnterminatedBlock { start_line: 3 })
+        );
     }
 
     #[test]
