@@ -274,10 +274,10 @@ leaves the shim active.
 GIT_PRISM_PASSTHROUGH=1 git diff main..HEAD   # real git
 ```
 
-The shim sets `GIT_PRISM_INSIDE_SHIM=1` in the environment of the real git it
-runs. When `shim-run` sees that variable, it passes through. This prevents
-recursion if a git hook or alias starts an interactive shell that defines the
-function again.
+When `shim-run` sees `GIT_PRISM_INSIDE_SHIM` set, it passes through. The shim
+does not set the variable itself, so real git's children (hooks, aliases,
+editors) get an unmodified environment. Recursion is prevented by the resolver,
+which skips any `git` on `PATH` that is a git-prism binary.
 
 ### Debugging
 

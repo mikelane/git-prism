@@ -44,7 +44,9 @@ pub(crate) trait RealGitExec {
 }
 
 /// Production implementation that walks `$PATH` to find the real git binary
-/// and `execvp`s it after setting `GIT_PRISM_INSIDE_SHIM=1`.
+/// and `execvp`s it. The environment is passed through untouched: real git's
+/// children must not see a variable real git would not set. Loop protection is
+/// the resolver skipping git-prism binaries (`is_git_prism_binary`).
 pub(crate) struct StdRealGitExec<'e, E: EnvSource> {
     pub(crate) env: &'e E,
     pub(crate) argv0: &'e str,
@@ -86,7 +88,6 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
             use std::os::unix::process::CommandExt as _;
             let mut cmd = std::process::Command::new(&real);
             cmd.args(argv.iter().skip(1)); // skip argv[0]
-            cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
             let err = cmd.exec(); // never returns on success
             eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
             ExitCode::from(exec_failure_exit_code(&err))
@@ -111,7 +112,6 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
 
             let status = std::process::Command::new(&real)
                 .args(argv.iter().skip(1))
-                .env("GIT_PRISM_INSIDE_SHIM", "1")
                 .status();
 
             match status {
@@ -135,7 +135,6 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         // so there is no command-injection risk here.
         let output = std::process::Command::new(&real)
             .args(argv.iter().skip(1))
-            .env("GIT_PRISM_INSIDE_SHIM", "1")
             .output()?;
         Ok(output.stdout.len())
     }
@@ -159,10 +158,7 @@ pub(crate) fn exec_real_binary_with_raw_args(
         eprintln!("git-prism shim: could not find real {binary_name} binary");
         return ExitCode::from(127);
     };
-    let err = std::process::Command::new(&real)
-        .args(args)
-        .env("GIT_PRISM_INSIDE_SHIM", "1")
-        .exec();
+    let err = std::process::Command::new(&real).args(args).exec();
     eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
     ExitCode::from(exec_failure_exit_code(&err))
 }
