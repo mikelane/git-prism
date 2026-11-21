@@ -333,18 +333,78 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
 /// Real git blame reads the working-tree file, so only an exact match lets the
 /// HEAD snapshot stand in for it. Reading the file directly (rather than asking
 /// `gix status`) stays correct for skip-worktree, assume-unchanged and
-/// sparse-checkout paths, which status skips. A missing file, an unreadable
-/// one, or any filter-induced difference counts as "differs" and declines.
+/// sparse-checkout paths, which status skips.
+///
+/// The path is resolved in the HEAD tree first, so a path that is not a
+/// regular-file blob at HEAD (absent, outside the repository, a tracked
+/// symlink) never touches the filesystem. The on-disk entry is then `lstat`ed:
+/// a symlink, FIFO, device or directory declines (real git reads a link with
+/// `readlink` and refuses a FIFO outright; opening either could follow or
+/// block). The read is bounded to the HEAD blob size plus one byte, which also
+/// closes the window between the `lstat` and the open. Any difference or error
+/// declines.
 fn working_tree_matches_head(repo_path: &Path, path: &str) -> anyhow::Result<bool> {
-    let Ok(on_disk) = std::fs::read(repo_path.join(path)) else {
+    if !is_plain_repo_relative(path) {
         return Ok(false);
-    };
+    }
     let reader =
         RepoReader::open(repo_path).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
-    let at_head = reader
-        .read_file_at_ref("HEAD", path)
+    let Some(head_blob) = head_regular_file_bytes(&reader, path)? else {
+        return Ok(false);
+    };
+    Ok(working_tree_file_equals(&repo_path.join(path), &head_blob))
+}
+
+fn is_plain_repo_relative(path: &str) -> bool {
+    use std::path::Component;
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+/// The HEAD blob's bytes when `path` is a regular (or executable) file there.
+fn head_regular_file_bytes(reader: &RepoReader, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    let tree = reader
+        .peel_to_commit("HEAD")
+        .and_then(|commit| {
+            commit
+                .tree()
+                .map_err(|e| crate::git::reader::GitError::ReadObject(e.to_string()))
+        })
+        .map_err(|e| anyhow::anyhow!("failed to read HEAD tree: {e}"))?;
+    let Some(entry) = tree
+        .lookup_entry_by_path(path)
+        .map_err(|e| anyhow::anyhow!("failed to look up {path} at HEAD: {e}"))?
+    else {
+        return Ok(None);
+    };
+    if !entry.mode().is_blob() {
+        return Ok(None);
+    }
+    let blob = entry
+        .object()
         .map_err(|e| anyhow::anyhow!("failed to read {path} at HEAD: {e}"))?;
-    Ok(on_disk == at_head.as_bytes())
+    Ok(Some(blob.data.clone()))
+}
+
+fn working_tree_file_equals(on_disk_path: &Path, expected: &[u8]) -> bool {
+    use std::io::Read;
+    let expected_len = expected.len() as u64;
+    let Ok(metadata) = std::fs::symlink_metadata(on_disk_path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || metadata.len() != expected_len {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(on_disk_path) else {
+        return false;
+    };
+    let mut on_disk = Vec::with_capacity(expected.len());
+    file.take(expected_len + 1)
+        .read_to_end(&mut on_disk)
+        .is_ok()
+        && on_disk == expected
 }
 
 fn handle_blame_snapshot<W: Write>(
