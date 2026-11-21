@@ -349,18 +349,25 @@ pub fn run_status(home: &Path) -> Result<()> {
 }
 
 fn run_status_with_io(home: &Path, out: &mut dyn Write) -> Result<()> {
-    match startup_file_with_function_block(home) {
+    match startup_file_with_function_block(home)? {
         Some(name) => writeln!(out, "shim: installed in ~/{name}")?,
         None => writeln!(out, "shim: not installed")?,
     }
     report_legacy_path_shim(home, out)
 }
 
-fn startup_file_with_function_block(home: &Path) -> Option<&'static str> {
-    ALL_STARTUP_FILES.into_iter().find(|name| {
-        std::fs::read(home.join(name))
-            .is_ok_and(|content| has_marker_block(&content) && mentions_shim_run(&content))
-    })
+/// The startup file holding the function block, if any. A file that exists but
+/// cannot be read fails with its name: "not installed" would be a guess.
+fn startup_file_with_function_block(home: &Path) -> Result<Option<&'static str>> {
+    for name in ALL_STARTUP_FILES {
+        let Some(content) = read_startup_file(&home.join(name))? else {
+            continue;
+        };
+        if has_marker_block(&content) && mentions_shim_run(&content) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
 }
 
 fn has_marker_block(content: &[u8]) -> bool {
