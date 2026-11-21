@@ -268,59 +268,72 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
     }
 }
 
+const SHIM_RUN_USAGE: &str = "usage: git-prism shim-run git <args...>";
+
+/// Entry point for `git-prism shim-run git <args...>`, called by the rc shell
+/// function. `shim_argv` is everything after `shim-run`.
+fn run_shim_entry(shim_argv: &[&str]) -> std::process::ExitCode {
+    if shim_argv.first() != Some(&"git") {
+        eprintln!("{SHIM_RUN_USAGE}");
+        return std::process::ExitCode::from(2);
+    }
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(err) => {
+            eprintln!("git-prism shim-run: cannot locate own executable: {err}");
+            return std::process::ExitCode::from(127);
+        }
+    };
+    let exec = shim::real_git::StdRealGitExec {
+        env: &agent_detection::StdEnvSource,
+        argv0: &current_exe,
+    };
+
+    // Per-invocation opt-out: exec the real binary immediately with zero
+    // overhead (GIT_PRISM_PASSTHROUGH=1 / GIT_PRISM_DISABLE=1).
+    if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
+        return exec.passthrough(shim_argv);
+    }
+
+    // Use `init_quiet`: this runs once per intercepted git command, so a
+    // per-invocation banner would flood the developer's shell. On passthrough
+    // paths run_shim flushes before exec; on the structured path we flush here.
+    let mut telemetry_guard = telemetry::init_quiet();
+    let exit_code = shim::run_shim(
+        shim_argv,
+        &agent_detection::StdEnvSource,
+        &exec,
+        shim::detect_stdout_kind(),
+        &mut telemetry_guard,
+    );
+    telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
+    exit_code
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // argv[0] dispatch: when invoked as "git" (via a symlink), enter shim mode.
     let args_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let args: Vec<&str> = args_os.iter().filter_map(|s| s.to_str()).collect();
     let basename = args_os
         .first()
         .and_then(|s| std::path::Path::new(s).file_name())
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
-    // Enter shim mode when invoked as "git" or "gh" (via a symlink).
+
+    // A binary reached as "git" or "gh" (a stale PATH symlink from a pre-0.11
+    // install) must be invisible: any program that execs git gets real git.
+    // Interception is opt-in via `git-prism shim-run git ...` (see #387).
     if basename == "git" || basename == "gh" {
-        let args: Vec<&str> = args_os.iter().filter_map(|s| s.to_str()).collect();
         let exec = shim::real_git::StdRealGitExec {
             env: &agent_detection::StdEnvSource,
             argv0: args.first().copied().unwrap_or("git"),
         };
+        return exec.passthrough(&args);
+    }
 
-        // Per-invocation opt-out: exec the real binary immediately with zero
-        // overhead — no telemetry init, no classification, no metric recording.
-        // This is the first-class escape hatch for callers that set
-        // GIT_PRISM_PASSTHROUGH=1 (or GIT_PRISM_DISABLE=1) to skip the shim
-        // entirely for a specific invocation or test suite run.
-        if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
-            return exec.passthrough(&args);
-        }
-
-        // Initialize telemetry when an OTLP endpoint is configured. The guard
-        // must live until after run_shim returns — on the exec-replace
-        // (passthrough) path the process is replaced and Rust's drop glue
-        // never runs anyway, so no flush is needed there. On the
-        // structured-output path run_shim returns an ExitCode, and we
-        // force_flush before returning so metrics reach the exporter even
-        // though the PeriodicReader hasn't ticked yet.
-        //
-        // Use `init_quiet`: the shim runs once per intercepted git/gh command,
-        // so the per-invocation "telemetry initialized" banner would flood the
-        // developer's shell with one stderr line per git call. Failure paths
-        // still log, so a misconfigured endpoint stays visible.
-        let mut telemetry_guard = telemetry::init_quiet();
-        // run_shim either exec-replaces the process (passthrough, never returns)
-        // or returns ExitCode after printing structured JSON or an error.
-        // On passthrough paths force_flush is called inside run_shim before execvp.
-        // On the structured-output path the guard is flushed here after run_shim returns.
-        let exit_code = shim::run_shim(
-            &args,
-            &agent_detection::StdEnvSource,
-            &exec,
-            shim::detect_stdout_kind(),
-            &mut telemetry_guard,
-        );
-        telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
-        return exit_code;
+    if args.get(1) == Some(&"shim-run") {
+        return run_shim_entry(&args[2..]);
     }
 
     if let Err(e) = run().await {

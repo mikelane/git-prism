@@ -50,18 +50,24 @@ pub(crate) struct StdRealGitExec<'e, E: EnvSource> {
     pub(crate) argv0: &'e str,
 }
 
+impl<E: EnvSource> StdRealGitExec<'_, E> {
+    /// The program being shimmed: the basename of `argv[0]` ("git" or "gh").
+    /// Under `shim-run`, `argv0` is git-prism's own path, so the command name
+    /// must come from `argv[0]`, not from `argv0`.
+    fn binary_name<'a>(&'a self, argv: &'a [&'a str]) -> &'a str {
+        let invoked_as = argv.first().copied().unwrap_or(self.argv0);
+        std::path::Path::new(invoked_as)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("git")
+    }
+}
+
 impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     fn passthrough(&self, argv: &[&str]) -> ExitCode {
         #[cfg(unix)]
         {
-            // Determine which binary to resolve by extracting the basename of
-            // self.argv0 (the shim symlink path, e.g. "/tmp/bin/gh" → "gh").
-            // argv[0] is a full path when the OS execs the shim by path; using
-            // the basename of self.argv0 gets the symlink name ("git" or "gh").
-            let binary_name = std::path::Path::new(self.argv0)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("git");
+            let binary_name = self.binary_name(argv);
             let real = match resolve_real_binary(binary_name, self.argv0, self.env) {
                 Some(p) => p,
                 None => {
@@ -87,10 +93,7 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         }
         #[cfg(not(unix))]
         {
-            let binary_name = std::path::Path::new(self.argv0)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("git");
+            let binary_name = self.binary_name(argv);
             let real = match resolve_real_binary(binary_name, self.argv0, self.env) {
                 Some(p) => p,
                 None => {
@@ -185,6 +188,9 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
                 if same_dir || canonical_eq(&candidate, shim) {
                     continue;
                 }
+            }
+            if is_git_prism_binary(&candidate) {
+                continue;
             }
             return Some(candidate);
         }
@@ -287,6 +293,9 @@ pub(crate) fn resolve_real_binary(
                     continue;
                 }
             }
+            if is_git_prism_binary(&candidate) {
+                continue;
+            }
             return Some(candidate);
         }
     }
@@ -345,6 +354,27 @@ pub(crate) fn resolve_real_binary(
         }
     }
     None
+}
+
+/// True when `candidate` is a git-prism binary: the running one or any other
+/// installed copy (for example a second shim directory on PATH). Exec-ing
+/// another git-prism shim would bounce between the two forever.
+#[cfg(unix)]
+fn is_git_prism_binary(candidate: &Path) -> bool {
+    let Ok(canonical) = candidate.canonicalize() else {
+        return false;
+    };
+    if std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .is_some_and(|exe| exe == canonical)
+    {
+        return true;
+    }
+    canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("git-prism"))
 }
 
 /// Return the canonicalized path of the shim binary.

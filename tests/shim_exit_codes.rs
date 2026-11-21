@@ -131,7 +131,8 @@ fn it_returns_real_git_stderr_and_exit_code_when_handler_fails() {
         .current_dir(&repo)
         .output()
         .unwrap();
-    let shimmed = Command::new(&shim_git)
+    let shimmed = Command::new(bin)
+        .args(["shim-run", "git"])
         .args(args)
         .current_dir(&repo)
         .env_remove("CI")
