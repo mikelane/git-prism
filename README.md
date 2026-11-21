@@ -154,6 +154,7 @@ command, for example
 - any program that execs `git` (scripts, build tools, subprocesses)
 - any subcommand not in the table above, and `git diff` / `git log` without a
   ref range (`git status`, a bare `git diff`)
+- three-dot ranges (`git diff a...b`, `git log a...b`): real git diffs against the merge base or lists the symmetric difference, which the structured output does not
 - any option or argument the structured output does not honour: scripted-output
   flags (`--format`, `--pretty`, `-s`/`--no-patch`, `--porcelain`, `--stat`,
   `-z`, `--quiet`, `--exit-code`), `-n`/`--max-count`, `-R`, `-w`, `--no-index`,

@@ -130,7 +130,9 @@ fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
 
 fn classify_diff<'a>(rest: &[&'a str]) -> Classification<'a> {
     match honoured_positionals(rest, &DIFF_FLAGS, false).as_deref() {
-        Some([range]) if has_ref_range(range) => Classification::Manifest { range },
+        Some([range]) if has_ref_range(range) && !is_three_dot_range(range) => {
+            Classification::Manifest { range }
+        }
         _ => Classification::Passthrough,
     }
 }
@@ -182,6 +184,13 @@ fn has_ref_range(token: &str) -> bool {
         return false;
     }
     token.contains("..")
+}
+
+/// Return `true` for `a...b`. Real git resolves it against the merge base
+/// (`diff`) or as a symmetric difference (`log`); the handlers implement
+/// neither, so the shim leaves it to real git.
+fn is_three_dot_range(token: &str) -> bool {
+    token.contains("...")
 }
 
 /// Return the pickaxe search term if the argv slice contains a `-S` or `-G`
@@ -444,12 +453,10 @@ mod tests {
     }
 
     #[test]
-    fn it_classifies_git_diff_three_dot_range_as_manifest() {
+    fn it_passes_through_git_diff_three_dot_range() {
         assert_eq!(
             classify(&["git", "diff", "main...HEAD"]),
-            Classification::Manifest {
-                range: "main...HEAD"
-            }
+            Classification::Passthrough
         );
     }
 

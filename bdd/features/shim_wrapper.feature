@@ -40,12 +40,11 @@ Feature: PATH-shim wrapper for structured git output
     And the JSON has key "git_prism_hint"
 
   @ISSUE-287
-  Scenario: Agent plus git diff with three-dot range produces JSON with files array
+  Scenario: Agent plus git diff with three-dot range passes through to real git
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1...HEAD" with CLAUDECODE=1
     Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "files" array
+    And the output is not JSON
 
   @ISSUE-287
   Scenario: Agent plus git log with two-dot range produces JSON with commits array
