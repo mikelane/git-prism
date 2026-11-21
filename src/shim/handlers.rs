@@ -328,18 +328,23 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
     (subject, body)
 }
 
-/// True when `path` is staged or modified relative to HEAD (including a rename
-/// source or target).
-fn path_differs_from_head(repo_path: &Path, path: &str) -> anyhow::Result<bool> {
+/// True when the working-tree file at `path` is byte-identical to its HEAD blob.
+///
+/// Real git blame reads the working-tree file, so only an exact match lets the
+/// HEAD snapshot stand in for it. Reading the file directly (rather than asking
+/// `gix status`) stays correct for skip-worktree, assume-unchanged and
+/// sparse-checkout paths, which status skips. A missing file, an unreadable
+/// one, or any filter-induced difference counts as "differs" and declines.
+fn working_tree_matches_head(repo_path: &Path, path: &str) -> anyhow::Result<bool> {
+    let Ok(on_disk) = std::fs::read(repo_path.join(path)) else {
+        return Ok(false);
+    };
     let reader =
         RepoReader::open(repo_path).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
-    let changes = reader
-        .diff_worktree()
-        .map_err(|e| anyhow::anyhow!("failed to read working tree status: {e}"))?;
-    Ok(changes
-        .files
-        .iter()
-        .any(|file| file.path == path || file.old_path.as_deref() == Some(path)))
+    let at_head = reader
+        .read_file_at_ref("HEAD", path)
+        .map_err(|e| anyhow::anyhow!("failed to read {path} at HEAD: {e}"))?;
+    Ok(on_disk == at_head.as_bytes())
 }
 
 fn handle_blame_snapshot<W: Write>(
@@ -348,10 +353,11 @@ fn handle_blame_snapshot<W: Write>(
     argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
-    if path_differs_from_head(repo_path, path)? {
-        // Real git blames the working-tree file, attributing uncommitted lines
-        // to "Not Committed Yet"; the HEAD snapshot would omit them.
-        anyhow::bail!("{path} has uncommitted changes; real git blames the working tree");
+    if !working_tree_matches_head(repo_path, path)? {
+        // Real git blames the working-tree file, attributing local lines to
+        // "Not Committed Yet" (or failing when it is absent); the HEAD
+        // snapshot would misreport both.
+        anyhow::bail!("{path} differs from HEAD on disk; real git blames the working tree");
     }
     // `git blame <path>` maps to get_file_snapshots for the whole file at HEAD.
     let options = SnapshotOptions {
