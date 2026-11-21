@@ -141,6 +141,32 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     }
 }
 
+/// Replace the process with the real `binary_name`, handing it `args` verbatim.
+///
+/// Unlike [`RealGitExec::passthrough`], which takes `&str` arguments, this
+/// preserves arguments that are not valid UTF-8 (a pathspec or `--grep`
+/// pattern in a legacy encoding must reach git byte for byte).
+#[cfg(unix)]
+pub(crate) fn exec_real_binary_with_raw_args(
+    binary_name: &str,
+    argv0: &str,
+    env: &dyn EnvSource,
+    args: &[std::ffi::OsString],
+) -> ExitCode {
+    use std::os::unix::process::CommandExt as _;
+
+    let Some(real) = resolve_real_binary(binary_name, argv0, env) else {
+        eprintln!("git-prism shim: could not find real {binary_name} binary");
+        return ExitCode::from(127);
+    };
+    let err = std::process::Command::new(&real)
+        .args(args)
+        .env("GIT_PRISM_INSIDE_SHIM", "1")
+        .exec();
+    eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
+    ExitCode::from(exec_failure_exit_code(&err))
+}
+
 /// Map an exec `io::Error` to the conventional shell exit code.
 ///
 /// - 126: command found but not executable (`PermissionDenied`)

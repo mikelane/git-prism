@@ -287,6 +287,36 @@ fn run_shim_entry(shim_argv: &[&str]) -> std::process::ExitCode {
     exit_code
 }
 
+/// `str`-based argument handling would silently drop arguments that are not
+/// valid UTF-8, handing git a different command than the user typed. When the
+/// shim would act as a pure passthrough anyway (`shim-run git ...` or a stale
+/// `git`/`gh` symlink), exec the real binary with the raw arguments instead.
+#[cfg(unix)]
+fn passthrough_when_args_are_not_utf8(
+    args_os: &[std::ffi::OsString],
+    basename: &str,
+) -> Option<std::process::ExitCode> {
+    if args_os.iter().all(|arg| arg.to_str().is_some()) {
+        return None;
+    }
+    let argv0 = args_os.first()?.to_string_lossy().into_owned();
+    let (binary_name, raw_args) = if basename == "git" || basename == "gh" {
+        (basename, &args_os[1..])
+    } else if args_os.get(1).and_then(|a| a.to_str()) == Some("shim-run")
+        && args_os.get(2).and_then(|a| a.to_str()) == Some("git")
+    {
+        ("git", &args_os[3..])
+    } else {
+        return None;
+    };
+    Some(shim::real_git::exec_real_binary_with_raw_args(
+        binary_name,
+        &argv0,
+        &agent_detection::StdEnvSource,
+        raw_args,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let args_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
@@ -297,6 +327,11 @@ async fn main() -> std::process::ExitCode {
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
+
+    #[cfg(unix)]
+    if let Some(exit_code) = passthrough_when_args_are_not_utf8(&args_os, &basename) {
+        return exit_code;
+    }
 
     // A binary reached as "git" or "gh" (a stale PATH symlink from a pre-0.11
     // install) must be invisible: any program that execs git gets real git.
