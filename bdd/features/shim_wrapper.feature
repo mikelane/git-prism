@@ -166,73 +166,65 @@ Feature: PATH-shim wrapper for structured git output
     Then the resolved real-git binary path does not live in the shim directory
 
   # -------------------------------------------------------------------------
-  # Hooks install/uninstall/status scenarios (#288)
+  # Hooks install/uninstall/status scenarios (#288, reworked for #387)
   #
-  # git-prism hooks install --path-shim creates a symlink at
-  # ~/.local/share/git-prism/bin/git pointing at the running git-prism binary.
-  # Operations use a tempdir HOME for isolation.
+  # git-prism hooks install --path-shim is a deprecated alias for
+  # `git-prism shim install`: it writes the rc `git` function block (no
+  # symlink, no PATH change). Operations use a tempdir HOME for isolation.
   # -------------------------------------------------------------------------
 
-  @ISSUE-288
-  Scenario: hooks install --path-shim creates the symlink in an isolated HOME
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks install --path-shim writes the function block in an isolated HOME
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the path "$HOME/.local/share/git-prism/bin/git" is a symlink
+    And the path "$HOME/.zshrc" contains "function git {"
+    And the path "$HOME/.local/share/git-prism/bin/git" does not exist
 
-  @ISSUE-288
-  Scenario: hooks install --path-shim prints the PATH update instruction
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks install --path-shim tells the user to restart the agent session
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the output contains "PATH"
-    And the output contains ".local/share/git-prism/bin"
+    And the output contains "Restart your agent session"
 
-  @ISSUE-302
-  Scenario: hooks install --path-shim prints the symlink path
+  @ISSUE-302 @ISSUE-387
+  Scenario: hooks install --path-shim names the rc file it wrote
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the output contains "Created symlink:"
+    And the output contains "~/.zshrc"
 
-  @ISSUE-288
+  @ISSUE-288 @ISSUE-387
   Scenario: hooks install --path-shim is idempotent
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     And I run "git-prism hooks install --path-shim" with the isolated HOME again
     Then the exit code is 0
-    And the path "$HOME/.local/share/git-prism/bin/git" is a symlink
+    And the path "$HOME/.zshrc" contains "function git {"
 
-  @ISSUE-288
-  Scenario: hooks status reports path-shim as present after install
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks status reports the shim as installed after install
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     And I run "git-prism hooks status" with the isolated HOME
     Then the exit code is 0
-    And the hooks status output mentions "path-shim"
+    And the output contains "shim: installed in ~/.zshrc"
 
-  @ISSUE-288
-  Scenario: hooks status reports path-shim as absent before install
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks status reports the shim as absent before install
     Given an isolated HOME directory
     When I run "git-prism hooks status" with the isolated HOME
     Then the exit code is 0
-    And the hooks status output indicates path-shim is not installed
+    And the output contains "shim: not installed"
 
-  @ISSUE-288
-  Scenario: hooks uninstall --path-shim removes the symlink
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks uninstall --path-shim removes the function block
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     And I run "git-prism hooks uninstall --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the path "$HOME/.local/share/git-prism/bin/git" does not exist
-
-  @ISSUE-288
-  Scenario: hooks uninstall --path-shim removes the parent directory when empty
-    Given an isolated HOME directory
-    When I run "git-prism hooks install --path-shim" with the isolated HOME
-    And I run "git-prism hooks uninstall --path-shim" with the isolated HOME
-    Then the exit code is 0
-    And the directory "$HOME/.local/share/git-prism/bin" does not exist
+    And the path "$HOME/.zshrc" does not contain "function git {"
 
   # -------------------------------------------------------------------------
   # Blob/object-spec passthrough (#381)

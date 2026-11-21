@@ -116,121 +116,106 @@ Feature: Shim parity with the redirect hook and first-class shim subcommand
   # The alias must still work for one release but print a deprecation warning.
   # ===========================================================================
 
-  Rule: git-prism shim install creates the symlink via the new subcommand
+  Rule: git-prism shim install writes an rc shell function
 
-    @ISSUE-324
-    Scenario: shim install creates the git symlink in the shim directory
+    @ISSUE-324 @ISSUE-387
+    Scenario: shim install writes the function block to .zshrc and not .zshenv
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
       Then the exit code is 0
-      And the path ".local/share/git-prism/bin/git" is a symlink under HOME
+      And the rc file ".zshrc" under HOME contains the shim function
+      And the path ".zshenv" does not exist under HOME
+      And the path ".local/share/git-prism/bin/git" does not exist under HOME
 
-    @ISSUE-324
+    @ISSUE-324 @ISSUE-387
     Scenario: shim install is idempotent
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
       And I run "git-prism shim install" with the isolated HOME again
       Then the exit code is 0
-      And the path ".local/share/git-prism/bin/git" is a symlink under HOME
+      And the rc file ".zshrc" under HOME contains exactly one shim block
+
+    @ISSUE-387
+    Scenario: shim install names the rc file and asks for a session restart
+      Given an isolated HOME directory
+      When I run "git-prism shim install" with the isolated HOME
+      Then the exit code is 0
+      And the output contains "~/.zshrc"
+      And the output contains "Restart your agent session"
+
+    @ISSUE-387
+    Scenario: shim install migrates a legacy PATH shim automatically
+      Given an isolated HOME directory
+      And a legacy PATH shim is installed under HOME
+      When I run "git-prism shim install" with the isolated HOME
+      Then the exit code is 0
+      And the rc file ".zshenv" under HOME has no shim block
+      And the path ".local/share/git-prism/bin/git" does not exist under HOME
+      And the path ".local/share/git-prism/bin/gh" does not exist under HOME
+      And the rc file ".zshrc" under HOME contains exactly one shim block
+
+    @ISSUE-387
+    Scenario: shim install does not prompt and leaves an unrelated .zshenv untouched
+      Given an isolated HOME directory
+      And a shell rc file exists at ".zshenv" under HOME
+      When I run "git-prism shim install" with the isolated HOME
+      Then the exit code is 0
+      And the rc file ".zshenv" under HOME is unchanged
 
   Rule: git-prism shim status reports installation state
 
-    @ISSUE-324
-    Scenario: shim status reports active after install
+    @ISSUE-324 @ISSUE-387
+    Scenario: shim status reports the rc file after install
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
       And I run "git-prism shim status" with the isolated HOME
       Then the exit code is 0
-      And the output contains "installed"
-      And the output contains ".local/share/git-prism/bin"
+      And the output contains "shim: installed in ~/.zshrc"
 
-    @ISSUE-324
+    @ISSUE-324 @ISSUE-387
     Scenario: shim status reports absent before install
       Given an isolated HOME directory
       When I run "git-prism shim status" with the isolated HOME
       Then the exit code is 0
-      And the output contains "not installed"
+      And the output contains "shim: not installed"
 
-  Rule: git-prism shim uninstall removes the symlink
+    @ISSUE-387
+    Scenario: shim status reports a legacy PATH shim
+      Given an isolated HOME directory
+      And a legacy PATH shim is installed under HOME
+      When I run "git-prism shim status" with the isolated HOME
+      Then the exit code is 0
+      And the output contains "legacy PATH shim: present at"
 
-    @ISSUE-324
-    Scenario: shim uninstall removes the git symlink
+  Rule: git-prism shim uninstall removes the function block
+
+    @ISSUE-324 @ISSUE-387
+    Scenario: shim uninstall removes the function block
       Given an isolated HOME directory
       When I run "git-prism shim install" with the isolated HOME
       And I run "git-prism shim uninstall" with the isolated HOME
       Then the exit code is 0
+      And the rc file ".zshrc" under HOME has no shim block
+
+    @ISSUE-387
+    Scenario: shim uninstall also removes legacy PATH shim artifacts
+      Given an isolated HOME directory
+      And a legacy PATH shim is installed under HOME
+      When I run "git-prism shim uninstall" with the isolated HOME
+      Then the exit code is 0
+      And the rc file ".zshenv" under HOME has no shim block
       And the path ".local/share/git-prism/bin/git" does not exist under HOME
 
   Rule: deprecated --path-shim alias still works but warns
 
-    @ISSUE-324
-    Scenario: hooks install --path-shim prints a deprecation warning to stderr
+    @ISSUE-324 @ISSUE-387
+    Scenario: hooks install --path-shim prints a deprecation warning and writes the function block
       Given an isolated HOME directory
       When I run "git-prism hooks install --path-shim" with the isolated HOME
       Then the exit code is 0
       And the stderr contains "deprecated"
       And the stderr contains "git-prism shim install"
-      And the path ".local/share/git-prism/bin/git" is a symlink under HOME
-
-  # ===========================================================================
-  # @ISSUE-325 — auto-PATH setup UX
-  #
-  # Per ADR 0010: appending the export PATH line to the shell rc takes effect
-  # only on the NEXT claude launch (the snapshot is frozen at launch time).
-  # The install output MUST tell the user to restart Claude Code — this is not
-  # optional wording. Scenarios reflect the three consent outcomes: accept,
-  # decline, and already-in-PATH (no prompt needed).
-  # ===========================================================================
-
-  Rule: User consents to auto-PATH setup — rc files are updated idempotently
-
-    @ISSUE-325
-    Scenario: Accepting PATH setup writes the managed block to .zshenv for agent shells
-      Given an isolated HOME directory
-      And the shim directory is not in PATH
-      When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
-      Then the exit code is 0
-      And the rc file ".zshenv" under HOME contains the shim directory export line
-      And the output contains "restart"
-
-    @ISSUE-325
-    Scenario: Accepting PATH setup writes the managed block to .zshrc to win over brew prepends
-      Given an isolated HOME directory
-      And the shim directory is not in PATH
-      When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
-      Then the exit code is 0
-      And the rc file ".zshrc" under HOME contains the shim directory export line
-
-    @ISSUE-325
-    Scenario: Re-running install does not duplicate the managed block
-      Given an isolated HOME directory
-      And the shim directory is not in PATH
-      When I run "git-prism shim install" and consent to PATH setup with the isolated HOME
-      And I run "git-prism shim install" and consent to PATH setup with the isolated HOME again
-      Then the rc file ".zshenv" under HOME contains the shim export line exactly once
-
-  Rule: User declines auto-PATH setup — rc files are not modified
-
-    @ISSUE-325
-    Scenario: Declining PATH setup prints manual instructions and leaves rc files unchanged
-      Given an isolated HOME directory
-      And the shim directory is not in PATH
-      And a shell rc file exists at ".zshenv" under HOME
-      When I run "git-prism shim install" and decline PATH setup with the isolated HOME
-      Then the exit code is 0
-      And the rc file ".zshenv" under HOME is unchanged
-      And the output contains ".local/share/git-prism/bin"
-
-  Rule: Shim directory already first in PATH — no prompt, no rc modification
-
-    @ISSUE-325
-    Scenario: No PATH prompt when shim directory is already first in PATH
-      Given an isolated HOME directory
-      And the shim directory is already in PATH
-      And a shell rc file exists at ".zshenv" under HOME
-      When I run "git-prism shim install" with the isolated HOME
-      Then the exit code is 0
-      And the rc file ".zshenv" under HOME is unchanged
+      And the rc file ".zshrc" under HOME contains the shim function
 
   # ===========================================================================
   # @ISSUE-326 — redirect hook removal (hard removal, no deprecation phase)

@@ -105,7 +105,7 @@ enum Commands {
     Languages,
     /// Detect whether the current process is running on behalf of an AI agent
     AgentDetect,
-    /// Install, uninstall, or query the PATH shim (creates ~/.local/share/git-prism/bin/git)
+    /// Install, uninstall, or query the interactive-shell `git` function (an rc-file block)
     Shim {
         #[command(subcommand)]
         command: ShimCommands,
@@ -127,7 +127,7 @@ enum HooksCommands {
         /// Accepted for backwards compatibility; ignored
         #[arg(long)]
         dry_run: bool,
-        /// Overwrite a pre-existing regular file at the path-shim target (use with caution)
+        /// Accepted for backwards compatibility; ignored (no symlink is created any more)
         #[arg(long)]
         force: bool,
         /// Deprecated alias for `git-prism shim install`; still works with a warning
@@ -139,7 +139,7 @@ enum HooksCommands {
         /// Which scope to clean up (required unless --path-shim is set)
         #[arg(long, value_parser = ["user", "project", "local"])]
         scope: Option<String>,
-        /// Remove the PATH shim symlink (~/.local/share/git-prism/bin/git)
+        /// Remove the shim function block and legacy PATH-shim artifacts
         #[arg(long)]
         path_shim: bool,
     },
@@ -149,13 +149,13 @@ enum HooksCommands {
 
 #[derive(Subcommand)]
 enum ShimCommands {
-    /// Create ~/.local/share/git-prism/bin/git symlink pointing at this binary
+    /// Add a `git` shell function to your interactive rc file (~/.zshrc or ~/.bashrc)
     Install {
-        /// Overwrite a regular file at the shim target (use with caution)
+        /// Accepted for backwards compatibility; ignored (no symlink is created any more)
         #[arg(long)]
         force: bool,
     },
-    /// Remove the ~/.local/share/git-prism/bin/git symlink
+    /// Remove the shell function block and any legacy PATH-shim symlinks/blocks
     Uninstall,
     /// Report whether the shim is installed and show the shim directory
     Status,
@@ -191,20 +191,14 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 eprintln!(
                     "warning: --path-shim is deprecated; use `git-prism shim install` instead"
                 );
+                let _ = force;
                 if dry_run {
                     println!(
-                        "dry-run: would create symlink at $HOME/.local/share/git-prism/bin/git (not created)"
-                    );
-                    println!(
-                        "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
+                        "dry-run: would add the git shim function to your interactive rc file (not written)"
                     );
                     return Ok(0);
                 }
-                let symlink_path = hooks::install_path_shim(&home, force)?;
-                println!("Created symlink: {}", symlink_path.display());
-                println!(
-                    "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
-                );
+                shim_cmd::run_install(&home)?;
                 return Ok(0);
             }
             // hooks install without --path-shim: the redirect hook was removed in v0.9.0.
@@ -235,7 +229,7 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 hooks::uninstall_redirect_hook(scope, &home, &cwd)?;
             }
             if path_shim {
-                hooks::uninstall_path_shim(&home)?;
+                shim_cmd::run_uninstall(&home)?;
             }
             Ok(0)
         }
@@ -245,24 +239,7 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             for line in &report.lines {
                 println!("{line}");
             }
-            let shim_status = hooks::path_shim_status(&home);
-            match shim_status {
-                hooks::PathShimStatus::Installed {
-                    target,
-                    staleness_warning,
-                } => {
-                    println!("path-shim: installed @ {}", target.display());
-                    if let Some(w) = staleness_warning {
-                        println!("warning: {w}");
-                    }
-                }
-                hooks::PathShimStatus::NotInstalled => {
-                    println!("path-shim: not installed");
-                }
-                hooks::PathShimStatus::BrokenLink { reason } => {
-                    println!("path-shim: broken link ({reason})");
-                }
-            }
+            shim_cmd::run_status(&home)?;
             Ok(0)
         }
     }
@@ -475,7 +452,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Shim { command } => {
             let home = hooks::home_dir()?;
             match command {
-                ShimCommands::Install { force } => shim_cmd::run_install(&home, force)?,
+                ShimCommands::Install { force: _ } => shim_cmd::run_install(&home)?,
                 ShimCommands::Uninstall => shim_cmd::run_uninstall(&home)?,
                 ShimCommands::Status => shim_cmd::run_status(&home)?,
             }

@@ -49,16 +49,12 @@ fn it_exits_126_when_real_git_is_found_but_unexecutable() {
     );
 }
 
-/// Adversarial QA (issue #324, gate 3): `git-prism shim status` must report a
-/// dangling symlink (target no longer exists) as BROKEN, not "installed".
-///
-/// The `PathShimStatus::BrokenLink` variant and its doc comment promise exactly
-/// this. But `path_shim_status` uses `std::fs::read_link`, which SUCCEEDS on a
-/// dangling symlink (it only reads the link's textual target). So the canonical
-/// broken-link case is mis-classified as `Installed`. This drives the built
-/// binary end-to-end and currently FAILS.
+/// Adversarial QA (issue #324, gate 3; reworked for #387): `git-prism shim
+/// status` must report a legacy symlink, even a dangling one (target no longer
+/// exists), as a legacy PATH shim to migrate, and must NOT claim the shim
+/// function is installed.
 #[test]
-fn shim_status_reports_broken_for_dangling_symlink() {
+fn shim_status_reports_a_dangling_legacy_symlink_as_legacy_not_installed() {
     let bin = env!("CARGO_BIN_EXE_git-prism");
     let home = TempDir::new().unwrap();
     let shim_dir = home.path().join(".local/share/git-prism/bin");
@@ -79,12 +75,12 @@ fn shim_status_reports_broken_for_dangling_symlink() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("broken"),
-        "dangling symlink must be reported as broken; got: {stdout}"
+        stdout.contains("legacy PATH shim: present at"),
+        "dangling symlink must be reported as a legacy PATH shim; got: {stdout}"
     );
     assert!(
-        !stdout.contains("shim: installed"),
-        "dangling symlink must NOT be reported as installed; got: {stdout}"
+        stdout.contains("shim: not installed"),
+        "a legacy symlink is not the shim function; got: {stdout}"
     );
 }
 

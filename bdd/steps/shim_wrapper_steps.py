@@ -372,6 +372,7 @@ def step_hooks_install_path_shim(context: Context) -> None:
     binary = _find_binary(context)
     env = os.environ.copy()
     env["HOME"] = str(context.isolated_home)
+    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "install", "--path-shim"],
@@ -389,6 +390,7 @@ def step_hooks_install_path_shim_again(context: Context) -> None:
     binary = _find_binary(context)
     env = os.environ.copy()
     env["HOME"] = str(context.isolated_home)
+    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "install", "--path-shim"],
@@ -406,6 +408,7 @@ def step_hooks_uninstall_path_shim(context: Context) -> None:
     binary = _find_binary(context)
     env = os.environ.copy()
     env["HOME"] = str(context.isolated_home)
+    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "uninstall", "--path-shim"],
@@ -423,6 +426,7 @@ def step_hooks_status_with_isolated_home(context: Context) -> None:
     binary = _find_binary(context)
     env = os.environ.copy()
     env["HOME"] = str(context.isolated_home)
+    env["SHELL"] = "/bin/zsh"  # install targets ~/.zshrc regardless of the runner's shell
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "status"],
@@ -590,17 +594,6 @@ def step_real_git_not_in_shim_dir(context: Context) -> None:
     )
 
 
-@then('the path "$HOME/{rel_path}" is a symlink')
-def step_path_is_symlink(context: Context, rel_path: str) -> None:
-    """Assert that $HOME/<rel_path> is a symlink (using the isolated HOME)."""
-    target = context.isolated_home / rel_path
-    assert target.is_symlink(), (
-        f"Expected {target} to be a symlink, but it does not exist or is not a symlink.\n"
-        f"stdout: {context.result.stdout}\n"
-        f"stderr: {context.result.stderr}"
-    )
-
-
 @then('the path "$HOME/{rel_path}" does not exist')
 def step_path_does_not_exist(context: Context, rel_path: str) -> None:
     """Assert that $HOME/<rel_path> does not exist."""
@@ -612,24 +605,21 @@ def step_path_does_not_exist(context: Context, rel_path: str) -> None:
     )
 
 
-@then('the directory "$HOME/{rel_path}" does not exist')
-def step_directory_does_not_exist(context: Context, rel_path: str) -> None:
-    """Assert that $HOME/<rel_path> directory does not exist."""
+@then('the path "$HOME/{rel_path}" contains "{text}"')
+def step_path_contains(context: Context, rel_path: str, text: str) -> None:
+    """Assert that the file $HOME/<rel_path> exists and contains text."""
     target = context.isolated_home / rel_path
-    assert not target.exists(), (
-        f"Expected directory {target} to not exist, but it does.\n"
-        f"stdout: {context.result.stdout}\n"
-        f"stderr: {context.result.stderr}"
-    )
+    assert target.exists(), f"Expected {target} to exist.\nstderr: {context.result.stderr}"
+    content = target.read_text()
+    assert text in content, f"Expected {target} to contain {text!r}.\nContents:\n{content}"
 
 
-@then('the hooks status output mentions "path-shim"')
-def step_hooks_status_mentions_path_shim(context: Context) -> None:
-    """Assert the hooks status output contains the text 'path-shim'."""
-    full_output = context.result.stdout + context.result.stderr
-    assert "path-shim" in full_output, (
-        f"'path-shim' not found in hooks status output:\n{full_output}"
-    )
+@then('the path "$HOME/{rel_path}" does not contain "{text}"')
+def step_path_does_not_contain(context: Context, rel_path: str, text: str) -> None:
+    """Assert that $HOME/<rel_path> is absent or does not contain text."""
+    target = context.isolated_home / rel_path
+    content = target.read_text() if target.exists() else ""
+    assert text not in content, f"Expected {target} not to contain {text!r}.\nContents:\n{content}"
 
 
 @then("the output does not contain the handler error marker")
@@ -644,29 +634,4 @@ def step_output_no_handler_error(context: Context) -> None:
     stderr = context.result.stderr or ""
     assert error_marker not in stderr, (
         f"Unexpected handler error in shim stderr:\n{stderr}"
-    )
-
-
-@then("the hooks status output indicates path-shim is not installed")
-def step_hooks_status_not_installed(context: Context) -> None:
-    """Assert the hooks status output reports path-shim as not installed.
-
-    Requires both ``path-shim`` and a not-installed phrase on the same
-    line so the existing bash-redirect-hook's ``not installed`` message
-    can't trigger a false GREEN before the implementation lands.
-    """
-    full_output = context.result.stdout + context.result.stderr
-    path_shim_lines = [
-        line for line in full_output.splitlines() if "path-shim" in line.lower()
-    ]
-    assert path_shim_lines, (
-        f"Expected a line mentioning 'path-shim' in hooks status output, "
-        f"got:\n{full_output}"
-    )
-    assert any(
-        "not installed" in line.lower() or "absent" in line.lower()
-        for line in path_shim_lines
-    ), (
-        f"Expected a 'path-shim' line indicating it is not installed; "
-        f"matching lines were: {path_shim_lines!r}"
     )
