@@ -173,21 +173,13 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
             if !is_executable(&candidate) {
                 continue;
             }
-            // Skip this candidate if:
-            // (a) it lives in the same directory as the shim binary, or
-            // (b) it resolves (via symlink) to the shim binary itself.
-            // Case (a) handles the direct install; case (b) handles the
-            // Homebrew/cellar pattern where the shim is symlinked into PATH.
-            if let Some(shim) = &shim_path {
-                let shim_dir = shim.parent().map(Path::to_path_buf);
-                let candidate_dir = candidate.parent().map(Path::to_path_buf);
-                let same_dir = match (&shim_dir, &candidate_dir) {
-                    (Some(sd), Some(cd)) => canonical_eq(sd, cd),
-                    _ => false,
-                };
-                if same_dir || canonical_eq(&candidate, shim) {
-                    continue;
-                }
+            // Skip a candidate that resolves (via symlink) to the shim
+            // binary itself; a real git sharing the shim's directory is fine.
+            if shim_path
+                .as_ref()
+                .is_some_and(|shim| canonical_eq(&candidate, shim))
+            {
+                continue;
             }
             if is_git_prism_binary(&candidate) {
                 continue;
@@ -282,16 +274,11 @@ pub(crate) fn resolve_real_binary(
             if !is_executable(&candidate) {
                 continue;
             }
-            if let Some(shim) = &shim_path {
-                let shim_dir = shim.parent().map(Path::to_path_buf);
-                let candidate_dir = candidate.parent().map(Path::to_path_buf);
-                let same_dir = match (&shim_dir, &candidate_dir) {
-                    (Some(sd), Some(cd)) => canonical_eq(sd, cd),
-                    _ => false,
-                };
-                if same_dir || canonical_eq(&candidate, shim) {
-                    continue;
-                }
+            if shim_path
+                .as_ref()
+                .is_some_and(|shim| canonical_eq(&candidate, shim))
+            {
+                continue;
             }
             if is_git_prism_binary(&candidate) {
                 continue;
@@ -392,7 +379,7 @@ fn shim_canonical_path(argv0: &str) -> Option<PathBuf> {
     })
 }
 
-/// Return `true` if `a` and `b` refer to the same directory after
+/// Return `true` if `a` and `b` refer to the same path after
 /// canonicalization.  Falls back to a direct comparison when either
 /// canonicalization fails.
 #[cfg(unix)]
@@ -452,13 +439,11 @@ mod tests {
         let shim_dir = TempDir::new().unwrap();
         let real_dir = TempDir::new().unwrap();
 
-        // Create "git" in both dirs; the one in shim_dir must be skipped.
-        make_executable_file(shim_dir.path(), "git");
+        // The shim dir holds git-prism plus a legacy `git` symlink to it; the
+        // symlink must be skipped.
+        let shim_binary = make_executable_file(shim_dir.path(), "git-prism");
+        std::os::unix::fs::symlink(&shim_binary, shim_dir.path().join("git")).unwrap();
         let expected = make_executable_file(real_dir.path(), "git");
-
-        // Fake argv0 points into the shim dir.
-        let shim_binary = shim_dir.path().join("git-prism");
-        fs::write(&shim_binary, b"").unwrap();
 
         let path_val = format!(
             "{}:{}",
@@ -469,6 +454,32 @@ mod tests {
         let argv0 = shim_binary.to_string_lossy().into_owned();
         let result = resolve_real_git(&argv0, &env);
         assert_eq!(result, Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_finds_real_git_in_the_same_directory_as_git_prism() {
+        let dir = TempDir::new().unwrap();
+        let git_prism = make_executable_file(dir.path(), "git-prism");
+        let expected = make_executable_file(dir.path(), "git");
+
+        let env = env_with_path(&dir.path().display().to_string());
+        let argv0 = git_prism.to_string_lossy().into_owned();
+
+        assert_eq!(resolve_real_git(&argv0, &env), Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_finds_real_gh_in_the_same_directory_as_git_prism() {
+        let dir = TempDir::new().unwrap();
+        let git_prism = make_executable_file(dir.path(), "git-prism");
+        let expected = make_executable_file(dir.path(), "gh");
+
+        let env = env_with_path(&dir.path().display().to_string());
+        let argv0 = git_prism.to_string_lossy().into_owned();
+
+        assert_eq!(resolve_real_binary("gh", &argv0, &env), Some(expected));
     }
 
     #[cfg(unix)]
