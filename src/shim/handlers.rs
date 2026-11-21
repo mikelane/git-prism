@@ -16,9 +16,8 @@ use crate::tools::types::{
     CommitSignature, ShowCommitDetail, ShowDiffstat, ShowFileEntry, ShowManifestResponse,
 };
 use crate::tools::{
-    ContextOptions, ManifestOptions, SnapshotOptions, build_function_context_with_options,
-    build_snapshots, collect_all_history_pages, collect_all_manifest_pages,
-    collect_all_worktree_manifest_pages,
+    ManifestOptions, SnapshotOptions, build_snapshots, collect_all_history_pages,
+    collect_all_manifest_pages, collect_all_worktree_manifest_pages,
 };
 
 /// Dispatch a classified git command to the appropriate tool function and
@@ -87,10 +86,6 @@ fn dispatch<W: Write>(
     match classification {
         Classification::Manifest { range } => handle_manifest(range, repo_path, argv, out),
         Classification::History { range } => handle_history(range, repo_path, argv, out),
-        Classification::FunctionContext {
-            range,
-            pickaxe_term,
-        } => handle_function_context(*range, pickaxe_term, repo_path, argv, out),
         Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, argv, out),
         Classification::BlameSnapshot { path } => handle_blame_snapshot(path, repo_path, argv, out),
         Classification::Passthrough => {
@@ -142,31 +137,6 @@ fn handle_history<W: Write>(
         max_response_tokens: None,
     };
     let result = collect_all_history_pages(repo_path, base, head, &options, 500)?;
-    write_with_hint(out, &result, argv)?;
-    Ok(())
-}
-
-fn handle_function_context<W: Write>(
-    range: Option<&str>,
-    _pickaxe_term: &str,
-    repo_path: &Path,
-    argv: &[&str],
-    out: &mut W,
-) -> anyhow::Result<()> {
-    let effective_range = range.unwrap_or("HEAD~1..HEAD");
-    let (base, head) = match parse_range(effective_range) {
-        RefRange::CommitRange { base, head } => (base, head),
-        RefRange::WorktreeCompare { .. } => {
-            anyhow::bail!("function context requires a commit range")
-        }
-    };
-    let options = ContextOptions {
-        cursor: None,
-        page_size: 25,
-        function_names: None,
-        max_response_tokens: Some(8192),
-    };
-    let result = build_function_context_with_options(repo_path, base, head, &options)?;
     write_with_hint(out, &result, argv)?;
     Ok(())
 }
@@ -784,10 +754,6 @@ mod tests {
             },
             Classification::ShowSnapshot { sha: &sha },
             Classification::BlameSnapshot { path: "world.txt" },
-            Classification::FunctionContext {
-                range: Some("HEAD~1..HEAD"),
-                pickaxe_term: "x",
-            },
         ];
         for classification in &cases {
             let mut out = Vec::new();
@@ -818,24 +784,6 @@ mod tests {
         .unwrap();
         let json = serde_json::to_value(&result).unwrap();
         assert!(json.get("git_prism_hint").is_none());
-    }
-
-    #[test]
-    fn it_handles_function_context_and_returns_functions_key() {
-        let (_dir, path) = init_repo_with_two_commits();
-        let classification = Classification::FunctionContext {
-            range: Some("HEAD~1..HEAD"),
-            pickaxe_term: "hello",
-        };
-        let mut out = Vec::new();
-        handle(&classification, &path, &[], &mut out).unwrap();
-
-        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        // build_function_context_with_options returns a response with a "functions" array.
-        assert!(
-            json.get("functions").is_some(),
-            "expected 'functions' key in function_context output, got: {json}"
-        );
     }
 
     #[test]

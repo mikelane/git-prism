@@ -61,21 +61,19 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the output is not JSON
 
-  @ISSUE-287
-  Scenario: Agent plus git log with pickaxe flag produces function_context JSON
+  @ISSUE-387
+  Scenario: Agent plus git log with pickaxe flag passes through to real git
     Given a fixture git repository with two commits
     When I run the shim as "git log -Sfoo" with CLAUDECODE=1
     Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "function_context" shape
+    And the output is not JSON
 
-  @ISSUE-287
-  Scenario: Pickaxe flag takes priority over log range — both present yields function_context
+  @ISSUE-387
+  Scenario: Agent plus git log with pickaxe flag and range passes through to real git
     Given a fixture git repository with two commits
     When I run the shim as "git log -Sfoo HEAD~1..HEAD" with CLAUDECODE=1
     Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "function_context" shape
+    And the output is not JSON
 
   @ISSUE-287
   Scenario: Agent plus git show produces JSON with snapshots key

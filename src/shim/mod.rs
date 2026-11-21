@@ -203,7 +203,6 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
     match c {
         Classification::Manifest { .. } => ShimSubcommand::Diff,
         Classification::History { .. } => ShimSubcommand::Log,
-        Classification::FunctionContext { .. } => ShimSubcommand::Log, // git log -S/-G is still log
         Classification::ShowSnapshot { .. } => ShimSubcommand::Show,
         Classification::BlameSnapshot { .. } => ShimSubcommand::Blame,
         Classification::Passthrough => ShimSubcommand::Other,
@@ -803,13 +802,6 @@ mod tests {
         );
         assert_eq!(
             classification_to_subcommand(&Classification::History { range: "x" }),
-            ShimSubcommand::Log
-        );
-        assert_eq!(
-            classification_to_subcommand(&Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "x",
-            }),
             ShimSubcommand::Log
         );
         assert_eq!(

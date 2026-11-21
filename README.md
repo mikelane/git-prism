@@ -141,7 +141,6 @@ it did not report an error. See
 |---|---|
 | `git diff <a>..<b>` | change manifest |
 | `git log <a>..<b>` | commit history |
-| `git log -S <term>` / `-G <regex>` (range optional) | function context |
 | `git show <commit-ish>` | file snapshots |
 | `git blame <path>` | file snapshots |
 
@@ -154,6 +153,7 @@ command, for example
 - any program that execs `git` (scripts, build tools, subprocesses)
 - any subcommand not in the table above, and `git diff` / `git log` without a
   ref range (`git status`, a bare `git diff`)
+- pickaxe searches (`git log -S <term>`, `-G <regex>`, `--pickaxe-*`): the structured output ignores the term, so it would answer a different question than git
 - three-dot ranges (`git diff a...b`, `git log a...b`): real git diffs against the merge base or lists the symmetric difference, which the structured output does not
 - any option or argument the structured output does not honour: scripted-output
   flags (`--format`, `--pretty`, `-s`/`--no-patch`, `--porcelain`, `--stat`,

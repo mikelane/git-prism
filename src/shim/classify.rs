@@ -11,11 +11,6 @@ pub(crate) enum Classification<'a> {
     Manifest { range: &'a str },
     /// `git log <ref>..<ref>` → `get_commit_history`
     History { range: &'a str },
-    /// `git log -S/-G <term>` → `get_function_context`
-    FunctionContext {
-        range: Option<&'a str>,
-        pickaxe_term: &'a str,
-    },
     /// `git show <sha>` → `get_file_snapshots` (show variant)
     ShowSnapshot { sha: &'a str },
     /// `git blame <path>` → `get_file_snapshots` (blame variant)
@@ -82,23 +77,14 @@ const SHOW_FLAGS: [&str; 2] = ["--name-only", "--name-status"];
 /// argument that would narrow, reorder, or reinterpret that answer (`--`
 /// pathspecs, `-n`, `-R`, `--no-index`, a typo) must reach real git, which
 /// either honours it or rejects it with its own exit status. `allowed_flags`
-/// extends the presentation-only flags every command accepts. With
-/// `pickaxe`, `-S`/`-G` (attached or followed by a term) are accepted too.
-fn honoured_positionals<'a>(
-    tokens: &[&'a str],
-    allowed_flags: &[&str],
-    pickaxe: bool,
-) -> Option<Vec<&'a str>> {
+/// extends the presentation-only flags every command accepts. Pickaxe
+/// searches (`-S`, `-G`, `--pickaxe-*`) are unknown options here: the handlers
+/// ignore the term, so they must reach real git.
+fn honoured_positionals<'a>(tokens: &[&'a str], allowed_flags: &[&str]) -> Option<Vec<&'a str>> {
     let mut positionals = Vec::new();
-    let mut iter = tokens.iter().copied().peekable();
-    while let Some(token) = iter.next() {
+    for token in tokens.iter().copied() {
         if !token.starts_with('-') || token == "-" {
             positionals.push(token);
-        } else if pickaxe && (token == "-S" || token == "-G") {
-            // The following token is the term unless it is the range.
-            let _term = iter.next_if(|next| !has_ref_range(next));
-        } else if pickaxe && (token.starts_with("-S") || token.starts_with("-G")) {
-            continue;
         } else if !PRESENTATION_FLAGS.contains(&token) && !allowed_flags.contains(&token) {
             return None;
         }
@@ -107,29 +93,16 @@ fn honoured_positionals<'a>(
 }
 
 fn classify_log<'a>(rest: &[&'a str]) -> Classification<'a> {
-    let Some(positionals) = honoured_positionals(rest, &LOG_FLAGS, true) else {
-        return Classification::Passthrough;
-    };
-    let range = match positionals.as_slice() {
-        [] => None,
-        [only] if has_ref_range(only) && !is_three_dot_range(only) => Some(*only),
-        _ => return Classification::Passthrough,
-    };
-    // Pickaxe check BEFORE ref-range check (mirrors Python order).
-    if let Some(term) = pickaxe_term(rest) {
-        return Classification::FunctionContext {
-            range,
-            pickaxe_term: term,
-        };
-    }
-    match range {
-        Some(range) => Classification::History { range },
-        None => Classification::Passthrough,
+    match honoured_positionals(rest, &LOG_FLAGS).as_deref() {
+        Some([range]) if has_ref_range(range) && !is_three_dot_range(range) => {
+            Classification::History { range }
+        }
+        _ => Classification::Passthrough,
     }
 }
 
 fn classify_diff<'a>(rest: &[&'a str]) -> Classification<'a> {
-    match honoured_positionals(rest, &DIFF_FLAGS, false).as_deref() {
+    match honoured_positionals(rest, &DIFF_FLAGS).as_deref() {
         Some([range]) if has_ref_range(range) && !is_three_dot_range(range) => {
             Classification::Manifest { range }
         }
@@ -138,7 +111,7 @@ fn classify_diff<'a>(rest: &[&'a str]) -> Classification<'a> {
 }
 
 fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
-    let Some(positionals) = honoured_positionals(rest, &SHOW_FLAGS, false) else {
+    let Some(positionals) = honoured_positionals(rest, &SHOW_FLAGS) else {
         return Classification::Passthrough;
     };
     // Exactly one object spec; several (or a `--` pathspec) are real git's job.
@@ -168,7 +141,7 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
 }
 
 fn classify_blame<'a>(rest: &[&'a str]) -> Classification<'a> {
-    match honoured_positionals(rest, &[], false).as_deref() {
+    match honoured_positionals(rest, &[]).as_deref() {
         Some([path]) => Classification::BlameSnapshot { path },
         _ => Classification::Passthrough,
     }
@@ -191,35 +164,6 @@ fn has_ref_range(token: &str) -> bool {
 /// neither, so the shim leaves it to real git.
 fn is_three_dot_range(token: &str) -> bool {
     token.contains("...")
-}
-
-/// Return the pickaxe search term if the argv slice contains a `-S` or `-G`
-/// flag (with or without an attached term).
-///
-/// Returns `Some(term)` where `term` may be empty:
-/// - `-S foo`       → `Some("foo")`   (separate non-range token)
-/// - `-Sfoo`        → `Some("foo")`   (concatenated)
-/// - `-S main..HEAD`→ `Some("")`      (next token is a ref range, not a term)
-/// - `-S`           → `Some("")`      (bare flag, no following token)
-///
-/// Returns `None` when no `-S`/`-G` flag is present at all.
-fn pickaxe_term<'a>(tokens: &[&'a str]) -> Option<&'a str> {
-    let mut iter = tokens.iter().copied().peekable();
-    while let Some(tok) = iter.next() {
-        if tok == "-S" || tok == "-G" {
-            // Separate-token form: the next token is the term ONLY if it does
-            // not look like a ref range.  A ref range belongs to the range
-            // field, not the pickaxe term.
-            return match iter.peek() {
-                Some(&next) if !has_ref_range(next) => Some(next),
-                _ => Some(""),
-            };
-        } else if tok.starts_with("-S") || tok.starts_with("-G") {
-            // Concatenated form: `-Sterm` or `-S` (tok.len() == 2 means empty term).
-            return Some(&tok[2..]);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -500,63 +444,23 @@ mod tests {
         );
     }
 
-    // --- FunctionContext (git log -S/-G) ---
+    // --- Pickaxe (git log -S/-G) passes through: the handlers ignore the term ---
 
     #[test]
-    fn it_classifies_git_log_pickaxe_s_separate_token() {
-        assert_eq!(
-            classify(&["git", "log", "-S", "myfunction"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "myfunction",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_git_log_pickaxe_s_concatenated() {
-        assert_eq!(
-            classify(&["git", "log", "-Smyfunction"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "myfunction",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_git_log_pickaxe_g_separate_token() {
-        assert_eq!(
-            classify(&["git", "log", "-G", "pattern"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "pattern",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_git_log_pickaxe_g_concatenated() {
-        assert_eq!(
-            classify(&["git", "log", "-Gpattern"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "pattern",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_pickaxe_before_ref_range() {
-        // Pickaxe check must win over the ref-range check
-        let result = classify(&["git", "log", "-S", "term", "main..HEAD"]);
-        assert_eq!(
-            result,
-            Classification::FunctionContext {
-                range: Some("main..HEAD"),
-                pickaxe_term: "term",
-            }
-        );
+    fn it_passes_through_git_log_pickaxe_in_every_form() {
+        let cases: [&[&str]; 8] = [
+            &["git", "log", "-S", "myfunction"],
+            &["git", "log", "-Smyfunction"],
+            &["git", "log", "-G", "pattern"],
+            &["git", "log", "-Gpattern"],
+            &["git", "log", "-S", "term", "main..HEAD"],
+            &["git", "log", "-Sfoo", "main..HEAD"],
+            &["git", "log", "-S", "main..HEAD"],
+            &["git", "log", "--pickaxe-regex", "-S", "x", "main..HEAD"],
+        ];
+        for argv in cases {
+            assert_eq!(classify(argv), Classification::Passthrough, "{argv:?}");
+        }
     }
 
     // --- ShowSnapshot (git show <sha>) ---
@@ -855,80 +759,6 @@ mod tests {
             classify(&["git", "blame", "src/main.rs"]),
             Classification::BlameSnapshot {
                 path: "src/main.rs"
-            }
-        );
-    }
-
-    // --- F1: pickaxe term must not steal a ref-range token ---
-
-    #[test]
-    fn it_classifies_pickaxe_with_range_lookalike_as_term_and_no_range() {
-        // git log -S foo  → term="foo", range=None
-        assert_eq!(
-            classify(&["git", "log", "-S", "foo"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "foo",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_concatenated_pickaxe_as_term_and_no_range() {
-        // git log -Sfoo  → term="foo", range=None
-        assert_eq!(
-            classify(&["git", "log", "-Sfoo"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "foo",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_pickaxe_term_with_separate_range() {
-        // git log -S foo main..HEAD  → term="foo", range="main..HEAD"
-        assert_eq!(
-            classify(&["git", "log", "-S", "foo", "main..HEAD"]),
-            Classification::FunctionContext {
-                range: Some("main..HEAD"),
-                pickaxe_term: "foo",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_pickaxe_when_next_token_is_ref_range_as_empty_term() {
-        // git log -S main..HEAD  → term="", range="main..HEAD"  (the bug case)
-        assert_eq!(
-            classify(&["git", "log", "-S", "main..HEAD"]),
-            Classification::FunctionContext {
-                range: Some("main..HEAD"),
-                pickaxe_term: "",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_bare_pickaxe_flag_as_empty_term_no_range() {
-        // git log -S  → term="", range=None
-        assert_eq!(
-            classify(&["git", "log", "-S"]),
-            Classification::FunctionContext {
-                range: None,
-                pickaxe_term: "",
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_concatenated_pickaxe_with_separate_range() {
-        // git log -Sfoo main..HEAD  → term="foo", range="main..HEAD"
-        assert_eq!(
-            classify(&["git", "log", "-Sfoo", "main..HEAD"]),
-            Classification::FunctionContext {
-                range: Some("main..HEAD"),
-                pickaxe_term: "foo",
             }
         );
     }
