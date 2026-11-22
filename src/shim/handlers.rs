@@ -376,7 +376,23 @@ const CONVERSION_ATTRIBUTES: [&str; 6] = [
 /// Declining is always safe, so any doubt (an attribute lookup that fails, a
 /// `core.eol` setting, `core.autocrlf` other than false) answers true.
 fn content_conversion_may_apply(repo: &gix::Repository, path: &str) -> bool {
-    config_enables_conversion(repo) || attributes_enable_conversion(repo, path).unwrap_or(true)
+    attribute_source_overridden(repo)
+        || config_enables_conversion(repo)
+        || attributes_enable_conversion(repo, path).unwrap_or(true)
+}
+
+/// Environment variables through which git reads gitattributes (or config
+/// that names them) from a source gix does not see: `GIT_ATTR_SOURCE` picks a
+/// tree-ish, and `GIT_CONFIG_PARAMETERS` is how `git -c` reaches a child git.
+const ATTRIBUTE_OVERRIDE_ENV_VARS: [&str; 2] = ["GIT_ATTR_SOURCE", "GIT_CONFIG_PARAMETERS"];
+
+/// True when git may read attributes from `attr.tree`, `GIT_ATTR_SOURCE` or
+/// `GIT_CONFIG_PARAMETERS`, none of which the attribute stack consults.
+fn attribute_source_overridden(repo: &gix::Repository) -> bool {
+    repo.config_snapshot().string("attr.tree").is_some()
+        || ATTRIBUTE_OVERRIDE_ENV_VARS
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
 }
 
 fn config_enables_conversion(repo: &gix::Repository) -> bool {
