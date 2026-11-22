@@ -142,7 +142,6 @@ it did not report an error. See
 | `git diff <a>..<b>` | change manifest |
 | `git log <a>..<b>` | commit history |
 | `git show <commit-ish>` | file snapshots |
-| `git blame <path>` | file snapshots |
 
 The intercepted JSON includes a top-level `git_prism_hint` field naming the raw
 command, for example
@@ -154,7 +153,7 @@ command, for example
 - any subcommand not in the table above, and `git diff` / `git log` without a
   ref range (`git status`, a bare `git diff`)
 - pickaxe searches (`git log -S <term>`, `-G <regex>`, `--pickaxe-*`): the structured output ignores the term, so it would answer a different question than git
-- `git blame <path>` of a staged or modified path: real git blames the working tree, which the HEAD snapshot does not reflect
+- `git blame` in every form: real git blames the working tree (uncommitted edits, textconv, eol and filter conversion), which a HEAD snapshot cannot reproduce. Structured blame is tracked in [#388](https://github.com/mikelane/git-prism/issues/388)
 - `git show <merge-commit>`: real git prints a combined diff, which the structured output (a first-parent diff) does not
 - three-dot ranges (`git diff a...b`, `git log a...b`): real git diffs against the merge base or lists the symmetric difference, which the structured output does not
 - any option or argument the structured output does not honour: scripted-output

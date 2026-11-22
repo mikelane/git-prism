@@ -36,7 +36,7 @@ const PASSTHROUGH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 ///
 /// The agent has already received its response by the time the flush runs, so
 /// a longer cap is acceptable — but it must still be finite so a saturated or
-/// unreachable OTLP collector cannot stall a `git diff`/`log`/`show`/`blame`
+/// unreachable OTLP collector cannot stall a `git diff`/`log`/`show`
 /// call indefinitely (the #360 multi-minute stall scenario).
 pub(crate) const STRUCTURED_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -204,7 +204,6 @@ fn classification_to_subcommand(c: &Classification<'_>) -> ShimSubcommand {
         Classification::Manifest { .. } => ShimSubcommand::Diff,
         Classification::History { .. } => ShimSubcommand::Log,
         Classification::ShowSnapshot { .. } => ShimSubcommand::Show,
-        Classification::BlameSnapshot { .. } => ShimSubcommand::Blame,
         Classification::Passthrough => ShimSubcommand::Other,
     }
 }
@@ -816,12 +815,6 @@ mod tests {
         assert_eq!(
             classification_to_subcommand(&Classification::ShowSnapshot { sha: "abc1234" }),
             ShimSubcommand::Show
-        );
-        assert_eq!(
-            classification_to_subcommand(&Classification::BlameSnapshot {
-                path: "src/main.rs"
-            }),
-            ShimSubcommand::Blame
         );
         assert_eq!(
             classification_to_subcommand(&Classification::Passthrough),

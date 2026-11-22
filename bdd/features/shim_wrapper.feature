@@ -83,13 +83,12 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "snapshots" key
 
-  @ISSUE-287
-  Scenario: Agent plus git blame produces JSON with snapshots key
+  # Structured blame was removed in #387 and is tracked in #388 (@ISSUE-388).
+  @ISSUE-387
+  Scenario: Agent plus git blame passes through to real git output
     Given a fixture git repository with two commits and a tracked file
-    When I run the shim as "git blame README.md" with CLAUDECODE=1
-    Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "snapshots" key
+    When I run the shim as "git blame README.md" with CLAUDECODE=1 and compare with real git
+    Then the output equals real git's output and the exit codes match
 
   @ISSUE-287
   Scenario: Agent plus git status passes through to real git output

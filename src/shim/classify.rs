@@ -13,8 +13,6 @@ pub(crate) enum Classification<'a> {
     History { range: &'a str },
     /// `git show <sha>` → `get_file_snapshots` (show variant)
     ShowSnapshot { sha: &'a str },
-    /// `git blame <path>` → `get_file_snapshots` (blame variant)
-    BlameSnapshot { path: &'a str },
     /// Anything else — pass through to real git/gh.
     Passthrough,
 }
@@ -58,7 +56,6 @@ fn classify_git<'a>(subcommand: &str, rest: &[&'a str]) -> Classification<'a> {
         "log" => classify_log(rest),
         "diff" => classify_diff(rest),
         "show" => classify_show(rest),
-        "blame" => classify_blame(rest),
         _ => Classification::Passthrough,
     }
 }
@@ -138,13 +135,6 @@ fn classify_show<'a>(rest: &[&'a str]) -> Classification<'a> {
         return Classification::Passthrough;
     }
     Classification::ShowSnapshot { sha: spec }
-}
-
-fn classify_blame<'a>(rest: &[&'a str]) -> Classification<'a> {
-    match honoured_positionals(rest, &[]).as_deref() {
-        Some([path]) => Classification::BlameSnapshot { path },
-        _ => Classification::Passthrough,
-    }
 }
 
 /// Return `true` if `token` contains `..` with at least one character on
@@ -675,34 +665,19 @@ mod tests {
         );
     }
 
-    // --- BlameSnapshot (git blame <path>) ---
+    // --- git blame always passes through (#387; structured blame tracked in #388) ---
 
     #[test]
-    fn it_classifies_git_blame_path_as_blame_snapshot() {
-        assert_eq!(
-            classify(&["git", "blame", "src/main.rs"]),
-            Classification::BlameSnapshot {
-                path: "src/main.rs"
-            }
-        );
-    }
-
-    #[test]
-    fn it_classifies_git_blame_with_a_presentation_flag_before_path() {
-        assert_eq!(
-            classify(&["git", "blame", "--no-color", "src/main.rs"]),
-            Classification::BlameSnapshot {
-                path: "src/main.rs"
-            }
-        );
-    }
-
-    #[test]
-    fn it_passes_through_blame_whitespace_flag_the_handler_ignores() {
-        assert_eq!(
-            classify(&["git", "blame", "-w", "src/main.rs"]),
-            Classification::Passthrough
-        );
+    fn it_passes_through_every_git_blame_form() {
+        let cases: [&[&str]; 4] = [
+            &["git", "blame", "src/main.rs"],
+            &["git", "blame", "--no-color", "src/main.rs"],
+            &["git", "blame", "-w", "src/main.rs"],
+            &["git", "blame", "--porcelain", "src/main.rs"],
+        ];
+        let classified = cases.map(|argv| (argv, classify(argv)));
+        let expected = cases.map(|argv| (argv, Classification::Passthrough));
+        assert_eq!(classified, expected);
     }
 
     // --- Item 9: additional scripted-output classifier tests ---
@@ -740,26 +715,6 @@ mod tests {
         assert_eq!(
             classify(&["git", "show", "-s", "abc1234"]),
             Classification::Passthrough
-        );
-    }
-
-    #[test]
-    fn it_passes_through_git_blame_with_porcelain_flag() {
-        // git blame --porcelain src/main.rs — scripted output, must passthrough.
-        assert_eq!(
-            classify(&["git", "blame", "--porcelain", "src/main.rs"]),
-            Classification::Passthrough
-        );
-    }
-
-    #[test]
-    fn it_still_classifies_plain_git_blame_as_blame_snapshot() {
-        // Regression: plain git blame without scripted-output flags must still be intercepted.
-        assert_eq!(
-            classify(&["git", "blame", "src/main.rs"]),
-            Classification::BlameSnapshot {
-                path: "src/main.rs"
-            }
         );
     }
 

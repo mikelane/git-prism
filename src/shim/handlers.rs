@@ -16,8 +16,8 @@ use crate::tools::types::{
     CommitSignature, ShowCommitDetail, ShowDiffstat, ShowFileEntry, ShowManifestResponse,
 };
 use crate::tools::{
-    ManifestOptions, SnapshotOptions, build_snapshots, collect_all_history_pages,
-    collect_all_manifest_pages, collect_all_worktree_manifest_pages,
+    ManifestOptions, collect_all_history_pages, collect_all_manifest_pages,
+    collect_all_worktree_manifest_pages,
 };
 
 /// Dispatch a classified git command to the appropriate tool function and
@@ -96,7 +96,6 @@ fn dispatch<W: Write>(
         Classification::Manifest { range } => handle_manifest(range, repo_path, argv, out),
         Classification::History { range } => handle_history(range, repo_path, argv, out),
         Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, argv, out),
-        Classification::BlameSnapshot { path } => handle_blame_snapshot(path, repo_path, argv, out),
         Classification::Passthrough => {
             anyhow::bail!("dispatch called with Passthrough — caller bug")
         }
@@ -326,178 +325,6 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
         Some(body_lines.join("\n").trim().to_string())
     };
     (subject, body)
-}
-
-/// True when the working-tree file at `path` is byte-identical to its HEAD blob.
-///
-/// Real git blame reads the working-tree file, so only an exact match lets the
-/// HEAD snapshot stand in for it. Reading the file directly (rather than asking
-/// `gix status`) stays correct for skip-worktree, assume-unchanged and
-/// sparse-checkout paths, which status skips.
-///
-/// The path is resolved in the HEAD tree first, so a path that is not a
-/// regular-file blob at HEAD (absent, outside the repository, a tracked
-/// symlink) never touches the filesystem. The on-disk entry is then `lstat`ed:
-/// a symlink, FIFO, device or directory declines (real git reads a link with
-/// `readlink` and refuses a FIFO outright; opening either could follow or
-/// block). The read is bounded to the HEAD blob size plus one byte, which also
-/// closes the window between the `lstat` and the open. Any difference or error
-/// declines.
-fn working_tree_matches_head(repo_path: &Path, path: &str) -> anyhow::Result<bool> {
-    if !is_plain_repo_relative(path) {
-        return Ok(false);
-    }
-    let reader =
-        RepoReader::open(repo_path).map_err(|e| anyhow::anyhow!("failed to open repo: {e}"))?;
-    let Some(head_blob) = head_regular_file_bytes(&reader, path)? else {
-        return Ok(false);
-    };
-    if content_conversion_may_apply(reader.repo(), path) {
-        return Ok(false);
-    }
-    Ok(working_tree_file_equals(&repo_path.join(path), &head_blob))
-}
-
-/// Gitattributes that make git rewrite working-tree content before blaming it
-/// (`convert_to_git`): eol normalization, clean filters, ident expansion and
-/// re-encoding. `crlf` is the legacy spelling of `text`/`eol`.
-const CONVERSION_ATTRIBUTES: [&str; 6] = [
-    "text",
-    "eol",
-    "crlf",
-    "filter",
-    "ident",
-    "working-tree-encoding",
-];
-
-/// True when git might convert the working-tree file before blaming it, in
-/// which case raw bytes cannot be compared with the HEAD blob.
-///
-/// Declining is always safe, so any doubt (an attribute lookup that fails, a
-/// `core.eol` setting, `core.autocrlf` other than false) answers true.
-fn content_conversion_may_apply(repo: &gix::Repository, path: &str) -> bool {
-    attribute_source_overridden(repo)
-        || config_enables_conversion(repo)
-        || attributes_enable_conversion(repo, path).unwrap_or(true)
-}
-
-/// Environment variables through which git reads gitattributes (or config
-/// that names them) from a source gix does not see: `GIT_ATTR_SOURCE` picks a
-/// tree-ish, and `GIT_CONFIG_PARAMETERS` is how `git -c` reaches a child git.
-const ATTRIBUTE_OVERRIDE_ENV_VARS: [&str; 2] = ["GIT_ATTR_SOURCE", "GIT_CONFIG_PARAMETERS"];
-
-/// True when git may read attributes from `attr.tree`, `GIT_ATTR_SOURCE` or
-/// `GIT_CONFIG_PARAMETERS`, none of which the attribute stack consults.
-fn attribute_source_overridden(repo: &gix::Repository) -> bool {
-    repo.config_snapshot().string("attr.tree").is_some()
-        || ATTRIBUTE_OVERRIDE_ENV_VARS
-            .iter()
-            .any(|name| std::env::var_os(name).is_some())
-}
-
-fn config_enables_conversion(repo: &gix::Repository) -> bool {
-    let config = repo.config_snapshot();
-    let autocrlf_enabled =
-        config.string("core.autocrlf").is_some() && config.boolean("core.autocrlf") != Some(false);
-    autocrlf_enabled || config.string("core.eol").is_some()
-}
-
-fn attributes_enable_conversion(repo: &gix::Repository, path: &str) -> anyhow::Result<bool> {
-    use gix::worktree::stack::state::attributes::Source;
-    let index = repo.index_or_empty()?;
-    let mut stack = repo.attributes_only(&index, Source::WorktreeThenIdMapping)?;
-    let mut outcome = stack.selected_attribute_matches(CONVERSION_ATTRIBUTES);
-    let platform = stack.at_entry(path, Some(gix::index::entry::Mode::FILE))?;
-    platform.matching_attributes(&mut outcome);
-    Ok(outcome
-        .iter_selected()
-        .any(|m| !m.assignment.state.is_unspecified()))
-}
-
-fn is_plain_repo_relative(path: &str) -> bool {
-    use std::path::Component;
-    !path.is_empty()
-        && Path::new(path)
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-}
-
-/// The HEAD blob's bytes when `path` is a regular (or executable) file there.
-fn head_regular_file_bytes(reader: &RepoReader, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
-    let tree = reader
-        .peel_to_commit("HEAD")
-        .and_then(|commit| {
-            commit
-                .tree()
-                .map_err(|e| crate::git::reader::GitError::ReadObject(e.to_string()))
-        })
-        .map_err(|e| anyhow::anyhow!("failed to read HEAD tree: {e}"))?;
-    let Some(entry) = tree
-        .lookup_entry_by_path(path)
-        .map_err(|e| anyhow::anyhow!("failed to look up {path} at HEAD: {e}"))?
-    else {
-        return Ok(None);
-    };
-    if !entry.mode().is_blob() {
-        return Ok(None);
-    }
-    let blob = entry
-        .object()
-        .map_err(|e| anyhow::anyhow!("failed to read {path} at HEAD: {e}"))?;
-    Ok(Some(blob.data.clone()))
-}
-
-fn working_tree_file_equals(on_disk_path: &Path, expected: &[u8]) -> bool {
-    use std::io::Read;
-    let expected_len = expected.len() as u64;
-    let Ok(metadata) = std::fs::symlink_metadata(on_disk_path) else {
-        return false;
-    };
-    if !metadata.file_type().is_file() || metadata.len() != expected_len {
-        return false;
-    }
-    let Ok(file) = std::fs::File::open(on_disk_path) else {
-        return false;
-    };
-    let mut on_disk = Vec::with_capacity(expected.len());
-    file.take(expected_len + 1)
-        .read_to_end(&mut on_disk)
-        .is_ok()
-        && on_disk == expected
-}
-
-fn handle_blame_snapshot<W: Write>(
-    path: &str,
-    repo_path: &Path,
-    argv: &[&str],
-    out: &mut W,
-) -> anyhow::Result<()> {
-    if !working_tree_matches_head(repo_path, path)? {
-        // Real git blames the working-tree file, attributing local lines to
-        // "Not Committed Yet" (or failing when it is absent); the HEAD
-        // snapshot would misreport both.
-        anyhow::bail!("{path} differs from HEAD on disk; real git blames the working tree");
-    }
-    // `git blame <path>` maps to get_file_snapshots for the whole file at HEAD.
-    let options = SnapshotOptions {
-        include_before: false,
-        include_after: true,
-        max_file_size_bytes: 100_000,
-        line_range: None,
-        include_diff_hunks: false,
-    };
-    let snapshots = build_snapshots(repo_path, "HEAD^", "HEAD", &[path.to_string()], &options)?;
-    let path_missing_at_head = snapshots
-        .files
-        .iter()
-        .any(|file| file.after.is_none() && file.error.is_none() && !file.is_binary);
-    if path_missing_at_head {
-        // Real git blame fails (exit 128) for a path absent at HEAD; decline so
-        // the caller gets git's own error and exit code, not an empty success.
-        anyhow::bail!("path {path} does not exist at HEAD");
-    }
-    write_with_hint(out, &snapshots, argv)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -750,38 +577,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn it_handles_blame_snapshot_and_returns_files_array() {
-        let (_dir, path) = init_repo_with_two_commits();
-        let classification = Classification::BlameSnapshot { path: "hello.txt" };
-        let mut out = Vec::new();
-        handle(&classification, &path, &[], &mut out).unwrap();
-
-        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        // build_snapshots returns a response with a "files" array.
-        assert!(
-            json.get("files").and_then(|f| f.as_array()).is_some(),
-            "expected 'files' array in blame output, got: {json}"
-        );
-    }
-
-    #[test]
-    fn it_declines_blame_snapshot_for_a_path_missing_at_head() {
-        let (_dir, path) = init_repo_with_two_commits();
-        let classification = Classification::BlameSnapshot {
-            path: "no-such-file.txt",
-        };
-        let mut out = Vec::new();
-
-        let result = handle(&classification, &path, &[], &mut out);
-
-        assert!(result.is_err(), "missing path must decline so git errors");
-        assert!(
-            out.is_empty(),
-            "nothing may be written for a declined blame"
-        );
-    }
-
     // --- Item 5: split_commit_message unit tests ---
 
     #[test]
@@ -927,14 +722,6 @@ mod tests {
         let (_dir, path) = init_repo_with_two_commits();
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
-
-        assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
-    }
-
-    #[test]
-    fn it_adds_the_hint_to_blame_snapshot_output() {
-        let (_dir, path) = init_repo_with_two_commits();
-        let classification = Classification::BlameSnapshot { path: "world.txt" };
 
         assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
     }

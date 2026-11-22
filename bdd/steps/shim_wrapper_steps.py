@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -264,6 +265,26 @@ def _parse_shim_command(command_str: str) -> list[str]:
 def step_run_shim_with_claudecode(context: Context, command: str) -> None:
     """Invoke the shim symlink as 'git' with CLAUDECODE=1 set."""
     _run_shim(context, _parse_shim_command(command), extra_env={"CLAUDECODE": "1"})
+
+
+@when('I run the shim as "{command}" with CLAUDECODE=1 and compare with real git')
+def step_run_shim_and_compare_with_real_git(context: Context, command: str) -> None:
+    """Invoke the shim with CLAUDECODE=1 and capture /usr/bin/git as the reference."""
+    args = _parse_shim_command(command)
+    _run_shim(context, args, extra_env={"CLAUDECODE": "1"})
+    # Passthrough execs the first non-shim `git` on PATH, so compare against
+    # that same binary rather than /usr/bin/git (their output can differ).
+    path_git = shutil.which("git", path=_clean_env().get("PATH"))
+    assert path_git, "no git on PATH to use as the parity reference"
+    context.reference = subprocess.run(  # noqa: S603
+        [path_git, *args],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
 
 
 @when('I run the shim as "{command}" with CLAUDECODE=1 and GIT_PRISM_INSIDE_SHIM=1')
