@@ -26,3 +26,8 @@ publish-jobs = ["homebrew"]
 # rewritten to use an `if !` conditional with a GitHub warning annotation).
 # Tells cargo-dist not to flag these edits as "out of date" in the plan step.
 allow-dirty = ["ci"]
+
+# GitHub retired the macos-14 runner that dist 0.31.0 picks by default for
+# aarch64-apple-darwin; the v0.11.0 release build failed on it (#397).
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

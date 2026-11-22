@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-11-21
+
+### Fixed
+
+- **Release binaries build again for Apple Silicon (aarch64-apple-darwin).** The v0.11.0 release workflow failed because GitHub no longer provides the `macos-14` runner that cargo-dist picks by default, so v0.11.0 shipped to crates.io only, with no GitHub Release binaries or Homebrew update. The build now runs on `macos-15`. 0.11.1 has the same code as 0.11.0. (#397)
+
 ## [0.11.0] — 2026-11-21
 
 ### Breaking
