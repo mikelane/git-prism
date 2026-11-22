@@ -2,11 +2,10 @@
 //!
 //! Each handler resolves the repository via `gix::discover`, calls the
 //! corresponding tool function, serialises the result to stdout, and returns
-//! `ExitCode::SUCCESS`.
+//! `Ok(())`.
 
 use std::io::Write;
 use std::path::Path;
-use std::process::ExitCode;
 
 use crate::git::reader::RepoReader;
 use crate::git::refs::RefRange;
@@ -17,56 +16,105 @@ use crate::tools::types::{
     CommitSignature, ShowCommitDetail, ShowDiffstat, ShowFileEntry, ShowManifestResponse,
 };
 use crate::tools::{
-    ContextOptions, ManifestOptions, SnapshotOptions, build_function_context_with_options,
-    build_snapshots, collect_all_history_pages, collect_all_manifest_pages,
+    ManifestOptions, collect_all_history_pages, collect_all_manifest_pages,
     collect_all_worktree_manifest_pages,
 };
 
 /// Dispatch a classified git command to the appropriate tool function and
-/// write the JSON result to `out`.  Returns `ExitCode::SUCCESS` on success
-/// or `ExitCode::FAILURE` on error.
+/// write the JSON result to `out`.
+///
+/// Errors are returned, never printed: the caller falls back to real git, so
+/// no shim text may reach stderr.  `argv` is the original git command line.
 pub(crate) fn handle<W: Write>(
     classification: &Classification<'_>,
     repo_path: &Path,
+    argv: &[&str],
     out: &mut W,
-) -> ExitCode {
-    match dispatch(classification, repo_path, out) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("git-prism shim: handler error: {e}");
-            ExitCode::FAILURE
-        }
+) -> anyhow::Result<()> {
+    dispatch(classification, repo_path, argv, out).inspect_err(|e| {
+        tracing::debug!(
+            error_kind = crate::privacy::classify_error_kind(&format!("{e:#}")),
+            error = %e,
+            "shim handler failed; falling back to real git"
+        );
+    })
+}
+
+const HINT_KEY: &str = "git_prism_hint";
+
+/// Write `value` as pretty JSON with a top-level hint telling the reader how
+/// to get the raw git output the shim replaced.  Shim-only: MCP and CLI
+/// output never pass through here.
+fn write_with_hint<W: Write, T: serde::Serialize>(
+    out: &mut W,
+    value: &T,
+    argv: &[&str],
+) -> anyhow::Result<()> {
+    let mut json = serde_json::to_value(value)?;
+    let raw_git_args = argv
+        .get(1..)
+        .unwrap_or_default()
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hint =
+        format!("git-prism structured output. For raw git output run: command git {raw_git_args}");
+    json.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("shim output is not a JSON object"))?
+        .insert(HINT_KEY.to_string(), serde_json::Value::String(hint));
+    serde_json::to_writer_pretty(out, &json)?;
+    Ok(())
+}
+
+/// POSIX-single-quote `arg` unless it is made only of characters no shell
+/// treats specially, so the hint can be pasted back as the same command.
+fn shell_quote(arg: &str) -> String {
+    let is_plain = |c: char| c.is_ascii_alphanumeric() || "_-./:=,@%+~".contains(c);
+    // A leading `=` triggers zsh `=cmd` path lookup. A `~` expands to the home
+    // directory at the start of a word and, in bash, after `=` or `:`, so it is
+    // plain only directly after an alphanumeric (`HEAD~1`).
+    let has_expanding_tilde = arg
+        .char_indices()
+        .any(|(i, c)| c == '~' && !arg[..i].ends_with(|prev: char| prev.is_ascii_alphanumeric()));
+    let needs_quoting =
+        arg.is_empty() || arg.starts_with('=') || has_expanding_tilde || !arg.chars().all(is_plain);
+    if needs_quoting {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    } else {
+        arg.to_string()
     }
 }
 
 fn dispatch<W: Write>(
     classification: &Classification<'_>,
     repo_path: &Path,
+    argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
     match classification {
-        Classification::Manifest { range } => handle_manifest(range, repo_path, out),
-        Classification::History { range } => handle_history(range, repo_path, out),
-        Classification::FunctionContext {
-            range,
-            pickaxe_term,
-        } => handle_function_context(*range, pickaxe_term, repo_path, out),
-        Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, out),
-        Classification::BlameSnapshot { path } => handle_blame_snapshot(path, repo_path, out),
+        Classification::Manifest { range } => handle_manifest(range, repo_path, argv, out),
+        Classification::History { range } => handle_history(range, repo_path, argv, out),
+        Classification::ShowSnapshot { sha } => handle_show_snapshot(sha, repo_path, argv, out),
         Classification::Passthrough => {
             anyhow::bail!("dispatch called with Passthrough — caller bug")
         }
     }
 }
 
-fn handle_manifest<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
+fn handle_manifest<W: Write>(
+    range: &str,
+    repo_path: &Path,
+    argv: &[&str],
+    out: &mut W,
+) -> anyhow::Result<()> {
     let options = ManifestOptions {
         include_patterns: vec![],
         exclude_patterns: vec![],
         include_function_analysis: false,
         max_response_tokens: Some(8192),
     };
-    let result = match parse_range(range) {
+    let manifest = match parse_range(range) {
         RefRange::CommitRange { base, head } => {
             collect_all_manifest_pages(repo_path, base, head, &options, 500)?
         }
@@ -74,11 +122,16 @@ fn handle_manifest<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyh
             collect_all_worktree_manifest_pages(repo_path, base, &options, 500)?
         }
     };
-    serde_json::to_writer_pretty(out, &result)?;
+    write_with_hint(out, &manifest, argv)?;
     Ok(())
 }
 
-fn handle_history<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
+fn handle_history<W: Write>(
+    range: &str,
+    repo_path: &Path,
+    argv: &[&str],
+    out: &mut W,
+) -> anyhow::Result<()> {
     let (base, head) = match parse_range(range) {
         RefRange::CommitRange { base, head } => (base, head),
         RefRange::WorktreeCompare { .. } => {
@@ -91,37 +144,23 @@ fn handle_history<W: Write>(range: &str, repo_path: &Path, out: &mut W) -> anyho
         include_function_analysis: true,
         max_response_tokens: None,
     };
-    let result = collect_all_history_pages(repo_path, base, head, &options, 500)?;
-    serde_json::to_writer_pretty(out, &result)?;
+    let history = collect_all_history_pages(repo_path, base, head, &options, 500)?;
+    write_with_hint(out, &history, argv)?;
     Ok(())
 }
 
-fn handle_function_context<W: Write>(
-    range: Option<&str>,
-    _pickaxe_term: &str,
+fn handle_show_snapshot<W: Write>(
+    sha: &str,
     repo_path: &Path,
+    argv: &[&str],
     out: &mut W,
 ) -> anyhow::Result<()> {
-    let effective_range = range.unwrap_or("HEAD~1..HEAD");
-    let (base, head) = match parse_range(effective_range) {
-        RefRange::CommitRange { base, head } => (base, head),
-        RefRange::WorktreeCompare { .. } => {
-            anyhow::bail!("function context requires a commit range")
-        }
-    };
-    let options = ContextOptions {
-        cursor: None,
-        page_size: 25,
-        function_names: None,
-        max_response_tokens: Some(8192),
-    };
-    let result = build_function_context_with_options(repo_path, base, head, &options)?;
-    serde_json::to_writer_pretty(out, &result)?;
-    Ok(())
-}
-
-fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> anyhow::Result<()> {
     let commit = build_show_commit_detail(repo_path, sha)?;
+    if commit.parents.len() > 1 {
+        // Real git shows a combined diff for a merge commit; a first-parent
+        // manifest would list files git omits. Decline so git answers.
+        anyhow::bail!("{sha} is a merge commit; real git shows a combined diff");
+    }
 
     let files: Vec<ShowFileEntry> = if commit.parents.is_empty() {
         // Root commit: no parent, so `<sha>^` doesn't resolve.  Walk the
@@ -172,14 +211,14 @@ fn handle_show_snapshot<W: Write>(sha: &str, repo_path: &Path, out: &mut W) -> a
         deletions,
     };
 
-    let mut result = ShowManifestResponse {
+    let mut show_response = ShowManifestResponse {
         commit,
         diffstat,
         files,
         token_estimate: 0,
     };
-    result.token_estimate = estimate_response_tokens(&result);
-    serde_json::to_writer_pretty(out, &result)?;
+    show_response.token_estimate = estimate_response_tokens(&show_response);
+    write_with_hint(out, &show_response, argv)?;
     Ok(())
 }
 
@@ -288,24 +327,6 @@ fn split_commit_message(message: &str) -> (String, Option<String>) {
     (subject, body)
 }
 
-fn handle_blame_snapshot<W: Write>(
-    path: &str,
-    repo_path: &Path,
-    out: &mut W,
-) -> anyhow::Result<()> {
-    // `git blame <path>` maps to get_file_snapshots for the whole file at HEAD.
-    let options = SnapshotOptions {
-        include_before: false,
-        include_after: true,
-        max_file_size_bytes: 100_000,
-        line_range: None,
-        include_diff_hunks: false,
-    };
-    let result = build_snapshots(repo_path, "HEAD^", "HEAD", &[path.to_string()], &options)?;
-    serde_json::to_writer_pretty(out, &result)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -362,8 +383,7 @@ mod tests {
             range: "HEAD~1..HEAD",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
@@ -379,8 +399,7 @@ mod tests {
             range: "HEAD~1..HEAD",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
@@ -395,8 +414,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // build_snapshots returns a response with a "files" array.
@@ -412,8 +430,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let commit = json
@@ -457,7 +474,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let commit_sha = json["commit"]["sha"].as_str().unwrap();
         assert_eq!(commit_sha.len(), 40, "sha must be 40 hex chars");
@@ -475,7 +492,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         // The fixture commits "second commit" as HEAD.
         assert_eq!(json["commit"]["subject"].as_str().unwrap(), "second commit");
@@ -492,7 +509,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let parents = json["commit"]["parents"].as_array().unwrap();
         assert_eq!(
@@ -513,7 +530,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let epoch = json["commit"]["author"]["date_epoch"].as_i64().unwrap();
         assert!(epoch > 0, "date_epoch must be a positive unix timestamp");
@@ -525,7 +542,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let committer = &json["commit"]["committer"];
         // Exact-value assertions — the fixture sets user.name=Test, user.email=test@test.com.
@@ -550,29 +567,13 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        handle(&classification, &path, &mut out);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let files_changed = json["diffstat"]["files_changed"].as_u64().unwrap();
         let files_count = json["files"].as_array().unwrap().len() as u64;
         assert_eq!(
             files_changed, files_count,
             "diffstat.files_changed must equal files array length"
-        );
-    }
-
-    #[test]
-    fn it_handles_blame_snapshot_and_returns_files_array() {
-        let (_dir, path) = init_repo_with_two_commits();
-        let classification = Classification::BlameSnapshot { path: "hello.txt" };
-        let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
-
-        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        // build_snapshots returns a response with a "files" array.
-        assert!(
-            json.get("files").and_then(|f| f.as_array()).is_some(),
-            "expected 'files' array in blame output, got: {json}"
         );
     }
 
@@ -656,8 +657,7 @@ mod tests {
         let sha = head_sha(&path);
         let classification = Classification::ShowSnapshot { sha: &sha };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &[], &mut out).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(
             json["commit"]["subject"].as_str().unwrap(),
@@ -682,22 +682,68 @@ mod tests {
     }
 
     #[test]
-    fn it_handles_function_context_and_returns_functions_key() {
+    fn it_adds_a_raw_git_hint_to_intercepted_json() {
         let (_dir, path) = init_repo_with_two_commits();
-        let classification = Classification::FunctionContext {
-            range: Some("HEAD~1..HEAD"),
-            pickaxe_term: "hello",
+        let classification = Classification::Manifest {
+            range: "HEAD~1..HEAD",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(code, ExitCode::SUCCESS);
+        handle(&classification, &path, &["git", "diff", "A..B"], &mut out).unwrap();
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        // build_function_context_with_options returns a response with a "functions" array.
-        assert!(
-            json.get("functions").is_some(),
-            "expected 'functions' key in function_context output, got: {json}"
+        assert_eq!(
+            json["git_prism_hint"],
+            "git-prism structured output. For raw git output run: command git diff A..B"
         );
+    }
+
+    const LOG_P_HINT: &str =
+        "git-prism structured output. For raw git output run: command git log -p";
+
+    fn hint_for(classification: &Classification<'_>, path: &Path) -> serde_json::Value {
+        let mut out = Vec::new();
+        handle(classification, path, &["git", "log", "-p"], &mut out).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        json["git_prism_hint"].clone()
+    }
+
+    #[test]
+    fn it_adds_the_hint_to_history_output() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let classification = Classification::History {
+            range: "HEAD~1..HEAD",
+        };
+
+        assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
+    }
+
+    #[test]
+    fn it_adds_the_hint_to_show_snapshot_output() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let sha = head_sha(&path);
+        let classification = Classification::ShowSnapshot { sha: &sha };
+
+        assert_eq!(hint_for(&classification, &path), LOG_P_HINT);
+    }
+
+    #[test]
+    fn it_leaves_tool_output_without_a_hint() {
+        let (_dir, path) = init_repo_with_two_commits();
+        let result = collect_all_manifest_pages(
+            &path,
+            "HEAD~1",
+            "HEAD",
+            &ManifestOptions {
+                include_patterns: vec![],
+                exclude_patterns: vec![],
+                include_function_analysis: false,
+                max_response_tokens: Some(8192),
+            },
+            500,
+        )
+        .unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json.get("git_prism_hint").is_none());
     }
 
     #[test]
@@ -716,12 +762,8 @@ mod tests {
 
         let classification = Classification::ShowSnapshot { sha: "v1.0" };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(
-            code,
-            ExitCode::SUCCESS,
-            "handle should exit SUCCESS for annotated tag, got non-zero"
-        );
+        handle(&classification, &path, &[], &mut out)
+            .expect("handle should succeed for annotated tag");
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
@@ -761,23 +803,21 @@ mod tests {
         let target_sha = head_sha(&path);
 
         let mut out_tag = Vec::new();
-        assert_eq!(
-            handle(
-                &Classification::ShowSnapshot { sha: "v1.0" },
-                &path,
-                &mut out_tag
-            ),
-            ExitCode::SUCCESS
-        );
+        handle(
+            &Classification::ShowSnapshot { sha: "v1.0" },
+            &path,
+            &[],
+            &mut out_tag,
+        )
+        .unwrap();
         let mut out_sha = Vec::new();
-        assert_eq!(
-            handle(
-                &Classification::ShowSnapshot { sha: &target_sha },
-                &path,
-                &mut out_sha
-            ),
-            ExitCode::SUCCESS
-        );
+        handle(
+            &Classification::ShowSnapshot { sha: &target_sha },
+            &path,
+            &[],
+            &mut out_sha,
+        )
+        .unwrap();
 
         let json_tag: serde_json::Value = serde_json::from_slice(&out_tag).unwrap();
         let json_sha: serde_json::Value = serde_json::from_slice(&out_sha).unwrap();
@@ -816,12 +856,8 @@ mod tests {
             range: "v0.1..v0.2",
         };
         let mut out = Vec::new();
-        let code = handle(&classification, &path, &mut out);
-        assert_eq!(
-            code,
-            ExitCode::SUCCESS,
-            "manifest over annotated tag range must exit SUCCESS"
-        );
+        handle(&classification, &path, &[], &mut out)
+            .expect("manifest over annotated tag range must succeed");
 
         let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
         let files = json
@@ -844,5 +880,33 @@ mod tests {
         );
 
         drop(dir);
+    }
+
+    #[test]
+    fn it_leaves_plain_arguments_unquoted() {
+        let args = ["diff", "HEAD~1..HEAD", "--name-only", "src/a_b.rs", "a=b,c"];
+        assert_eq!(args.map(shell_quote), args.map(String::from));
+    }
+
+    #[test]
+    fn it_single_quotes_arguments_a_shell_would_split_or_expand() {
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("~/x"), "'~/x'");
+        assert_eq!(shell_quote("HEAD^"), "'HEAD^'");
+        assert_eq!(shell_quote("$(rm -rf x)"), "'$(rm -rf x)'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn it_single_quotes_a_tilde_that_bash_expands_after_an_equals_sign_or_colon() {
+        let args = ["k=~", "a:~", "x=~/y", "~", "a..~"];
+        assert_eq!(args.map(shell_quote), args.map(|arg| format!("'{arg}'")));
+    }
+
+    #[test]
+    fn it_single_quotes_every_character_that_expands_at_the_start_of_a_word() {
+        let args = ["=ls", "~user", "{a,b}", "!!", "#x", "*.rs", "?x", "[ab]"];
+        assert_eq!(args.map(shell_quote), args.map(|arg| format!("'{arg}'")));
     }
 }

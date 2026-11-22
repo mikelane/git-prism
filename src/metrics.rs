@@ -41,7 +41,6 @@ pub enum ShimSubcommand {
     Diff,
     Log,
     Show,
-    Blame,
     Other,
 }
 
@@ -52,7 +51,6 @@ impl ShimSubcommand {
             Self::Diff => "diff",
             Self::Log => "log",
             Self::Show => "show",
-            Self::Blame => "blame",
             Self::Other => "other",
         }
     }
@@ -481,7 +479,6 @@ mod tests {
         assert_eq!(ShimSubcommand::Diff.as_str(), "diff");
         assert_eq!(ShimSubcommand::Log.as_str(), "log");
         assert_eq!(ShimSubcommand::Show.as_str(), "show");
-        assert_eq!(ShimSubcommand::Blame.as_str(), "blame");
         assert_eq!(ShimSubcommand::Other.as_str(), "other");
     }
 

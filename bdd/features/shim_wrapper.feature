@@ -37,14 +37,14 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the output is valid JSON
     And the JSON output has a "files" array
+    And the JSON has key "git_prism_hint"
 
   @ISSUE-287
-  Scenario: Agent plus git diff with three-dot range produces JSON with files array
+  Scenario: Agent plus git diff with three-dot range passes through to real git
     Given a fixture git repository with two commits
     When I run the shim as "git diff HEAD~1...HEAD" with CLAUDECODE=1
     Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "files" array
+    And the output is not JSON
 
   @ISSUE-287
   Scenario: Agent plus git log with two-dot range produces JSON with commits array
@@ -54,21 +54,26 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "commits" array
 
-  @ISSUE-287
-  Scenario: Agent plus git log with pickaxe flag produces function_context JSON
+  @ISSUE-387
+  Scenario: Agent plus git log with three-dot range passes through to real git
+    Given a fixture git repository with two commits
+    When I run the shim as "git log HEAD~1...HEAD" with CLAUDECODE=1
+    Then the exit code is 0
+    And the output is not JSON
+
+  @ISSUE-387
+  Scenario: Agent plus git log with pickaxe flag passes through to real git
     Given a fixture git repository with two commits
     When I run the shim as "git log -Sfoo" with CLAUDECODE=1
     Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "function_context" shape
+    And the output is not JSON
 
-  @ISSUE-287
-  Scenario: Pickaxe flag takes priority over log range — both present yields function_context
+  @ISSUE-387
+  Scenario: Agent plus git log with pickaxe flag and range passes through to real git
     Given a fixture git repository with two commits
     When I run the shim as "git log -Sfoo HEAD~1..HEAD" with CLAUDECODE=1
     Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "function_context" shape
+    And the output is not JSON
 
   @ISSUE-287
   Scenario: Agent plus git show produces JSON with snapshots key
@@ -78,13 +83,12 @@ Feature: PATH-shim wrapper for structured git output
     And the output is valid JSON
     And the JSON output has a "snapshots" key
 
-  @ISSUE-287
-  Scenario: Agent plus git blame produces JSON with snapshots key
+  # Structured blame was removed in #387 and is tracked in #388 (@ISSUE-388).
+  @ISSUE-387
+  Scenario: Agent plus git blame passes through to real git output
     Given a fixture git repository with two commits and a tracked file
-    When I run the shim as "git blame README.md" with CLAUDECODE=1
-    Then the exit code is 0
-    And the output is valid JSON
-    And the JSON output has a "snapshots" key
+    When I run the shim as "git blame README.md" with CLAUDECODE=1 and compare with real git
+    Then the output equals real git's output and the exit codes match
 
   @ISSUE-287
   Scenario: Agent plus git status passes through to real git output
@@ -142,14 +146,14 @@ Feature: PATH-shim wrapper for structured git output
     And the output contains "diff --git"
 
   @ISSUE-287
-  Scenario: Shim sets GIT_PRISM_INSIDE_SHIM=1 in the child process environment
-    # Verifies the sentinel propagation: the real git invoked by the shim
-    # must run with GIT_PRISM_INSIDE_SHIM=1 set so nested git calls inside
-    # lefthook/cargo/etc. never re-enter structured-JSON mode.
+  Scenario: Shim does not leak GIT_PRISM_INSIDE_SHIM into the child process environment
+    # Real git's children (hooks, aliases, editors) must see an unmodified
+    # environment. Recursion is prevented by the resolver skipping git-prism
+    # binaries, not by an inherited sentinel.
     Given a fixture git repository with two commits
     And an env-dumper script that captures the child environment
     When I run the shim as "git" pointing at the env-dumper with CLAUDECODE=1
-    Then the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"
+    Then the env-dumper output does not contain "GIT_PRISM_INSIDE_SHIM"
 
   @ISSUE-299
   Scenario: Real-git resolver skips the shim directory when walking PATH
@@ -165,73 +169,65 @@ Feature: PATH-shim wrapper for structured git output
     Then the resolved real-git binary path does not live in the shim directory
 
   # -------------------------------------------------------------------------
-  # Hooks install/uninstall/status scenarios (#288)
+  # Hooks install/uninstall/status scenarios (#288, reworked for #387)
   #
-  # git-prism hooks install --path-shim creates a symlink at
-  # ~/.local/share/git-prism/bin/git pointing at the running git-prism binary.
-  # Operations use a tempdir HOME for isolation.
+  # git-prism hooks install --path-shim is a deprecated alias for
+  # `git-prism shim install`: it writes the rc `git` function block (no
+  # symlink, no PATH change). Operations use a tempdir HOME for isolation.
   # -------------------------------------------------------------------------
 
-  @ISSUE-288
-  Scenario: hooks install --path-shim creates the symlink in an isolated HOME
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks install --path-shim writes the function block in an isolated HOME
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the path "$HOME/.local/share/git-prism/bin/git" is a symlink
+    And the path "$HOME/.zshrc" contains "function git {"
+    And the path "$HOME/.local/share/git-prism/bin/git" does not exist
 
-  @ISSUE-288
-  Scenario: hooks install --path-shim prints the PATH update instruction
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks install --path-shim tells the user to restart the agent session
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the output contains "PATH"
-    And the output contains ".local/share/git-prism/bin"
+    And the output contains "Restart your agent session"
 
-  @ISSUE-302
-  Scenario: hooks install --path-shim prints the symlink path
+  @ISSUE-302 @ISSUE-387
+  Scenario: hooks install --path-shim names the rc file it wrote
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the output contains "Created symlink:"
+    And the output contains "~/.zshrc"
 
-  @ISSUE-288
+  @ISSUE-288 @ISSUE-387
   Scenario: hooks install --path-shim is idempotent
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     And I run "git-prism hooks install --path-shim" with the isolated HOME again
     Then the exit code is 0
-    And the path "$HOME/.local/share/git-prism/bin/git" is a symlink
+    And the path "$HOME/.zshrc" contains "function git {"
 
-  @ISSUE-288
-  Scenario: hooks status reports path-shim as present after install
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks status reports the shim as installed after install
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     And I run "git-prism hooks status" with the isolated HOME
     Then the exit code is 0
-    And the hooks status output mentions "path-shim"
+    And the output contains "shim: installed in ~/.zshrc"
 
-  @ISSUE-288
-  Scenario: hooks status reports path-shim as absent before install
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks status reports the shim as absent before install
     Given an isolated HOME directory
     When I run "git-prism hooks status" with the isolated HOME
     Then the exit code is 0
-    And the hooks status output indicates path-shim is not installed
+    And the output contains "shim: not installed"
 
-  @ISSUE-288
-  Scenario: hooks uninstall --path-shim removes the symlink
+  @ISSUE-288 @ISSUE-387
+  Scenario: hooks uninstall --path-shim removes the function block
     Given an isolated HOME directory
     When I run "git-prism hooks install --path-shim" with the isolated HOME
     And I run "git-prism hooks uninstall --path-shim" with the isolated HOME
     Then the exit code is 0
-    And the path "$HOME/.local/share/git-prism/bin/git" does not exist
-
-  @ISSUE-288
-  Scenario: hooks uninstall --path-shim removes the parent directory when empty
-    Given an isolated HOME directory
-    When I run "git-prism hooks install --path-shim" with the isolated HOME
-    And I run "git-prism hooks uninstall --path-shim" with the isolated HOME
-    Then the exit code is 0
-    And the directory "$HOME/.local/share/git-prism/bin" does not exist
+    And the path "$HOME/.zshrc" does not contain "function git {"
 
   # -------------------------------------------------------------------------
   # Blob/object-spec passthrough (#381)
@@ -257,3 +253,23 @@ Feature: PATH-shim wrapper for structured git output
     Then the exit code is 0
     And the output is valid JSON
     And the JSON output has a "snapshots" key
+
+  # -------------------------------------------------------------------------
+  # shim-run entry point and pure-passthrough symlink (#387)
+  #
+  # Interception is reachable only through `git-prism shim-run git ...`, which
+  # an interactive rc shell function calls. A binary invoked as git/gh (stale
+  # symlink on PATH) never intercepts.
+  # -------------------------------------------------------------------------
+
+  @ISSUE-387
+  Scenario: A program that runs git through a stale git symlink gets real git output
+    Given a fixture git repository with two commits
+    When a program runs "git diff -M --no-color --no-ext-diff HEAD~1..HEAD" through the stale git symlink with CLAUDECODE=1
+    Then the output equals real git's output and the exit codes match
+
+  @ISSUE-387
+  Scenario: shim-run with stdout redirected to a file writes real git output
+    Given a fixture git repository with two commits
+    When I run shim-run as "git diff HEAD~1..HEAD" with CLAUDECODE=1 and stdout redirected to a file
+    Then the output equals real git's output and the exit codes match

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -93,16 +94,46 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
+def _isolated_home_env(context: Context) -> dict[str, str]:
+    """Return a copy of os.environ with HOME pointed at context.isolated_home.
+
+    SHELL is pinned to zsh so install targets ~/.zshrc regardless of the
+    runner's ambient shell (/bin/bash on GitHub Actions).
+    """
+    env = os.environ.copy()
+    env["HOME"] = str(context.isolated_home)
+    env["SHELL"] = "/bin/zsh"
+    return env
+
+
+def _run_real_git(
+    context: Context, args: list[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run /usr/bin/git with agent env vars stripped, as the parity reference."""
+    return subprocess.run(  # noqa: S603
+        ["/usr/bin/git", *args],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+
+
 def _run_shim(
     context: Context,
     args: list[str],
     extra_env: dict[str, str] | None = None,
 ) -> None:
-    """Invoke the shim symlink (as 'git') with a controlled environment.
+    """Invoke ``git-prism shim-run git <args>`` with a controlled environment.
 
-    Prepends the shim directory to PATH so that 'git' resolves to the shim.
-    Strips all known agent env vars first, then applies extra_env on top.
+    ``shim-run`` is the entry point the rc shell function calls (#387). A
+    stale shim directory still sits first on PATH so the real-git resolver
+    must skip it. Strips all known agent env vars first, then applies
+    extra_env on top.
     """
+    binary = _find_binary(context)
     shim_dir = _build_shim_dir(context)
     env = _clean_env()
     env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
@@ -110,7 +141,7 @@ def _run_shim(
         env.update(extra_env)
 
     context.result = subprocess.run(  # noqa: S603
-        ["git"] + args,
+        [str(binary), "shim-run", "git", *args],
         capture_output=True,
         text=True,
         env=env,
@@ -236,6 +267,26 @@ def step_run_shim_with_claudecode(context: Context, command: str) -> None:
     _run_shim(context, _parse_shim_command(command), extra_env={"CLAUDECODE": "1"})
 
 
+@when('I run the shim as "{command}" with CLAUDECODE=1 and compare with real git')
+def step_run_shim_and_compare_with_real_git(context: Context, command: str) -> None:
+    """Invoke the shim with CLAUDECODE=1 and capture /usr/bin/git as the reference."""
+    args = _parse_shim_command(command)
+    _run_shim(context, args, extra_env={"CLAUDECODE": "1"})
+    # Passthrough execs the first non-shim `git` on PATH, so compare against
+    # that same binary rather than /usr/bin/git (their output can differ).
+    path_git = shutil.which("git", path=_clean_env().get("PATH"))
+    assert path_git, "no git on PATH to use as the parity reference"
+    context.reference = subprocess.run(  # noqa: S603
+        [path_git, *args],
+        capture_output=True,
+        text=True,
+        env=_clean_env(),
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+
+
 @when('I run the shim as "{command}" with CLAUDECODE=1 and GIT_PRISM_INSIDE_SHIM=1')
 def step_run_shim_with_both_flags(context: Context, command: str) -> None:
     """Invoke the shim with both CLAUDECODE=1 and GIT_PRISM_INSIDE_SHIM=1."""
@@ -276,7 +327,7 @@ def step_run_shim_with_env_dumper(context: Context) -> None:
     env["CLAUDECODE"] = "1"
 
     context.result = subprocess.run(  # noqa: S603
-        ["git"],
+        [str(_find_binary(context)), "shim-run", "git"],
         capture_output=True,
         text=True,
         env=env,
@@ -286,12 +337,71 @@ def step_run_shim_with_env_dumper(context: Context) -> None:
     )
 
 
+@when('a program runs "{command}" through the stale git symlink with CLAUDECODE=1')
+def step_program_runs_git_via_symlink(context: Context, command: str) -> None:
+    """Run git via the legacy symlink; the binary must behave as pure passthrough."""
+    shim_dir = _build_shim_dir(context)
+    env = _clean_env()
+    env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
+    env["CLAUDECODE"] = "1"
+    args = _parse_shim_command(command)
+    context.result = subprocess.run(  # noqa: S603
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=context.repo_path,
+        check=False,
+        timeout=_SHIM_TIMEOUT_SECONDS,
+    )
+    context.reference = _run_real_git(context, args)
+
+
+@when('I run shim-run as "{command}" with CLAUDECODE=1 and stdout redirected to a file')
+def step_shim_run_stdout_to_file(context: Context, command: str) -> None:
+    """Run shim-run with stdout redirected to a regular file."""
+    binary = _find_binary(context)
+    env = _clean_env()
+    env["CLAUDECODE"] = "1"
+    args = _parse_shim_command(command)
+    out_path = Path(tempfile.mkdtemp()) / "out.txt"
+    context.cleanup_dirs.append(str(out_path.parent))
+    with out_path.open("wb") as out:
+        completed = subprocess.run(  # noqa: S603
+            [str(binary), "shim-run", "git", *args],
+            stdout=out,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=context.repo_path,
+            check=False,
+            timeout=_SHIM_TIMEOUT_SECONDS,
+        )
+    context.result = subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        out_path.read_text(),
+        completed.stderr.decode(),
+    )
+    context.reference = _run_real_git(context, args)
+
+
+@then("the output equals real git's output and the exit codes match")
+def step_output_equals_real_git(context: Context) -> None:
+    """Assert byte-for-byte stdout and exit-code parity with /usr/bin/git."""
+    assert context.result.stdout == context.reference.stdout, (
+        f"stdout differs from real git.\nshim: {context.result.stdout[:300]!r}\n"
+        f"git: {context.reference.stdout[:300]!r}"
+    )
+    assert context.result.returncode == context.reference.returncode, (
+        f"exit code {context.result.returncode} != {context.reference.returncode}"
+    )
+
+
 @when('I run "git-prism hooks install --path-shim" with the isolated HOME')
 def step_hooks_install_path_shim(context: Context) -> None:
     """Run hooks install --path-shim with the isolated HOME directory."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "install", "--path-shim"],
@@ -307,8 +417,7 @@ def step_hooks_install_path_shim(context: Context) -> None:
 def step_hooks_install_path_shim_again(context: Context) -> None:
     """Run hooks install --path-shim a second time (idempotency check)."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "install", "--path-shim"],
@@ -324,8 +433,7 @@ def step_hooks_install_path_shim_again(context: Context) -> None:
 def step_hooks_uninstall_path_shim(context: Context) -> None:
     """Run hooks uninstall --path-shim with the isolated HOME directory."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "uninstall", "--path-shim"],
@@ -341,8 +449,7 @@ def step_hooks_uninstall_path_shim(context: Context) -> None:
 def step_hooks_status_with_isolated_home(context: Context) -> None:
     """Run hooks status with the isolated HOME directory."""
     binary = _find_binary(context)
-    env = os.environ.copy()
-    env["HOME"] = str(context.isolated_home)
+    env = _isolated_home_env(context)
 
     context.result = subprocess.run(  # noqa: S603
         [str(binary), "hooks", "status"],
@@ -415,20 +522,6 @@ def step_json_has_commits_array(context: Context) -> None:
     )
 
 
-@then('the JSON output has a "function_context" shape')
-def step_json_has_function_context(context: Context) -> None:
-    """Assert the JSON output has the function-context wire shape.
-
-    build_function_context_with_options returns {"functions": [...], ...}.
-    The Gherkin step says "function_context shape" as a semantic label;
-    the actual top-level key in the JSON response is "functions".
-    """
-    data = _parse_result_json(context)
-    assert isinstance(data, dict) and isinstance(data.get("functions"), list), (
-        f"Expected JSON with 'functions' list (function_context shape), got: {str(data)[:500]}"
-    )
-
-
 @then('the JSON output has a "snapshots" key')
 def step_json_has_snapshots_key(context: Context) -> None:
     """Assert the JSON output has the snapshot wire shape.
@@ -468,9 +561,9 @@ def step_new_commit_exists(context: Context) -> None:
     )
 
 
-@then('the env-dumper output contains "GIT_PRISM_INSIDE_SHIM=1"')
-def step_env_dumper_contains_sentinel(context: Context) -> None:
-    """Assert the env-dumper output file records GIT_PRISM_INSIDE_SHIM=1."""
+@then('the env-dumper output does not contain "GIT_PRISM_INSIDE_SHIM"')
+def step_env_dumper_lacks_sentinel(context: Context) -> None:
+    """Assert the env-dumper output file has no GIT_PRISM_INSIDE_SHIM entry."""
     dumper_file = Path(context.dumper_output_file)
     assert dumper_file.exists(), (
         f"Env-dumper output file does not exist: {dumper_file}\n"
@@ -478,8 +571,8 @@ def step_env_dumper_contains_sentinel(context: Context) -> None:
         f"shim stderr: {context.result.stderr}"
     )
     contents = dumper_file.read_text()
-    assert "GIT_PRISM_INSIDE_SHIM=1" in contents, (
-        f"GIT_PRISM_INSIDE_SHIM=1 not found in env-dumper output:\n{contents}"
+    assert "GIT_PRISM_INSIDE_SHIM" not in contents, (
+        f"GIT_PRISM_INSIDE_SHIM leaked into the env-dumper output:\n{contents}"
     )
 
 
@@ -510,17 +603,6 @@ def step_real_git_not_in_shim_dir(context: Context) -> None:
     )
 
 
-@then('the path "$HOME/{rel_path}" is a symlink')
-def step_path_is_symlink(context: Context, rel_path: str) -> None:
-    """Assert that $HOME/<rel_path> is a symlink (using the isolated HOME)."""
-    target = context.isolated_home / rel_path
-    assert target.is_symlink(), (
-        f"Expected {target} to be a symlink, but it does not exist or is not a symlink.\n"
-        f"stdout: {context.result.stdout}\n"
-        f"stderr: {context.result.stderr}"
-    )
-
-
 @then('the path "$HOME/{rel_path}" does not exist')
 def step_path_does_not_exist(context: Context, rel_path: str) -> None:
     """Assert that $HOME/<rel_path> does not exist."""
@@ -532,24 +614,21 @@ def step_path_does_not_exist(context: Context, rel_path: str) -> None:
     )
 
 
-@then('the directory "$HOME/{rel_path}" does not exist')
-def step_directory_does_not_exist(context: Context, rel_path: str) -> None:
-    """Assert that $HOME/<rel_path> directory does not exist."""
+@then('the path "$HOME/{rel_path}" contains "{text}"')
+def step_path_contains(context: Context, rel_path: str, text: str) -> None:
+    """Assert that the file $HOME/<rel_path> exists and contains text."""
     target = context.isolated_home / rel_path
-    assert not target.exists(), (
-        f"Expected directory {target} to not exist, but it does.\n"
-        f"stdout: {context.result.stdout}\n"
-        f"stderr: {context.result.stderr}"
-    )
+    assert target.exists(), f"Expected {target} to exist.\nstderr: {context.result.stderr}"
+    content = target.read_text()
+    assert text in content, f"Expected {target} to contain {text!r}.\nContents:\n{content}"
 
 
-@then('the hooks status output mentions "path-shim"')
-def step_hooks_status_mentions_path_shim(context: Context) -> None:
-    """Assert the hooks status output contains the text 'path-shim'."""
-    full_output = context.result.stdout + context.result.stderr
-    assert "path-shim" in full_output, (
-        f"'path-shim' not found in hooks status output:\n{full_output}"
-    )
+@then('the path "$HOME/{rel_path}" does not contain "{text}"')
+def step_path_does_not_contain(context: Context, rel_path: str, text: str) -> None:
+    """Assert that $HOME/<rel_path> is absent or does not contain text."""
+    target = context.isolated_home / rel_path
+    content = target.read_text() if target.exists() else ""
+    assert text not in content, f"Expected {target} not to contain {text!r}.\nContents:\n{content}"
 
 
 @then("the output does not contain the handler error marker")
@@ -564,29 +643,4 @@ def step_output_no_handler_error(context: Context) -> None:
     stderr = context.result.stderr or ""
     assert error_marker not in stderr, (
         f"Unexpected handler error in shim stderr:\n{stderr}"
-    )
-
-
-@then("the hooks status output indicates path-shim is not installed")
-def step_hooks_status_not_installed(context: Context) -> None:
-    """Assert the hooks status output reports path-shim as not installed.
-
-    Requires both ``path-shim`` and a not-installed phrase on the same
-    line so the existing bash-redirect-hook's ``not installed`` message
-    can't trigger a false GREEN before the implementation lands.
-    """
-    full_output = context.result.stdout + context.result.stderr
-    path_shim_lines = [
-        line for line in full_output.splitlines() if "path-shim" in line.lower()
-    ]
-    assert path_shim_lines, (
-        f"Expected a line mentioning 'path-shim' in hooks status output, "
-        f"got:\n{full_output}"
-    )
-    assert any(
-        "not installed" in line.lower() or "absent" in line.lower()
-        for line in path_shim_lines
-    ), (
-        f"Expected a 'path-shim' line indicating it is not installed; "
-        f"matching lines were: {path_shim_lines!r}"
     )

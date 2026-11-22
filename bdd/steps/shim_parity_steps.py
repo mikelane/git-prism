@@ -4,7 +4,7 @@ Covers:
   @ISSUE-322 -- Windows passthrough parity (spawn+wait exit code + I/O)
   @ISSUE-323 -- gh CLI interception via shim symlink
   @ISSUE-324 -- git-prism shim install|uninstall|status subcommand
-  @ISSUE-325 -- auto-PATH setup UX during shim install
+  @ISSUE-325 -- auto-PATH setup UX (superseded by the rc function, #387)
   @ISSUE-326 -- redirect hook deprecation and removal
 
 All steps shell out to the real compiled git-prism binary or to symlinks in
@@ -21,9 +21,7 @@ Platform note for @ISSUE-322:
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -45,9 +43,10 @@ from shim_wrapper_steps import (
 # ---------------------------------------------------------------------------
 
 _SHIM_DIR_RELATIVE = ".local/share/git-prism/bin"
-_SHIM_EXPORT_FRAGMENT = ".local/share/git-prism/bin"
 
-_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+# Delimiters of the managed block that shim install writes to an rc file.
+_SHIM_BLOCK_START_MARKER = "# >>> git-prism shim >>>"
+_SHIM_BLOCK_END_MARKER = "# <<< git-prism shim <<<"
 
 
 def _install_stub_gh(context: Context, script: str) -> Path:
@@ -95,6 +94,9 @@ def _isolated_env(context: Context) -> dict[str, str]:
     """Return env dict with HOME overridden to context.isolated_home."""
     env = os.environ.copy()
     env["HOME"] = str(context.isolated_home)
+    # Pin SHELL to zsh so install always targets ~/.zshrc, regardless of the
+    # CI runner's ambient $SHELL (/bin/bash on GitHub Actions).
+    env["SHELL"] = "/bin/zsh"
     return env
 
 
@@ -125,26 +127,23 @@ def step_create_rc_file(context: Context, rel_path: str) -> None:
     context.rc_path_initial_content = rc_path.read_text()
 
 
-@given("the shim directory is not in PATH")
-def step_shim_dir_not_in_path(context: Context) -> None:
-    """Assert that the shim dir is absent from PATH (it always is in a fresh isolated HOME)."""
-    shim_dir = str(_shim_dir_path(context))
-    current_path = os.environ.get("PATH", "")
-    assert shim_dir not in current_path, (
-        f"Shim directory {shim_dir!r} is already in PATH. "
-        "This step requires a fresh isolated HOME where the shim is not installed."
-    )
+@given("a legacy PATH shim is installed under HOME")
+def step_legacy_path_shim(context: Context) -> None:
+    """Seed the artifacts an earlier release left behind.
 
-
-@given("the shim directory is already in PATH")
-def step_shim_dir_already_in_path(context: Context) -> None:
-    """Inject the shim dir into PATH for this scenario.
-
-    Stores the modified PATH in context so the When step can inject it.
+    Those are the git/gh symlinks in the shim directory and a PATH block in
+    .zshenv.
     """
-    shim_dir_path = _shim_dir_path(context)
-    shim_dir_path.mkdir(parents=True, exist_ok=True)
-    context.injected_path = f"{shim_dir_path}:{os.environ.get('PATH', '')}"
+    shim_dir = _shim_dir_path(context)
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("git", "gh"):
+        (shim_dir / name).symlink_to("/nonexistent/git-prism")
+    zshenv = context.isolated_home / ".zshenv"
+    zshenv.write_text(
+        f"{_SHIM_BLOCK_START_MARKER}\n"
+        'PATH="$HOME/.local/share/git-prism/bin:$PATH"\n'
+        f"{_SHIM_BLOCK_END_MARKER}\n"
+    )
 
 
 @given("the shim is installed with a \"gh\" symlink")
@@ -159,50 +158,6 @@ def step_shim_installed_with_gh_symlink(context: Context) -> None:
     gh_link.symlink_to(binary)
     context.gh_shim_dir = shim_dir
     context.gh_shim_link = gh_link
-
-
-@given("a stub gh binary is installed that knows the fixture PR SHAs")
-def step_stub_gh_with_pr_shas(context: Context) -> None:
-    """Create a stub gh script that returns fixture repo commit SHAs for pr view.
-
-    The stub lives in its own tempdir/bin directory (separate from the shim dir)
-    so PATH ordering controls which 'gh' wins: stub_gh_dir must come before
-    gh_shim_dir so that when the shim (argv0=gh) calls Command::new("gh") to
-    resolve the PR range, it hits this stub — not a recursive shim invocation.
-
-    The stub handles:
-      pr view <N> --json baseRefOid,headRefOid  -> fixture base..head SHAs
-      anything else                             -> exit 0, empty output
-    """
-    repo_path = context.repo_path
-    # Capture the two commit SHAs from the fixture repo (base=HEAD~1, head=HEAD).
-    base_sha = subprocess.check_output(
-        ["git", "rev-parse", "HEAD~1"], cwd=repo_path, text=True
-    ).strip()
-    head_sha = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=repo_path, text=True
-    ).strip()
-    context.fixture_base_sha = base_sha
-    context.fixture_head_sha = head_sha
-
-    assert _SHA_PATTERN.fullmatch(base_sha), (
-        f"base_sha has unexpected shape (want 40 hex chars): {base_sha!r}"
-    )
-    assert _SHA_PATTERN.fullmatch(head_sha), (
-        f"head_sha has unexpected shape (want 40 hex chars): {head_sha!r}"
-    )
-
-    stub_script = f"""\
-#!/bin/sh
-# Stub gh — hermetic, no network, no auth required.
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$4" = "--json" ]; then
-    printf '%s' '{{"baseRefOid":"{base_sha}","headRefOid":"{head_sha}"}}'
-    exit 0
-fi
-echo "stub gh: unhandled args: $*" >&2
-exit 64
-"""
-    _install_stub_gh(context, stub_script)
 
 
 @given("a stub gh binary is installed for passthrough comparison")
@@ -237,57 +192,6 @@ echo "stub gh: unhandled args: $*" >&2
 exit 64
 """
     _install_stub_gh(context, stub_script)
-
-
-@given("a real gh binary is available on PATH")
-def step_real_gh_available(context: Context) -> None:
-    """Assert the real gh binary is on PATH; skip with an informative error if not."""
-    real_gh = shutil.which("gh")
-    assert real_gh is not None, (
-        "The real 'gh' binary is not on PATH. "
-        "@ISSUE-323 scenarios require a real gh installation. "
-        "Install gh (https://cli.github.com/) to run these scenarios."
-    )
-    context.real_gh_path = real_gh
-
-
-# NOTE: "an isolated HOME with an empty .claude directory" is already defined
-# in redirect_hook_steps.py. The @ISSUE-326 scenarios reuse that step.
-
-
-@given("the redirect hook files have been removed from the installation")
-def step_redirect_hook_files_removed(context: Context) -> None:
-    """Simulate post-removal state by recording that hooks files are absent.
-
-    This step does NOT modify the real installation. Instead it sets a
-    context flag that the When step uses to run git-prism from a fake
-    installation directory where bash_redirect_hook.py has been deleted.
-    The implementation will be exercised through a real binary invocation.
-
-    # TODO(#326): fake_install_root is built here but the When step runs the
-    # real binary without wiring it in. When #326 lands, the implementer must
-    # arrange for the binary invocation to exercise a post-removal code path
-    # (e.g. by building a stripped binary or using an env var that skips the
-    # hook file lookup) so this scenario tests the real removed state rather
-    # than just asserting that the real project hooks/ dir lacks the file.
-    """
-    # Build a fake installation root that looks like a post-removal layout:
-    # the hooks/ directory exists but bash_redirect_hook.py is absent.
-    tmpdir = tempfile.mkdtemp()
-    context.cleanup_dirs.append(tmpdir)
-    fake_install = Path(tmpdir) / "fake-install"
-    fake_install.mkdir()
-    hooks_dir = fake_install / "hooks"
-    hooks_dir.mkdir()
-    # bash_redirect_hook.py intentionally NOT created — that is the scenario.
-    context.fake_install_root = fake_install
-    context.hooks_dir_path = hooks_dir
-
-    # Also set up an isolated_home for the When step.
-    if not hasattr(context, "isolated_home") or context.isolated_home is None:
-        home_tmp = tempfile.mkdtemp()
-        context.cleanup_dirs.append(home_tmp)
-        context.isolated_home = Path(home_tmp)
 
 
 # ---------------------------------------------------------------------------
@@ -421,25 +325,6 @@ def step_stub_gh_runs_directly(context: Context, command: str) -> None:
     context.real_gh_result = result
 
 
-@when("the real gh binary runs \"{command}\" directly")
-def step_real_gh_runs_directly(context: Context, command: str) -> None:
-    """Run the same gh command with the real binary for parity comparison."""
-    parts = command.split()
-    assert parts and parts[0] == "gh", (
-        f"Expected command starting with 'gh', got: {command!r}"
-    )
-
-    real_gh = context.real_gh_path
-    result = subprocess.run(  # noqa: S603
-        [real_gh, *parts[1:]],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=_SHIM_TIMEOUT_SECONDS,
-    )
-    context.real_gh_result = result
-
-
 @when("I run \"git-prism shim install\" with the isolated HOME")
 def step_shim_install(context: Context) -> None:
     """Run git-prism shim install with the isolated HOME."""
@@ -477,71 +362,6 @@ def step_hooks_install_no_flag_with_isolated_home(context: Context) -> None:
         context.cleanup_dirs.append(tmpdir)
         context.isolated_home = Path(tmpdir)
     _run_binary(context, ["hooks", "install"], env=_isolated_env(context))
-
-
-@when("I run \"git-prism shim install\" and consent to PATH setup with the isolated HOME")
-def step_shim_install_consent(context: Context) -> None:
-    """Run git-prism shim install, answering 'y' to the PATH setup prompt."""
-    binary = _find_binary(context)
-    env = _isolated_env(context)
-    # Pin SHELL to zsh so the install always writes the zsh rc files
-    # (.zshenv + .zshrc), regardless of the CI runner's ambient $SHELL
-    # (which is /bin/bash on GitHub Actions).
-    env["SHELL"] = "/bin/zsh"
-    # If the shim dir was injected into PATH by a prior Given step, use that.
-    if hasattr(context, "injected_path"):
-        env["PATH"] = context.injected_path
-
-    result = subprocess.run(  # noqa: S603
-        [str(binary), "shim", "install"],
-        input="y\n",
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-        timeout=_SHIM_TIMEOUT_SECONDS,
-    )
-    context.result = result
-
-
-@when(
-    "I run \"git-prism shim install\" and consent to PATH setup with the isolated HOME again"
-)
-def step_shim_install_consent_again(context: Context) -> None:
-    """Run git-prism shim install a second time with 'y' consent (idempotency check)."""
-    binary = _find_binary(context)
-    env = _isolated_env(context)
-    # Pin SHELL to zsh so the install always writes the zsh rc files
-    # (.zshenv + .zshrc), regardless of the CI runner's ambient $SHELL
-    # (which is /bin/bash on GitHub Actions).
-    env["SHELL"] = "/bin/zsh"
-    result = subprocess.run(  # noqa: S603
-        [str(binary), "shim", "install"],
-        input="y\n",
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-        timeout=_SHIM_TIMEOUT_SECONDS,
-    )
-    context.result = result
-
-
-@when("I run \"git-prism shim install\" and decline PATH setup with the isolated HOME")
-def step_shim_install_decline(context: Context) -> None:
-    """Run git-prism shim install, answering 'n' to the PATH setup prompt."""
-    binary = _find_binary(context)
-    env = _isolated_env(context)
-    result = subprocess.run(  # noqa: S603
-        [str(binary), "shim", "install"],
-        input="n\n",
-        capture_output=True,
-        text=True,
-        env=env,
-        check=False,
-        timeout=_SHIM_TIMEOUT_SECONDS,
-    )
-    context.result = result
 
 
 @when("I inspect the git-prism hooks directory")
@@ -613,17 +433,6 @@ def step_shim_stdout_matches_real_gh(context: Context) -> None:
     )
 
 
-@then("the path \"{rel_path}\" is a symlink under HOME")
-def step_path_is_symlink_under_home(context: Context, rel_path: str) -> None:
-    """Assert that HOME/<rel_path> is a symlink (using context.isolated_home)."""
-    target = context.isolated_home / rel_path
-    assert target.is_symlink(), (
-        f"Expected {target} to be a symlink, but it does not exist or is not a symlink.\n"
-        f"stdout: {context.result.stdout}\n"
-        f"stderr: {context.result.stderr}"
-    )
-
-
 @then("the path \"{rel_path}\" does not exist under HOME")
 def step_path_does_not_exist_under_home(context: Context, rel_path: str) -> None:
     """Assert that HOME/<rel_path> does not exist."""
@@ -645,45 +454,48 @@ def step_stderr_contains(context: Context, phrase: str) -> None:
     )
 
 
-@then("the rc file \"{rel_path}\" under HOME contains the shim directory export line")
-def step_rc_contains_export(context: Context, rel_path: str) -> None:
-    """Assert the rc file has been updated with the shim PATH export."""
+@then("the rc file \"{rel_path}\" under HOME contains the shim function")
+def step_rc_contains_function(context: Context, rel_path: str) -> None:
+    """Assert the rc file holds the managed block with the git function."""
     rc_path = context.isolated_home / rel_path
     assert rc_path.exists(), f"RC file not found: {rc_path}"
     content = rc_path.read_text()
-    assert _SHIM_EXPORT_FRAGMENT in content, (
-        f"RC file {rc_path} does not contain the shim export line.\n"
-        f"Expected fragment: {_SHIM_EXPORT_FRAGMENT!r}\n"
+    assert _SHIM_BLOCK_START_MARKER in content, (
+        f"RC file {rc_path} does not contain the managed shim block.\n"
+        f"File contents:\n{content}"
+    )
+    assert "function git {" in content, (
+        f"RC file {rc_path} does not contain the git shell function.\n"
         f"File contents:\n{content}"
     )
 
 
-_SHIM_BLOCK_START_MARKER = "# >>> git-prism shim >>>"
-
-
-@then("the rc file \"{rel_path}\" under HOME contains the shim export line exactly once")
-def step_rc_contains_export_exactly_once(context: Context, rel_path: str) -> None:
-    """Assert the managed PATH block appears exactly once (idempotency).
-
-    The new marker-delimited block contains the shim path fragment twice (once
-    in each branch of the case statement), so we count block start-markers
-    rather than raw fragment occurrences.
-    """
+@then("the rc file \"{rel_path}\" under HOME contains exactly one shim block")
+def step_rc_contains_exactly_one_block(context: Context, rel_path: str) -> None:
+    """Assert the managed block appears exactly once (idempotency)."""
     rc_path = context.isolated_home / rel_path
     assert rc_path.exists(), f"RC file not found: {rc_path}"
     content = rc_path.read_text()
     occurrences = content.count(_SHIM_BLOCK_START_MARKER)
     assert occurrences == 1, (
-        f"Expected the managed PATH block to appear exactly once in {rc_path}, "
-        f"but found {occurrences} occurrences of the start marker.\n"
-        f"Marker: {_SHIM_BLOCK_START_MARKER!r}\n"
+        f"Expected exactly one managed block in {rc_path}, found {occurrences}.\n"
         f"File contents:\n{content}"
+    )
+
+
+@then("the rc file \"{rel_path}\" under HOME has no shim block")
+def step_rc_has_no_block(context: Context, rel_path: str) -> None:
+    """Assert the rc file is absent or carries no managed block."""
+    rc_path = context.isolated_home / rel_path
+    content = rc_path.read_text() if rc_path.exists() else ""
+    assert _SHIM_BLOCK_START_MARKER not in content, (
+        f"RC file {rc_path} still contains a managed block.\nFile contents:\n{content}"
     )
 
 
 @then("the rc file \"{rel_path}\" under HOME is unchanged")
 def step_rc_unchanged(context: Context, rel_path: str) -> None:
-    """Assert the rc file was not modified (user declined PATH setup)."""
+    """Assert the rc file was not modified by install."""
     rc_path = context.isolated_home / rel_path
     assert rc_path.exists(), f"RC file not found: {rc_path}"
     current = rc_path.read_text()
@@ -692,7 +504,7 @@ def step_rc_unchanged(context: Context, rel_path: str) -> None:
         "context.rc_path_initial_content not set — did the Given step run?"
     )
     assert current == initial, (
-        f"RC file {rc_path} was modified despite the user declining PATH setup.\n"
+        f"RC file {rc_path} was modified by install.\n"
         f"Before:\n{initial}\nAfter:\n{current}"
     )
 
@@ -709,41 +521,4 @@ def step_file_does_not_exist_in_installation(context: Context, rel_path: str) ->
     assert not target.exists(), (
         f"Expected {target} to NOT exist after redirect hook removal, "
         f"but it still exists. This is the expected RED state before #326 lands."
-    )
-
-
-@then('each entry in the "files" array has a "change_scope" field')
-def step_files_entries_have_change_scope(context: Context) -> None:
-    """Assert every entry in the top-level files array carries a change_scope field.
-
-    This is a git-prism manifest-specific field that raw gh output cannot
-    produce, so a passing assertion here proves the shim routed the call
-    through git-prism rather than forwarding raw gh output.
-
-    Fails RED now because the gh shim does not exist yet — the real gh
-    binary returns plain text or its own JSON, neither of which has a
-    change_scope field on file entries.
-    """
-    stdout = (context.result.stdout or "").strip()
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise AssertionError(
-            f"Output is not valid JSON: {exc}\n"
-            f"stdout: {stdout[:500]}\n"
-            f"stderr: {context.result.stderr[:500]}"
-        ) from exc
-    files = data.get("files") if isinstance(data, dict) else None
-    assert isinstance(files, list) and files, (
-        f"Expected a non-empty 'files' array in JSON, got: {str(data)[:500]}"
-    )
-    missing = [
-        i for i, entry in enumerate(files)
-        if not (isinstance(entry, dict) and "change_scope" in entry)
-    ]
-    assert not missing, (
-        f"Files entries at indices {missing} are missing 'change_scope' field. "
-        f"This field is emitted only by git-prism manifest output — raw gh "
-        f"output cannot satisfy this assertion.\n"
-        f"files[0]: {files[0] if files else 'empty'}"
     )

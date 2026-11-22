@@ -11,11 +11,15 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-/// When the resolver finds a `git` entry that passes the executable check but
-/// the process-replacement call fails with `PermissionDenied` (e.g. a directory
-/// named `git`), the shim must exit 126, NOT 127.
+/// When the resolver finds a `git` regular file that carries an execute bit but
+/// the process-replacement call fails with `PermissionDenied` (here: the bit is
+/// set for group/other only, so the owner may not run it), the shim must exit
+/// 126, NOT 127. A directory named `git` is a different case: a shell skips
+/// it, and so does the resolver (see `shim_gate3_rc_function_pentest`).
 #[test]
 fn it_exits_126_when_real_git_is_found_but_unexecutable() {
+    use std::os::unix::fs::PermissionsExt;
+
     let bin = env!("CARGO_BIN_EXE_git-prism");
     let tmp = TempDir::new().unwrap();
     let shim_dir = tmp.path().join("shimbin");
@@ -27,10 +31,11 @@ fn it_exits_126_when_real_git_is_found_but_unexecutable() {
     let shim_git = shim_dir.join("git");
     symlink(bin, &shim_git).unwrap();
 
-    // The "real git" is a *directory* named `git`: it passes the resolver's
-    // `is_executable` check (directories carry the exec bit) but launching it
-    // fails with EACCES / PermissionDenied — the found-but-unexecutable case.
-    std::fs::create_dir(real_dir.join("git")).unwrap();
+    // The "real git" is a regular file the owner cannot execute: it passes the
+    // resolver's execute-bit check but launching it fails with EACCES.
+    let real_git = real_dir.join("git");
+    std::fs::write(&real_git, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&real_git, std::fs::Permissions::from_mode(0o011)).unwrap();
 
     let path = format!("{}:{}", shim_dir.display(), real_dir.display());
 
@@ -49,16 +54,12 @@ fn it_exits_126_when_real_git_is_found_but_unexecutable() {
     );
 }
 
-/// Adversarial QA (issue #324, gate 3): `git-prism shim status` must report a
-/// dangling symlink (target no longer exists) as BROKEN, not "installed".
-///
-/// The `PathShimStatus::BrokenLink` variant and its doc comment promise exactly
-/// this. But `path_shim_status` uses `std::fs::read_link`, which SUCCEEDS on a
-/// dangling symlink (it only reads the link's textual target). So the canonical
-/// broken-link case is mis-classified as `Installed`. This drives the built
-/// binary end-to-end and currently FAILS.
+/// Adversarial QA (issue #324, gate 3; reworked for #387): `git-prism shim
+/// status` must report a legacy symlink, even a dangling one (target no longer
+/// exists), as a legacy PATH shim to migrate, and must NOT claim the shim
+/// function is installed.
 #[test]
-fn shim_status_reports_broken_for_dangling_symlink() {
+fn it_reports_a_dangling_legacy_symlink_as_legacy_not_installed() {
     let bin = env!("CARGO_BIN_EXE_git-prism");
     let home = TempDir::new().unwrap();
     let shim_dir = home.path().join(".local/share/git-prism/bin");
@@ -79,11 +80,76 @@ fn shim_status_reports_broken_for_dangling_symlink() {
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("broken"),
-        "dangling symlink must be reported as broken; got: {stdout}"
+        stdout.contains("legacy PATH shim: present at"),
+        "dangling symlink must be reported as a legacy PATH shim; got: {stdout}"
     );
     assert!(
-        !stdout.contains("shim: installed"),
-        "dangling symlink must NOT be reported as installed; got: {stdout}"
+        stdout.contains("shim: not installed"),
+        "a legacy symlink is not the shim function; got: {stdout}"
     );
+}
+
+/// Issue #387: when the structured handler fails (here: a ref that does not
+/// exist), the shim must hand the command to real git so the agent sees real
+/// git's stderr and exit code, with no `git-prism` text.
+#[test]
+fn it_returns_real_git_stderr_and_exit_code_when_handler_fails() {
+    let bin = env!("CARGO_BIN_EXE_git-prism");
+    let tmp = TempDir::new().unwrap();
+    let shim_dir = tmp.path().join("shimbin");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    let shim_git = shim_dir.join("git");
+    symlink(bin, &shim_git).unwrap();
+
+    let run_git = |args: &[&str]| {
+        let out = Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "setup git {args:?} failed");
+    };
+    run_git(&["init", "-q"]);
+    run_git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    ]);
+
+    let path = format!("{}:/usr/bin:/bin", shim_dir.display());
+    let args = ["diff", "nosuchref..HEAD"];
+
+    let real = Command::new("/usr/bin/git")
+        .args(args)
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let shimmed = Command::new(bin)
+        .args(["shim-run", "git"])
+        .args(args)
+        .current_dir(&repo)
+        .env_remove("CI")
+        .env_remove("GIT_PRISM_PASSTHROUGH")
+        .env_remove("GIT_PRISM_DISABLE")
+        .env_remove("GIT_PRISM_INSIDE_SHIM")
+        .env("AI_AGENT", "claude-code")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+
+    assert_eq!(shimmed.status.code(), real.status.code());
+    assert_eq!(real.status.code(), Some(128));
+    assert_eq!(
+        String::from_utf8_lossy(&shimmed.stderr),
+        String::from_utf8_lossy(&real.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&shimmed.stderr).contains("git-prism"));
 }

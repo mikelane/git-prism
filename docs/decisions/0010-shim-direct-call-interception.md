@@ -1,6 +1,6 @@
 # ADR 0010: Shim Direct-Call Interception via Claude Code's Shell Snapshot
 
-- **Status**: Accepted (spike outcome)
+- **Status**: Superseded by [ADR 0012](0012-shim-as-shell-function.md) (the snapshot observations below remain valid; the PATH-interception conclusion does not)
 - **Date**: 2026-05-30
 - **Context**: Epic #328 — sunset the redirect hook; spike #320
 - **Supersedes assumptions in**: the epic premise that direct-call interception was an open question

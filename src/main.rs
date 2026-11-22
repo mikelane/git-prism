@@ -105,12 +105,12 @@ enum Commands {
     Languages,
     /// Detect whether the current process is running on behalf of an AI agent
     AgentDetect,
-    /// Install, uninstall, or query the PATH shim (creates ~/.local/share/git-prism/bin/git)
+    /// Install, uninstall, or query the interactive-shell `git` function (an rc-file block)
     Shim {
         #[command(subcommand)]
         command: ShimCommands,
     },
-    /// Uninstall legacy redirect-hook entries; query/install/uninstall the PATH shim
+    /// Uninstall legacy redirect-hook entries; deprecated aliases for `shim install|uninstall|status`
     Hooks {
         #[command(subcommand)]
         command: HooksCommands,
@@ -119,7 +119,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum HooksCommands {
-    /// Install the PATH shim (redirect hook removed in v0.9.0; use --path-shim or `git-prism shim install`)
+    /// Install the shell-function shim (redirect hook removed in v0.9.0; use `git-prism shim install`)
     Install {
         /// Accepted for backwards compatibility; ignored (redirect hook removed in v0.9.0)
         #[arg(long, value_parser = ["user", "project", "local"])]
@@ -127,7 +127,7 @@ enum HooksCommands {
         /// Accepted for backwards compatibility; ignored
         #[arg(long)]
         dry_run: bool,
-        /// Overwrite a pre-existing regular file at the path-shim target (use with caution)
+        /// Accepted for backwards compatibility; ignored (no symlink is created any more)
         #[arg(long)]
         force: bool,
         /// Deprecated alias for `git-prism shim install`; still works with a warning
@@ -139,7 +139,7 @@ enum HooksCommands {
         /// Which scope to clean up (required unless --path-shim is set)
         #[arg(long, value_parser = ["user", "project", "local"])]
         scope: Option<String>,
-        /// Remove the PATH shim symlink (~/.local/share/git-prism/bin/git)
+        /// Remove the shim function block and legacy PATH-shim artifacts
         #[arg(long)]
         path_shim: bool,
     },
@@ -149,15 +149,15 @@ enum HooksCommands {
 
 #[derive(Subcommand)]
 enum ShimCommands {
-    /// Create ~/.local/share/git-prism/bin/git symlink pointing at this binary
+    /// Add a `git` shell function to your interactive rc file (~/.zshrc or ~/.bashrc)
     Install {
-        /// Overwrite a regular file at the shim target (use with caution)
+        /// Accepted for backwards compatibility; ignored (no symlink is created any more)
         #[arg(long)]
         force: bool,
     },
-    /// Remove the ~/.local/share/git-prism/bin/git symlink
+    /// Remove the shell function block and any legacy PATH-shim symlinks/blocks
     Uninstall,
-    /// Report whether the shim is installed and show the shim directory
+    /// Report whether the shell function is installed in the rc file and flag any legacy PATH shim
     Status,
 }
 
@@ -181,9 +181,9 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
         .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?;
     match command {
         HooksCommands::Install {
-            scope,
+            scope: _,
             dry_run,
-            force,
+            force: _,
             path_shim,
         } => {
             if path_shim {
@@ -193,32 +193,24 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 );
                 if dry_run {
                     println!(
-                        "dry-run: would create symlink at $HOME/.local/share/git-prism/bin/git (not created)"
-                    );
-                    println!(
-                        "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
+                        "dry-run: would add the git shim function to your interactive rc file (not written)"
                     );
                     return Ok(0);
                 }
-                let symlink_path = hooks::install_path_shim(&home, force)?;
-                println!("Created symlink: {}", symlink_path.display());
-                println!(
-                    "Add this to your shell init (~/.zshrc or ~/.bashrc):\n  export PATH=\"$HOME/.local/share/git-prism/bin:$PATH\""
-                );
+                shim_cmd::run_install(&home)?;
                 return Ok(0);
             }
             // hooks install without --path-shim: the redirect hook was removed in v0.9.0.
             // Scope argument is accepted by clap but ignored — we always error.
-            let _ = scope;
             eprintln!(
                 "error: the redirect hook (bash_redirect_hook.py) was removed in v0.9.0.\n\
                  \n\
-                 Use the PATH shim instead:\n\
+                 Use the shell-function shim instead:\n\
                  \n\
                  \x20 git-prism shim install\n\
                  \n\
-                 The shim intercepts git at the PATH layer and is a strict superset of the\n\
-                 redirect hook's coverage. If you had the old hook installed, remove it first:\n\
+                 The shim installs a `git` shell function that routes agent-issued git commands\n\
+                 through git-prism, and is a strict superset of the redirect hook's coverage. If you had the old hook installed, remove it first:\n\
                  \n\
                  \x20 git-prism hooks uninstall --scope user   # or --scope project / local\n\
                  \n\
@@ -235,7 +227,7 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
                 hooks::uninstall_redirect_hook(scope, &home, &cwd)?;
             }
             if path_shim {
-                hooks::uninstall_path_shim(&home)?;
+                shim_cmd::run_uninstall(&home)?;
             }
             Ok(0)
         }
@@ -245,81 +237,113 @@ fn run_hooks_command(command: HooksCommands) -> anyhow::Result<i32> {
             for line in &report.lines {
                 println!("{line}");
             }
-            let shim_status = hooks::path_shim_status(&home);
-            match shim_status {
-                hooks::PathShimStatus::Installed {
-                    target,
-                    staleness_warning,
-                } => {
-                    println!("path-shim: installed @ {}", target.display());
-                    if let Some(w) = staleness_warning {
-                        println!("warning: {w}");
-                    }
-                }
-                hooks::PathShimStatus::NotInstalled => {
-                    println!("path-shim: not installed");
-                }
-                hooks::PathShimStatus::BrokenLink { reason } => {
-                    println!("path-shim: broken link ({reason})");
-                }
-            }
+            shim_cmd::run_status(&home)?;
             Ok(0)
         }
     }
 }
 
+const SHIM_RUN_USAGE: &str = "usage: git-prism shim-run git <args...>";
+
+/// Entry point for `git-prism shim-run git <args...>`, called by the rc shell
+/// function. `shim_argv` is everything after `shim-run`.
+fn run_shim_entry(shim_argv: &[&str]) -> std::process::ExitCode {
+    if shim_argv.first() != Some(&"git") {
+        eprintln!("{SHIM_RUN_USAGE}");
+        return std::process::ExitCode::from(2);
+    }
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(err) => {
+            eprintln!("git-prism shim-run: cannot locate own executable: {err}");
+            return std::process::ExitCode::from(127);
+        }
+    };
+    let real_git_exec = shim::real_git::StdRealGitExec {
+        env: &agent_detection::StdEnvSource,
+        argv0: &current_exe,
+    };
+
+    // Per-invocation opt-out: exec the real binary immediately with zero
+    // overhead (GIT_PRISM_PASSTHROUGH=1 / GIT_PRISM_DISABLE=1).
+    if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
+        return real_git_exec.passthrough(shim_argv);
+    }
+
+    // Use `init_quiet`: this runs once per intercepted git command, so a
+    // per-invocation banner would flood the developer's shell. On passthrough
+    // paths run_shim flushes before exec; on the structured path we flush here.
+    let mut telemetry_guard = telemetry::init_quiet();
+    let exit_code = shim::run_shim(
+        shim_argv,
+        &agent_detection::StdEnvSource,
+        &real_git_exec,
+        shim::detect_stdout_kind(),
+        &mut telemetry_guard,
+    );
+    telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
+    exit_code
+}
+
+/// `str`-based argument handling would silently drop arguments that are not
+/// valid UTF-8, handing git a different command than the user typed. When the
+/// shim would act as a pure passthrough anyway (`shim-run git ...` or a stale
+/// `git`/`gh` symlink), exec the real binary with the raw arguments instead.
+#[cfg(unix)]
+fn passthrough_when_args_are_not_utf8(
+    args_os: &[std::ffi::OsString],
+    basename: &str,
+) -> Option<std::process::ExitCode> {
+    if args_os.iter().all(|arg| arg.to_str().is_some()) {
+        return None;
+    }
+    let argv0 = args_os.first()?.to_string_lossy().into_owned();
+    let (binary_name, raw_args) = if basename == "git" || basename == "gh" {
+        (basename, &args_os[1..])
+    } else if args_os.get(1).and_then(|a| a.to_str()) == Some("shim-run")
+        && args_os.get(2).and_then(|a| a.to_str()) == Some("git")
+    {
+        ("git", &args_os[3..])
+    } else {
+        return None;
+    };
+    Some(shim::real_git::exec_real_binary_with_raw_args(
+        binary_name,
+        &argv0,
+        &agent_detection::StdEnvSource,
+        raw_args,
+    ))
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // argv[0] dispatch: when invoked as "git" (via a symlink), enter shim mode.
     let args_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let args: Vec<&str> = args_os.iter().filter_map(|s| s.to_str()).collect();
     let basename = args_os
         .first()
         .and_then(|s| std::path::Path::new(s).file_name())
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_default();
-    // Enter shim mode when invoked as "git" or "gh" (via a symlink).
+
+    #[cfg(unix)]
+    if let Some(exit_code) = passthrough_when_args_are_not_utf8(&args_os, &basename) {
+        return exit_code;
+    }
+
+    // A binary reached as "git" or "gh" (a stale PATH symlink from a pre-0.11
+    // install) must be invisible: any program that execs git gets real git.
+    // Interception is opt-in via `git-prism shim-run git ...` (see #387).
     if basename == "git" || basename == "gh" {
-        let args: Vec<&str> = args_os.iter().filter_map(|s| s.to_str()).collect();
         let exec = shim::real_git::StdRealGitExec {
             env: &agent_detection::StdEnvSource,
             argv0: args.first().copied().unwrap_or("git"),
         };
+        return exec.passthrough(&args);
+    }
 
-        // Per-invocation opt-out: exec the real binary immediately with zero
-        // overhead — no telemetry init, no classification, no metric recording.
-        // This is the first-class escape hatch for callers that set
-        // GIT_PRISM_PASSTHROUGH=1 (or GIT_PRISM_DISABLE=1) to skip the shim
-        // entirely for a specific invocation or test suite run.
-        if shim::passthrough_opt_out_requested(&agent_detection::StdEnvSource) {
-            return exec.passthrough(&args);
-        }
-
-        // Initialize telemetry when an OTLP endpoint is configured. The guard
-        // must live until after run_shim returns — on the exec-replace
-        // (passthrough) path the process is replaced and Rust's drop glue
-        // never runs anyway, so no flush is needed there. On the
-        // structured-output path run_shim returns an ExitCode, and we
-        // force_flush before returning so metrics reach the exporter even
-        // though the PeriodicReader hasn't ticked yet.
-        //
-        // Use `init_quiet`: the shim runs once per intercepted git/gh command,
-        // so the per-invocation "telemetry initialized" banner would flood the
-        // developer's shell with one stderr line per git call. Failure paths
-        // still log, so a misconfigured endpoint stays visible.
-        let mut telemetry_guard = telemetry::init_quiet();
-        // run_shim either exec-replaces the process (passthrough, never returns)
-        // or returns ExitCode after printing structured JSON or an error.
-        // On passthrough paths force_flush is called inside run_shim before execvp.
-        // On the structured-output path the guard is flushed here after run_shim returns.
-        let exit_code = shim::run_shim(
-            &args,
-            &agent_detection::StdEnvSource,
-            &exec,
-            &mut telemetry_guard,
-        );
-        telemetry_guard.force_flush_bounded(shim::STRUCTURED_FLUSH_TIMEOUT);
-        return exit_code;
+    if args.get(1) == Some(&"shim-run") {
+        return run_shim_entry(&args[2..]);
     }
 
     if let Err(e) = run().await {
@@ -461,7 +485,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Shim { command } => {
             let home = hooks::home_dir()?;
             match command {
-                ShimCommands::Install { force } => shim_cmd::run_install(&home, force)?,
+                ShimCommands::Install { force: _ } => shim_cmd::run_install(&home)?,
                 ShimCommands::Uninstall => shim_cmd::run_uninstall(&home)?,
                 ShimCommands::Status => shim_cmd::run_status(&home)?,
             }

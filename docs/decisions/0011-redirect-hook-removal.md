@@ -2,7 +2,8 @@
 
 **Status:** Accepted  
 **Date:** 2026-05-30  
-**Supersedes:** ADR-0008 (redirect-hook-architecture)
+**Supersedes:** ADR-0008 (redirect-hook-architecture)  
+**Note:** [ADR 0012](0012-shim-as-shell-function.md) replaced the PATH shim with an interactive-shell function. The removal below stands, but the "strict superset" argument no longer holds: the function covers roughly the same agent-typed commands the hook did.
 
 ## Context
 

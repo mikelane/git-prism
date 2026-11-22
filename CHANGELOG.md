@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The shim is now a `git` shell function in your interactive rc file, not a `git` symlink on `PATH`.** `git-prism shim install` writes a marker-delimited `function git { … }` block to `~/.zshrc` (or `~/.bashrc` when `$SHELL` is bash) that runs `git-prism shim-run git "$@"`, or real git if `git-prism` is not on `PATH`. It no longer creates `~/.local/share/git-prism/bin/{git,gh}` or edits `PATH`. Shell functions are not inherited by child processes, so only `git` commands an agent types into its shell are intercepted. Any program that execs git (Python `subprocess`, `make`, `sh -c`, scripts) now gets real git output, byte for byte. Under the PATH shim, a Python script launched from an agent session ran `git diff -M --no-color --no-ext-diff A..B` and received a JSON manifest with exit status 0. Agent detection reads environment variables that every child process inherits, so the script looked like the agent. As a result, `make`, `sh -c`, and wrapper scripts are no longer intercepted. A typed command piped into a program (`git diff A..B | git apply`) still is. Claude Code's shell snapshot captures rc functions on zsh. This is unverified on bash. See [ADR 0012](docs/decisions/0012-shim-as-shell-function.md). (#387)
+  **Migration:** re-run `git-prism shim install`. It removes the old PATH blocks and symlinks automatically. Remove any hand-written `export PATH=…/git-prism/bin…` lines, then restart your agent session.
+- **`git blame` is no longer intercepted.** Every form (`git blame <path>`, `--porcelain`, `-w`, `-L`, ...) now passes through to real git, byte for byte. The structured blame answer was built from the HEAD snapshot, and each adversarial pass found another case where real git blamed something else: uncommitted edits, eol/filter/ident/encoding conversion, `diff=<driver>` textconv, `core.worktree`, `GIT_WORK_TREE`, attribute sources. Structured blame returns once it can reproduce git's inputs faithfully; see #388. (#387)
+- **A git-prism binary invoked as `git` or `gh` no longer intercepts.** It execs the real binary unchanged, so a stale symlink from 0.10.0 and earlier is inert. Interception is reachable only through `git-prism shim-run git <args>`. (#387)
+
+### Added
+
+- **Intercepted shim output carries a `git_prism_hint` field** naming the raw-git command, for example `"git-prism structured output. For raw git output run: command git diff HEAD~1..HEAD"`. `command git` bypasses the shell function. MCP and CLI output are unchanged. (#387)
+
 ### Fixed
+
+- **The raw-git hint quotes a `~` that bash expands after `=` or `:`.** `command git show k=~` would have run `git show k=/home/u`; such arguments are now single-quoted, while `HEAD~1` stays unquoted. (#387)
+- **`git show <merge-commit>` passes through to real git.** The shim diffed a merge against its first parent only, listing files (for example everything the merged branch added) that real git's combined diff omits for a clean merge. (#387)
+- **`shim install`/`uninstall` no longer fail forever on a stale temp file.** The atomic write's temp name was `.<rc>.git-prism-<pid>.tmp`, so a leftover from a crashed run with a reused pid made every later write fail. The name now includes a timestamp and counter, and a collision picks another name. (#387)
+- **`git log -S`/`-G` (pickaxe) passes through to real git.** The shim returned function context for the whole range and ignored the term, so `git log -S zzz A..B` showed commits real git would not list. The shim no longer intercepts pickaxe searches. (#387)
+- **`shim status` fails naming the file when an rc file exists but cannot be read**, instead of reporting "not installed". (#387)
+- **The raw-git hint quotes an argument that starts with `=`**, which zsh would otherwise expand to a command path when the hint is pasted back. (#387)
+- **`shim install` keeps a dangling rc symlink (`.zshrc -> dotfiles/zshrc`, target not yet created) as a symlink** and creates the target, instead of replacing the link with a regular file. (#387)
+- **`git log a...b` passes through to real git.** The handler reported only `a..b`; real git lists the symmetric difference, commits from both sides. (#387)
+- **`git diff a...b` passes through to real git.** The handler collapsed `...` to `..` and reported base-side changes that real git (merge-base to `b`) omits. (#387)
+- **The shim execs real git when its handler fails** instead of printing a git-prism error. The buffered partial output is discarded, and the caller sees real git's stdout, stderr, and exit status. (#387)
+- **Shim commands with stdout redirected to a regular file (`git diff A..B > x.patch`) pass through to real git**, so captured output is byte-for-byte git. (#387)
+- **`--quiet` and `--exit-code` pass through to real git.** The exit status is the answer for these flags, and the shim always exited 0. (#387)
+- **`git show <rev>^{tree}` and other `^{…}` peel specs pass through to real git** instead of failing to peel to a commit. (#387)
+- **`shim install` and `uninstall` write the rc file atomically** (temp file, fsync, rename), so a crash mid-write no longer truncates it. A symlinked rc file is written through and stays a symlink; file mode is preserved. (#387)
+- **A `# >>> git-prism shim >>>` marker with no end marker no longer makes install delete the rest of the file.** Install and uninstall now fail with a message naming the file and line and write nothing. Remove the stray marker line and re-run. (#387)
+- **`shim uninstall` no longer reports success while the function block remains in a non-UTF-8 rc file.** Marker handling works on raw bytes and preserves other content; unreadable startup files fail with their name instead of being skipped. (#387)
+- **The shim passes through to real git for options and arguments it cannot honour:** unknown options, `--no-index`, `-R`, `-n`/`--max-count`, `--` pathspecs and extra positionals. These previously returned JSON that ignored them, with exit status 0. (#387)
+- **A directory named `git` on `PATH` is skipped** when resolving real git, as a shell does, instead of exiting 126. (#387)
+- **The raw-git hint quotes arguments** that a shell would split or expand, so it can be pasted back. (#387)
+- **The shim no longer sets `GIT_PRISM_INSIDE_SHIM=1` in real git's environment**, so git hooks, aliases and editors see an unmodified environment. (#387)
+- **Real-binary resolution skips other git-prism installs on `PATH`.** Two shim directories on `PATH` could previously exec each other in a loop (`gh` → `gh`). (#387)
 
 - **`git show` with blob/tree/index object specs now passes through to real git** instead of failing with a peel-to-commit error (`was blob while trying to peel to commit`). Colon-bearing specs — including `<rev>:<path>` (rev-qualified blob), `:<path>` (stage-0 index), `:N:<path>` (explicit-stage index), and `<rev>:/abs/path` (absolute-path blob) — now passthrough. The shim recognizes any spec containing `:` that does NOT start with `:/` as a blob/tree/index spec. Plain `git show <commit-ish>` and `:/regex` commit-message search continue to be intercepted and return structured JSON. (#381)
 - **`git log A..B` (and the shim's interception of it) no longer fails on diverged history.** `walk_commits` computed the two-dot range with a hand-rolled walk that stopped only on the exact base OID and followed first-parent only, so when `base` was not an ancestor of `head` (a branch whose base has advanced — the normal case) the walk ran off to the root commit and errored with `commit <root> has no parent but base <base> not yet reached`. It now uses gix's `rev_walk` with the base as a hidden tip and `ByCommitTime(NewestFirst)` sorting, matching `git rev-list --reverse base..head` for diverged, merge, octopus, and disjoint histories. (#382)

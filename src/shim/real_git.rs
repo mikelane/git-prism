@@ -44,24 +44,32 @@ pub(crate) trait RealGitExec {
 }
 
 /// Production implementation that walks `$PATH` to find the real git binary
-/// and `execvp`s it after setting `GIT_PRISM_INSIDE_SHIM=1`.
+/// and `execvp`s it. The environment is passed through untouched: real git's
+/// children must not see a variable real git would not set. Loop protection is
+/// the resolver skipping git-prism binaries (`is_git_prism_binary`).
 pub(crate) struct StdRealGitExec<'e, E: EnvSource> {
     pub(crate) env: &'e E,
     pub(crate) argv0: &'e str,
+}
+
+impl<E: EnvSource> StdRealGitExec<'_, E> {
+    /// The program being shimmed: the basename of `argv[0]` ("git" or "gh").
+    /// Under `shim-run`, `argv0` is git-prism's own path, so the command name
+    /// must come from `argv[0]`, not from `argv0`.
+    fn binary_name<'a>(&'a self, argv: &'a [&'a str]) -> &'a str {
+        let invoked_as = argv.first().copied().unwrap_or(self.argv0);
+        std::path::Path::new(invoked_as)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("git")
+    }
 }
 
 impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
     fn passthrough(&self, argv: &[&str]) -> ExitCode {
         #[cfg(unix)]
         {
-            // Determine which binary to resolve by extracting the basename of
-            // self.argv0 (the shim symlink path, e.g. "/tmp/bin/gh" → "gh").
-            // argv[0] is a full path when the OS execs the shim by path; using
-            // the basename of self.argv0 gets the symlink name ("git" or "gh").
-            let binary_name = std::path::Path::new(self.argv0)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("git");
+            let binary_name = self.binary_name(argv);
             let real = match resolve_real_binary(binary_name, self.argv0, self.env) {
                 Some(p) => p,
                 None => {
@@ -80,17 +88,13 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
             use std::os::unix::process::CommandExt as _;
             let mut cmd = std::process::Command::new(&real);
             cmd.args(argv.iter().skip(1)); // skip argv[0]
-            cmd.env("GIT_PRISM_INSIDE_SHIM", "1");
             let err = cmd.exec(); // never returns on success
             eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
             ExitCode::from(exec_failure_exit_code(&err))
         }
         #[cfg(not(unix))]
         {
-            let binary_name = std::path::Path::new(self.argv0)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("git");
+            let binary_name = self.binary_name(argv);
             let real = match resolve_real_binary(binary_name, self.argv0, self.env) {
                 Some(p) => p,
                 None => {
@@ -108,7 +112,6 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
 
             let status = std::process::Command::new(&real)
                 .args(argv.iter().skip(1))
-                .env("GIT_PRISM_INSIDE_SHIM", "1")
                 .status();
 
             match status {
@@ -132,10 +135,32 @@ impl<E: EnvSource> RealGitExec for StdRealGitExec<'_, E> {
         // so there is no command-injection risk here.
         let output = std::process::Command::new(&real)
             .args(argv.iter().skip(1))
-            .env("GIT_PRISM_INSIDE_SHIM", "1")
             .output()?;
         Ok(output.stdout.len())
     }
+}
+
+/// Replace the process with the real `binary_name`, handing it `args` verbatim.
+///
+/// Unlike [`RealGitExec::passthrough`], which takes `&str` arguments, this
+/// preserves arguments that are not valid UTF-8 (a pathspec or `--grep`
+/// pattern in a legacy encoding must reach git byte for byte).
+#[cfg(unix)]
+pub(crate) fn exec_real_binary_with_raw_args(
+    binary_name: &str,
+    argv0: &str,
+    env: &dyn EnvSource,
+    args: &[std::ffi::OsString],
+) -> ExitCode {
+    use std::os::unix::process::CommandExt as _;
+
+    let Some(real) = resolve_real_binary(binary_name, argv0, env) else {
+        eprintln!("git-prism shim: could not find real {binary_name} binary");
+        return ExitCode::from(127);
+    };
+    let err = std::process::Command::new(&real).args(args).exec();
+    eprintln!("git-prism shim: exec of {} failed: {err}", real.display());
+    ExitCode::from(exec_failure_exit_code(&err))
 }
 
 /// Map an exec `io::Error` to the conventional shell exit code.
@@ -170,21 +195,16 @@ pub(crate) fn resolve_real_git(argv0: &str, env: &dyn EnvSource) -> Option<PathB
             if !is_executable(&candidate) {
                 continue;
             }
-            // Skip this candidate if:
-            // (a) it lives in the same directory as the shim binary, or
-            // (b) it resolves (via symlink) to the shim binary itself.
-            // Case (a) handles the direct install; case (b) handles the
-            // Homebrew/cellar pattern where the shim is symlinked into PATH.
-            if let Some(shim) = &shim_path {
-                let shim_dir = shim.parent().map(Path::to_path_buf);
-                let candidate_dir = candidate.parent().map(Path::to_path_buf);
-                let same_dir = match (&shim_dir, &candidate_dir) {
-                    (Some(sd), Some(cd)) => canonical_eq(sd, cd),
-                    _ => false,
-                };
-                if same_dir || canonical_eq(&candidate, shim) {
-                    continue;
-                }
+            // Skip a candidate that resolves (via symlink) to the shim
+            // binary itself; a real git sharing the shim's directory is fine.
+            if shim_path
+                .as_ref()
+                .is_some_and(|shim| canonical_eq(&candidate, shim))
+            {
+                continue;
+            }
+            if is_git_prism_binary(&candidate) {
+                continue;
             }
             return Some(candidate);
         }
@@ -276,16 +296,14 @@ pub(crate) fn resolve_real_binary(
             if !is_executable(&candidate) {
                 continue;
             }
-            if let Some(shim) = &shim_path {
-                let shim_dir = shim.parent().map(Path::to_path_buf);
-                let candidate_dir = candidate.parent().map(Path::to_path_buf);
-                let same_dir = match (&shim_dir, &candidate_dir) {
-                    (Some(sd), Some(cd)) => canonical_eq(sd, cd),
-                    _ => false,
-                };
-                if same_dir || canonical_eq(&candidate, shim) {
-                    continue;
-                }
+            if shim_path
+                .as_ref()
+                .is_some_and(|shim| canonical_eq(&candidate, shim))
+            {
+                continue;
+            }
+            if is_git_prism_binary(&candidate) {
+                continue;
             }
             return Some(candidate);
         }
@@ -347,6 +365,27 @@ pub(crate) fn resolve_real_binary(
     None
 }
 
+/// True when `candidate` is a git-prism binary: the running one or any other
+/// installed copy (for example a second shim directory on PATH). Exec-ing
+/// another git-prism shim would bounce between the two forever.
+#[cfg(unix)]
+fn is_git_prism_binary(candidate: &Path) -> bool {
+    let Ok(canonical) = candidate.canonicalize() else {
+        return false;
+    };
+    if std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .is_some_and(|exe| exe == canonical)
+    {
+        return true;
+    }
+    canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("git-prism"))
+}
+
 /// Return the canonicalized path of the shim binary.
 ///
 /// Tries `argv0` first (works when the shim is invoked with a full path).
@@ -362,7 +401,7 @@ fn shim_canonical_path(argv0: &str) -> Option<PathBuf> {
     })
 }
 
-/// Return `true` if `a` and `b` refer to the same directory after
+/// Return `true` if `a` and `b` refer to the same path after
 /// canonicalization.  Falls back to a direct comparison when either
 /// canonicalization fails.
 #[cfg(unix)]
@@ -372,12 +411,14 @@ fn canonical_eq(a: &Path, b: &Path) -> bool {
     ca == cb
 }
 
-/// Return `true` when `path` exists and is executable by the current user.
+/// Return `true` when `path` is a regular file (symlinks followed) carrying an
+/// execute bit. Directories also carry execute bits but a shell's command
+/// lookup skips them, so the resolver must too.
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.metadata()
-        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
 
@@ -422,13 +463,11 @@ mod tests {
         let shim_dir = TempDir::new().unwrap();
         let real_dir = TempDir::new().unwrap();
 
-        // Create "git" in both dirs; the one in shim_dir must be skipped.
-        make_executable_file(shim_dir.path(), "git");
+        // The shim dir holds git-prism plus a legacy `git` symlink to it; the
+        // symlink must be skipped.
+        let shim_binary = make_executable_file(shim_dir.path(), "git-prism");
+        std::os::unix::fs::symlink(&shim_binary, shim_dir.path().join("git")).unwrap();
         let expected = make_executable_file(real_dir.path(), "git");
-
-        // Fake argv0 points into the shim dir.
-        let shim_binary = shim_dir.path().join("git-prism");
-        fs::write(&shim_binary, b"").unwrap();
 
         let path_val = format!(
             "{}:{}",
@@ -439,6 +478,32 @@ mod tests {
         let argv0 = shim_binary.to_string_lossy().into_owned();
         let result = resolve_real_git(&argv0, &env);
         assert_eq!(result, Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_finds_real_git_in_the_same_directory_as_git_prism() {
+        let dir = TempDir::new().unwrap();
+        let git_prism = make_executable_file(dir.path(), "git-prism");
+        let expected = make_executable_file(dir.path(), "git");
+
+        let env = env_with_path(&dir.path().display().to_string());
+        let argv0 = git_prism.to_string_lossy().into_owned();
+
+        assert_eq!(resolve_real_git(&argv0, &env), Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_finds_real_gh_in_the_same_directory_as_git_prism() {
+        let dir = TempDir::new().unwrap();
+        let git_prism = make_executable_file(dir.path(), "git-prism");
+        let expected = make_executable_file(dir.path(), "gh");
+
+        let env = env_with_path(&dir.path().display().to_string());
+        let argv0 = git_prism.to_string_lossy().into_owned();
+
+        assert_eq!(resolve_real_binary("gh", &argv0, &env), Some(expected));
     }
 
     #[cfg(unix)]
@@ -620,6 +685,37 @@ mod tests {
         // test is to pin the behavior so a future change to the fallback branch
         // (e.g. adding the missing shim-skip) is a visible diff here.
         let _ = resolve_real_git("/nonexistent/git-prism", &env);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_skips_a_directory_named_git_and_finds_the_real_one_after_it() {
+        let decoy = TempDir::new().unwrap();
+        fs::create_dir(decoy.path().join("git")).unwrap();
+        let real = TempDir::new().unwrap();
+        let real_git = make_executable_file(real.path(), "git");
+
+        let path_val = format!("{}:{}", decoy.path().display(), real.path().display());
+        let env = env_with_path(&path_val);
+
+        assert_eq!(
+            resolve_real_git("/nonexistent/git-prism", &env),
+            Some(real_git)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_follows_a_symlink_to_a_regular_file() {
+        let target_dir = TempDir::new().unwrap();
+        let target = make_executable_file(target_dir.path(), "real-git");
+        let link_dir = TempDir::new().unwrap();
+        let link = link_dir.path().join("git");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let env = env_with_path(&link_dir.path().display().to_string());
+
+        assert_eq!(resolve_real_git("/nonexistent/git-prism", &env), Some(link));
     }
 
     #[cfg(unix)]
